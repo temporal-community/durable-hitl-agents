@@ -1,4 +1,4 @@
-"""Data models for the courier fleet demo."""
+"""Data models for the Meltdown ice cream delivery fleet demo."""
 
 from __future__ import annotations
 
@@ -6,8 +6,10 @@ import enum
 from dataclasses import dataclass, field
 from typing import Any
 
+# --- Enums ---
 
-class CourierStatus(str, enum.Enum):
+
+class CrewStatus(str, enum.Enum):
     IDLE = "idle"
     EN_ROUTE_PICKUP = "en_route_pickup"
     PICKING_UP = "picking_up"
@@ -16,6 +18,23 @@ class CourierStatus(str, enum.Enum):
     RETURNING = "returning"
     FAILED = "failed"
     RECOVERED = "recovered"
+    DISCONNECTED = "disconnected"
+
+
+class OrderPriority(str, enum.Enum):
+    VIP = "vip"
+    STANDARD = "standard"
+
+
+class OrderStatus(str, enum.Enum):
+    PENDING = "pending"
+    ASSIGNED = "assigned"
+    PICKED_UP = "picked_up"
+    IN_TRANSIT = "in_transit"
+    DELIVERED = "delivered"
+    AT_RISK = "at_risk"
+    REROUTED = "rerouted"
+    CANCELLED = "cancelled"
 
 
 class LegType(str, enum.Enum):
@@ -23,19 +42,7 @@ class LegType(str, enum.Enum):
     DELIVERY = "delivery"
 
 
-class MissionStatus(str, enum.Enum):
-    PENDING = "pending"
-    ASSIGNED = "assigned"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-class MonitorDecision(str, enum.Enum):
-    CONTINUE = "CONTINUE"
-    REROUTE = "REROUTE"
-    RETURN_TO_BASE = "RETURN_TO_BASE"
-    ESCALATE = "ESCALATE"
+# --- Core entities ---
 
 
 @dataclass
@@ -48,166 +55,255 @@ class Coords:
 
 
 @dataclass
-class Courier:
-    courier_id: str
+class Crew:
+    crew_id: str
     position: Coords
     battery_pct: float = 100.0
-    status: CourierStatus = CourierStatus.IDLE
-    current_mission_id: str | None = None
+    status: CrewStatus = CrewStatus.IDLE
+    capacity: int = 3
+    current_orders: list[str] = field(default_factory=list)
     path_history: list[dict[str, float]] = field(default_factory=list)
+    disconnected: bool = False
+    recovering: bool = False
+    status_before_disconnect: CrewStatus = CrewStatus.IDLE
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "courier_id": self.courier_id,
+            "crew_id": self.crew_id,
             "position": self.position.to_dict(),
             "battery_pct": self.battery_pct,
             "status": self.status.value,
-            "current_mission_id": self.current_mission_id,
+            "capacity": self.capacity,
+            "current_orders": self.current_orders,
             "path_history": self.path_history,
+            "disconnected": self.disconnected,
+            "recovering": self.recovering,
         }
 
 
 @dataclass
-class Mission:
-    mission_id: str
-    order_label: str
-    pickup_coords: Coords
+class Order:
+    order_id: str
+    hotel: str
+    label: str
+    priority: OrderPriority
+    servings: int
     delivery_coords: Coords
-    assigned_courier_id: str | None = None
-    status: MissionStatus = MissionStatus.PENDING
+    assigned_crew_id: str | None = None
+    status: OrderStatus = OrderStatus.PENDING
+    deadline_minutes: int = 45
     status_log: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "mission_id": self.mission_id,
-            "order_label": self.order_label,
-            "pickup_coords": self.pickup_coords.to_dict(),
+            "order_id": self.order_id,
+            "hotel": self.hotel,
+            "label": self.label,
+            "priority": self.priority.value,
+            "servings": self.servings,
             "delivery_coords": self.delivery_coords.to_dict(),
-            "assigned_courier_id": self.assigned_courier_id,
+            "assigned_crew_id": self.assigned_crew_id,
             "status": self.status.value,
+            "deadline_minutes": self.deadline_minutes,
             "status_log": self.status_log,
         }
 
 
-# --- Serializable payloads for Temporal activities ---
+# --- Temporal activity payloads ---
+
+
+@dataclass
+class GenerateOrderInput:
+    order_number: int
+
+
+@dataclass
+class GenerateOrderOutput:
+    order_id: str
+    hotel: str
+    label: str
+    priority: str
+    servings: int
+    delivery_lat: float
+    delivery_lng: float
+    deadline_minutes: int
+    event: str
+
+
+@dataclass
+class ReasonAboutAssignmentInput:
+    order_id: str
+    hotel: str
+    delivery_lat: float
+    delivery_lng: float
+    priority: str
+    servings: int
+    deadline_minutes: int
+    event: str
+
+
+@dataclass
+class ReasonAboutAssignmentOutput:
+    crew_id: str
+    reasoning_summary: str
 
 
 @dataclass
 class NavigateInput:
-    courier_id: str
-    mission_id: str
+    crew_id: str
+    order_id: str
     target_lat: float
     target_lng: float
-    leg: LegType
-    steps: int = 8  # number of position updates to simulate
+    leg: str  # LegType value — "pickup" or "delivery"
+    steps: int = 8
+    waypoints: list[dict] | None = None  # [{"lat": float, "lng": float}, ...]
 
 
 @dataclass
 class NavigateOutput:
-    courier_id: str
+    crew_id: str
     arrived: bool
     final_lat: float
     final_lng: float
 
 
 @dataclass
-class PackageInput:
-    courier_id: str
-    mission_id: str
+class PickupInput:
+    crew_id: str
+    order_ids: list[str]
 
 
 @dataclass
-class PackageOutput:
-    courier_id: str
-    mission_id: str
+class PickupOutput:
+    crew_id: str
     success: bool
 
 
 @dataclass
-class AssignCourierInput:
-    mission_id: str
+class DeliverInput:
+    crew_id: str
+    order_id: str
 
 
 @dataclass
-class AssignCourierOutput:
-    courier_id: str
-    mission_id: str
+class DeliverOutput:
+    crew_id: str
+    order_id: str
+    success: bool
+
+
+# --- Agent tool payloads ---
 
 
 @dataclass
-class FleetStatusInput:
+class GetFleetStatusInput:
     pass
 
 
 @dataclass
-class FleetStatusOutput:
+class GetFleetStatusOutput:
     summary: str
 
 
 @dataclass
-class AssignCourierToMissionInput:
-    mission_id: str
-    courier_id: str
+class GetOrderPrioritiesInput:
+    pass
 
 
 @dataclass
-class AssignCourierToMissionOutput:
-    courier_id: str
-    mission_id: str
+class GetOrderPrioritiesOutput:
+    summary: str
+
+
+@dataclass
+class PublishAgentEventInput:
+    agent_name: str
+    event_type: str
+    content: str
+    summary: str = ""
+
+
+@dataclass
+class PublishAgentEventOutput:
     success: bool
 
 
-@dataclass
-class CheckBatteryInput:
-    courier_id: str
+# --- Customer change payloads ---
 
 
 @dataclass
-class CheckBatteryOutput:
-    battery_pct: float
-    is_critical: bool
+class CustomerChangeInput:
+    order_id: str
+    change_type: str  # "address_change" or "cancel"
+    new_details: str
+    new_lat: float | None = None
+    new_lng: float | None = None
 
 
 @dataclass
-class CheckWeatherInput:
-    courier_id: str
+class ExecuteCustomerChangeInput:
+    order_id: str
+    change_type: str
+    new_lat: float | None = None
+    new_lng: float | None = None
 
 
 @dataclass
-class CheckWeatherOutput:
-    condition: str
-    safe_to_fly: bool
+class ExecuteCustomerChangeOutput:
+    success: bool
+
+
+# --- Crew route workflow payloads ---
 
 
 @dataclass
-class HumanApprovalInput:
-    mission_id: str
-    reason: str
+class CrewRouteOrder:
+    order_id: str
+    hotel: str
+    delivery_lat: float
+    delivery_lng: float
 
 
 @dataclass
-class HumanApprovalOutput:
-    approved: bool
-    decision: str
+class CrewRouteInput:
+    crew_id: str
+
+
+# --- Agent events (for UI panel) ---
 
 
 @dataclass
-class GetMissionAssignmentInput:
-    mission_id: str
+class AgentEvent:
+    agent_name: str
+    event_type: str
+    content: str
+    timestamp: float
+    summary: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "agent_name": self.agent_name,
+            "event_type": self.event_type,
+            "content": self.content,
+            "timestamp": self.timestamp,
+            "summary": self.summary,
+        }
+
+
+# --- Workflow inputs ---
 
 
 @dataclass
-class GetMissionAssignmentOutput:
-    mission_id: str
-    courier_id: str | None
+class CrewDisconnectInput:
+    crew_id: str
 
 
 @dataclass
-class DemoEventConfig:
-    battery_drop_at_nav_step: int | None = None
-    battery_drop_to_pct: float = 15.0
-    weather_storm_at_nav_step: int | None = None
-    enabled: bool = False
+class AgentDisconnectInput:
+    agent_name: str  # "fleet_agent", "customer_agent", or "resolver"
 
 
-# --- Constants ---
+@dataclass
+class MeltdownDemoInput:
+    escalation_enabled: bool = False
+    max_orders: int = 20

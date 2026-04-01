@@ -1,9 +1,8 @@
 """
-Shared simulation state for the courier fleet demo.
+Shared simulation state for the Meltdown ice cream delivery demo.
 
-This module manages courier positions, mission status, and provides the
-"physical world" that activities read/write. It's backed by an in-memory
-dict so both the Temporal worker and the FastAPI server can access it
+Manages crew positions, order status, and agent events.
+Backed by in-memory state shared between the Temporal worker and FastAPI server
 (they run in the same process).
 """
 
@@ -14,195 +13,338 @@ import time
 from collections import deque
 from typing import Any
 
+from agent_fleet.locations import WAREHOUSE
 from agent_fleet.models import (
-    Coords, Courier, CourierStatus, Mission, MissionStatus, DemoEventConfig,
+    AgentEvent,
+    Coords,
+    Crew,
+    CrewStatus,
+    Order,
+    OrderPriority,
+    OrderStatus,
 )
-from agent_fleet.locations import WAREHOUSE, DELIVERY_DESTINATIONS
 
 _EVENT_LOG_MAX = 500
 
 
 class FleetState:
-    """Global mutable state for the courier simulation."""
+    """Global mutable state for the ice cream fleet simulation."""
 
     def __init__(self) -> None:
-        self.couriers: dict[str, Courier] = {}
-        self.missions: dict[str, Mission] = {}
+        self.crews: dict[str, Crew] = {}
+        self.orders: dict[str, Order] = {}
         self.event_log: deque[dict[str, Any]] = deque(maxlen=_EVENT_LOG_MAX)
+        self.agent_events: list[AgentEvent] = []
         self._lock = asyncio.Lock()
-        self.demo_events = DemoEventConfig()
-        self._weather_conditions: dict[str, str] = {}
-        self._nav_step_counters: dict[str, int] = {}
+        # Per-agent health tracking
+        self.agent_health: dict[str, bool] = {
+            "fleet_agent": True,
+            "customer_agent": True,
+            "resolver": True,
+        }
+        # Pending status-change notifications for agent events
+        self._recently_reconnected_agents: set[str] = set()
+        self._recently_reconnected_crews: set[str] = set()
+        self._recently_disconnected_crews: set[str] = set()
         self._init_state()
 
     def _init_state(self) -> None:
-        for i in range(1, 3):
-            cid = f"courier-{i}"
-            self.couriers[cid] = Courier(
-                courier_id=cid,
+        # 3 AI-Crews starting at the ice cream shop
+        for i in range(1, 4):
+            cid = f"ai-crew-{i}"
+            self.crews[cid] = Crew(
+                crew_id=cid,
                 position=Coords(lat=WAREHOUSE.lat, lng=WAREHOUSE.lng),
             )
-            self._weather_conditions[cid] = "clear"
-            self._nav_step_counters[cid] = 0
-        for mid, info in DELIVERY_DESTINATIONS.items():
-            self.missions[mid] = Mission(
-                mission_id=mid,
-                order_label=info["label"],
-                pickup_coords=Coords(lat=WAREHOUSE.lat, lng=WAREHOUSE.lng),
-                delivery_coords=info["coords"],
-            )
+        # Orders are registered dynamically as they are generated
 
     def reset(self) -> None:
         """Reset simulation to initial state for a fresh demo run."""
-        self.couriers.clear()
-        self.missions.clear()
+        self.crews.clear()
+        self.orders.clear()
         self.event_log.clear()
-        self.demo_events = DemoEventConfig()
-        self._weather_conditions.clear()
-        self._nav_step_counters.clear()
+        self.agent_events.clear()
+        self.agent_health = {
+            "fleet_agent": True,
+            "customer_agent": True,
+            "resolver": True,
+        }
+        self._recently_reconnected_agents.clear()
+        self._recently_reconnected_crews.clear()
+        self._recently_disconnected_crews.clear()
         self._init_state()
 
-    # --- Courier operations ---
+    # --- Per-crew disconnect / reconnect ---
 
-    async def update_courier_position(
-        self, courier_id: str, lat: float, lng: float
-    ) -> None:
+    async def disconnect_crew(self, crew_id: str) -> None:
+        """Mark a single crew as disconnected. Its activity will start failing."""
         async with self._lock:
-            c = self.couriers[courier_id]
+            c = self.crews[crew_id]
+            c.status_before_disconnect = c.status
+            c.disconnected = True
+            c.status = CrewStatus.DISCONNECTED
+            self._recently_disconnected_crews.add(crew_id)
+            self._log(f"[DISCONNECT] AI-Crew {crew_id} lost connection")
+
+    async def reconnect_crew(self, crew_id: str) -> None:
+        """Clear disconnect flag and enter per-crew recovery phase."""
+        async with self._lock:
+            c = self.crews[crew_id]
+            c.disconnected = False
+            c.recovering = True
+            self._recently_reconnected_crews.add(crew_id)
+            c.status = c.status_before_disconnect
+            self._log(f"[RECONNECT] AI-Crew {crew_id} reconnecting — replaying...")
+
+    async def mark_crew_recovery_complete(self, crew_id: str) -> None:
+        """Clear the per-crew recovery flag after replay completes."""
+        async with self._lock:
+            c = self.crews[crew_id]
+            c.recovering = False
+            self._log(f"[RECONNECT] AI-Crew {crew_id} replay complete — resumed")
+
+    async def is_crew_disconnected(self, crew_id: str) -> bool:
+        async with self._lock:
+            return self.crews[crew_id].disconnected
+
+    # --- Per-agent health ---
+
+    async def disconnect_agent(self, agent_name: str) -> None:
+        """Mark a specific agent as offline."""
+        async with self._lock:
+            self.agent_health[agent_name] = False
+            self._log(f"[AGENT OFFLINE] {agent_name} disconnected")
+
+    async def reconnect_agent(self, agent_name: str) -> None:
+        """Bring a specific agent back online."""
+        async with self._lock:
+            self.agent_health[agent_name] = True
+            self._recently_reconnected_agents.add(agent_name)
+            self._log(f"[AGENT ONLINE] {agent_name} reconnected")
+
+    async def is_agent_online(self, agent_name: str) -> bool:
+        async with self._lock:
+            return self.agent_health.get(agent_name, True)
+
+    async def is_agent_disconnected(self, agent_name: str) -> bool:
+        async with self._lock:
+            return not self.agent_health.get(agent_name, True)
+
+    async def consume_reconnected_agents(self) -> set[str]:
+        """Return and clear the set of recently-reconnected agents."""
+        async with self._lock:
+            result = set(self._recently_reconnected_agents)
+            self._recently_reconnected_agents.clear()
+            return result
+
+    async def consume_reconnected_crews(self) -> set[str]:
+        """Return and clear the set of recently-reconnected crews."""
+        async with self._lock:
+            result = set(self._recently_reconnected_crews)
+            self._recently_reconnected_crews.clear()
+            return result
+
+    async def consume_disconnected_crews(self) -> set[str]:
+        """Return and clear the set of recently-disconnected crews."""
+        async with self._lock:
+            result = set(self._recently_disconnected_crews)
+            self._recently_disconnected_crews.clear()
+            return result
+
+    async def get_agent_health(self) -> dict[str, bool]:
+        async with self._lock:
+            return dict(self.agent_health)
+
+    # --- Crew operations ---
+
+    async def update_crew_position(self, crew_id: str, lat: float, lng: float) -> None:
+        async with self._lock:
+            c = self.crews[crew_id]
             c.position = Coords(lat=lat, lng=lng)
             c.path_history.append({"lat": lat, "lng": lng, "t": time.time()})
 
-    async def set_courier_status(
-        self, courier_id: str, status: CourierStatus, mission_id: str | None = None
-    ) -> None:
+    async def set_crew_status(self, crew_id: str, status: CrewStatus) -> None:
         async with self._lock:
-            c = self.couriers[courier_id]
-            c.status = status
-            if mission_id is not None:
-                c.current_mission_id = mission_id
-            self._log(f"Courier {courier_id} -> {status.value}")
+            self.crews[crew_id].status = status
+            self._log(f"AI-Crew {crew_id} -> {status.value}")
 
-    # --- Battery operations ---
-
-    async def drain_battery(self, courier_id: str, amount: float) -> float:
-        """Decrement battery, return new value."""
+    async def get_crew_position(self, crew_id: str) -> tuple[float, float]:
         async with self._lock:
-            c = self.couriers[courier_id]
-            c.battery_pct = max(0.0, c.battery_pct - amount)
-            return c.battery_pct
-
-    async def get_battery(self, courier_id: str) -> float:
-        async with self._lock:
-            return self.couriers[courier_id].battery_pct
-
-    # --- Weather operations ---
-
-    async def get_weather(self, courier_id: str) -> str:
-        """Return weather condition, checking demo events for storm injection."""
-        async with self._lock:
-            return self._weather_conditions.get(courier_id, "clear")
-
-    # --- Nav step tracking & demo event triggers ---
-
-    async def increment_nav_step(self, courier_id: str) -> None:
-        """Increment nav step counter and apply demo event triggers."""
-        async with self._lock:
-            self._nav_step_counters[courier_id] = (
-                self._nav_step_counters.get(courier_id, 0) + 1
-            )
-            step = self._nav_step_counters[courier_id]
-
-            if not self.demo_events.enabled:
-                return
-
-            # Battery drop trigger
-            if (
-                self.demo_events.battery_drop_at_nav_step is not None
-                and step == self.demo_events.battery_drop_at_nav_step
-            ):
-                c = self.couriers[courier_id]
-                c.battery_pct = self.demo_events.battery_drop_to_pct
-                self._log(
-                    f"[DEMO EVENT] Courier {courier_id} battery dropped to "
-                    f"{self.demo_events.battery_drop_to_pct}%"
-                )
-
-            # Weather storm trigger
-            if (
-                self.demo_events.weather_storm_at_nav_step is not None
-                and step == self.demo_events.weather_storm_at_nav_step
-            ):
-                self._weather_conditions[courier_id] = "storm"
-                self._log(
-                    f"[DEMO EVENT] Storm conditions for courier {courier_id}"
-                )
-
-    async def set_demo_events(self, config: DemoEventConfig) -> None:
-        """Configure demo events (called from server endpoint)."""
-        async with self._lock:
-            self.demo_events = config
-
-    # --- Mission operations ---
-
-    async def assign_mission(self, mission_id: str, courier_id: str) -> None:
-        async with self._lock:
-            m = self.missions[mission_id]
-            m.assigned_courier_id = courier_id
-            m.status = MissionStatus.ASSIGNED
-            m.status_log.append(f"Assigned to {courier_id}")
-            self.couriers[courier_id].current_mission_id = mission_id
-            self._log(f"Mission {mission_id} assigned to {courier_id}")
-
-    async def update_mission_status(
-        self, mission_id: str, status: MissionStatus, note: str = ""
-    ) -> None:
-        async with self._lock:
-            m = self.missions[mission_id]
-            m.status = status
-            if note:
-                m.status_log.append(note)
-            self._log(f"Mission {mission_id} -> {status.value}: {note}")
-
-    # --- Query ---
-
-    async def get_idle_courier(self) -> str | None:
-        async with self._lock:
-            for c in self.couriers.values():
-                if c.status == CourierStatus.IDLE:
-                    return c.courier_id
-        return None
-
-    async def get_courier_position(self, courier_id: str) -> tuple[float, float]:
-        """Return (lat, lng) under the lock."""
-        async with self._lock:
-            c = self.couriers[courier_id]
+            c = self.crews[crew_id]
             return c.position.lat, c.position.lng
 
-    async def get_mission_courier(self, mission_id: str) -> str | None:
-        """Return the courier_id assigned to a mission, or None."""
+    async def crew_exists(self, crew_id: str) -> bool:
         async with self._lock:
-            m = self.missions.get(mission_id)
-            if m is None:
-                return None
-            return m.assigned_courier_id
+            return crew_id in self.crews
 
-    async def courier_exists(self, courier_id: str) -> bool:
-        """Check if a courier exists, under the lock."""
+    async def get_crew(self, crew_id: str) -> Crew | None:
         async with self._lock:
-            return courier_id in self.couriers
+            return self.crews.get(crew_id)
+
+    async def get_order(self, order_id: str) -> Order | None:
+        async with self._lock:
+            return self.orders.get(order_id)
+
+    # --- Order operations ---
+
+    async def register_order(
+        self,
+        order_id: str,
+        hotel: str,
+        label: str,
+        priority: str,
+        servings: int,
+        delivery_coords: Coords,
+        deadline_minutes: int,
+    ) -> None:
+        """Register a new dynamically-generated order."""
+        async with self._lock:
+            self.orders[order_id] = Order(
+                order_id=order_id,
+                hotel=hotel,
+                label=label,
+                priority=OrderPriority(priority),
+                servings=servings,
+                delivery_coords=delivery_coords,
+                deadline_minutes=deadline_minutes,
+            )
+            self._log(f"New order {order_id}: {label}")
+
+    async def assign_order_to_crew(self, crew_id: str, order_id: str) -> None:
+        """Assign a single order to a crew."""
+        async with self._lock:
+            c = self.crews[crew_id]
+            o = self.orders[order_id]
+            o.assigned_crew_id = crew_id
+            o.status = OrderStatus.ASSIGNED
+            o.status_log.append(f"Assigned to {crew_id}")
+            c.current_orders.append(order_id)
+            self._log(f"Order {order_id} assigned to {crew_id}")
+
+    async def update_order_status(self, order_id: str, status: OrderStatus, note: str = "") -> None:
+        async with self._lock:
+            o = self.orders[order_id]
+            o.status = status
+            if note:
+                o.status_log.append(note)
+            self._log(f"Order {order_id} -> {status.value}: {note}")
+
+    async def complete_order_delivery(self, crew_id: str, order_id: str) -> int:
+        """Mark an order delivered and remove it from the crew's active queue."""
+        async with self._lock:
+            o = self.orders[order_id]
+            o.status = OrderStatus.DELIVERED
+            o.status_log.append("Delivered successfully!")
+
+            crew = self.crews[crew_id]
+            if order_id in crew.current_orders:
+                crew.current_orders.remove(order_id)
+
+            self._log(f"Order {order_id} -> {OrderStatus.DELIVERED.value}: Delivered successfully!")
+            return len(crew.current_orders)
+
+    async def get_order_crew(self, order_id: str) -> str | None:
+        async with self._lock:
+            o = self.orders.get(order_id)
+            if o is None:
+                return None
+            return o.assigned_crew_id
+
+    async def get_crew_orders(self, crew_id: str) -> list[str]:
+        async with self._lock:
+            return list(self.crews[crew_id].current_orders)
+
+    async def update_order_delivery(self, order_id: str, new_lat: float, new_lng: float) -> None:
+        """Update delivery coordinates for an order (customer change)."""
+        async with self._lock:
+            o = self.orders[order_id]
+            o.delivery_coords = Coords(lat=new_lat, lng=new_lng)
+            o.status_log.append(f"Delivery address updated to ({new_lat:.4f}, {new_lng:.4f})")
+
+    async def cancel_order(self, order_id: str) -> None:
+        async with self._lock:
+            o = self.orders[order_id]
+            o.status = OrderStatus.CANCELLED
+            o.status_log.append("Cancelled by customer")
+            # Remove from crew's list
+            if o.assigned_crew_id:
+                c = self.crews[o.assigned_crew_id]
+                if order_id in c.current_orders:
+                    c.current_orders.remove(order_id)
+            self._log(f"Order {order_id} cancelled")
+
+    # --- Agent events (for UI panel) ---
+
+    async def publish_agent_event(
+        self, agent_name: str, event_type: str, content: str, summary: str = ""
+    ) -> None:
+        async with self._lock:
+            event = AgentEvent(
+                agent_name=agent_name,
+                event_type=event_type,
+                content=content,
+                timestamp=time.time(),
+                summary=summary,
+            )
+            self.agent_events.append(event)
+            self._log(f"[{agent_name}] {event_type}: {content[:80]}")
+
+    # --- Query ---
 
     async def snapshot(self) -> dict[str, Any]:
         """Return full state as JSON-serializable dict (for frontend)."""
         async with self._lock:
             return {
-                "couriers": {
-                    cid: c.to_dict() for cid, c in self.couriers.items()
-                },
-                "missions": {
-                    mid: m.to_dict() for mid, m in self.missions.items()
-                },
+                "crews": {cid: c.to_dict() for cid, c in self.crews.items()},
+                "orders": {oid: o.to_dict() for oid, o in self.orders.items()},
+                "agent_events": [e.to_dict() for e in self.agent_events],
                 "event_log": list(self.event_log),
+                "agent_health": dict(self.agent_health),
             }
+
+    async def get_fleet_summary(self) -> str:
+        """Return a text summary of fleet state for LLM consumption."""
+        async with self._lock:
+            lines = ["=== Fleet Status ==="]
+            for cid, c in self.crews.items():
+                orders_str = ", ".join(c.current_orders) if c.current_orders else "none"
+                disconnect_tag = " **DISCONNECTED**" if c.disconnected else ""
+                recovering_tag = " [recovering]" if c.recovering else ""
+                lines.append(
+                    f"  {cid}: status={c.status.value}, "
+                    f"orders=[{orders_str}]"
+                    f"{disconnect_tag}{recovering_tag}"
+                )
+            lines.append("=== Agent Health ===")
+            for agent_name, online in self.agent_health.items():
+                status = "ONLINE" if online else "OFFLINE"
+                lines.append(f"  {agent_name}: {status}")
+            lines.append("=== Orders ===")
+            for oid, o in self.orders.items():
+                lines.append(
+                    f"  {oid}: {o.hotel} ({o.label}), "
+                    f"priority={o.priority.value}, status={o.status.value}, "
+                    f"AI-Crew={o.assigned_crew_id or 'unassigned'}, "
+                    f"deadline={o.deadline_minutes}min"
+                )
+            return "\n".join(lines)
+
+    async def get_order_priorities_summary(self) -> str:
+        """Return order priority details for Customer Agent consumption."""
+        async with self._lock:
+            lines = ["=== Order Priorities ==="]
+            for oid, o in self.orders.items():
+                crew_status = ""
+                if o.assigned_crew_id:
+                    crew = self.crews.get(o.assigned_crew_id)
+                    if crew and crew.disconnected:
+                        crew_status = f" **CREW {o.assigned_crew_id} DISCONNECTED**"
+                lines.append(
+                    f"  {oid}: {o.hotel} — {o.priority.value.upper()}, "
+                    f"{o.servings} servings, deadline={o.deadline_minutes}min, "
+                    f"status={o.status.value}{crew_status}"
+                )
+            return "\n".join(lines)
 
     # --- Internals ---
 

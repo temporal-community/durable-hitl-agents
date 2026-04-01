@@ -1,424 +1,545 @@
 """
-Temporal workflows for the courier fleet demo.
+Temporal workflows for the Meltdown ice cream delivery demo.
 
-DeliveryMissionWorkflow — one per delivery. Interleaves courier agent steps
-with monitor agent evaluations. This is the workflow that will be "in flight"
-when we kill the worker to demonstrate recovery.
+MeltdownDemoWorkflow — main orchestrator. Starts 3 crew child workflows,
+generates orders on a timer, runs multi-agent reasoning per order, and
+signals the chosen crew. Handles customer-change signals concurrently.
 
-FleetDispatchWorkflow — starts all delivery missions. Uses the Dispatch Agent
-to reason about fleet assignments (ADK path) or hardcoded logic (mock path).
+CrewRouteWorkflow — per-crew continuous delivery loop (child workflow).
+Waits for orders via signal, picks up at the shop, delivers, repeats.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
-from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from google.adk.agents import Agent
-    from google.adk.runners import Runner
-    from google.adk.sessions import InMemorySessionService
-    from google.genai.types import Content, Part
+    import os
 
-    from agent_fleet.models import (
-        NavigateInput,
-        PackageInput,
-        AssignCourierInput,
-        AssignCourierOutput,
-        GetMissionAssignmentInput,
-        GetMissionAssignmentOutput,
-        MonitorDecision,
-        HumanApprovalInput,
-        LegType,
-    )
-    from agent_fleet.locations import WAREHOUSE, DELIVERY_DESTINATIONS
+    from agent_fleet.queues import AGENTS_QUEUE, DELIVERY_QUEUE
     from agent_fleet.activities import (
-        assign_courier,
+        deliver_order,
+        execute_customer_change,
+        generate_order,
+        get_route_polyline,
         navigate_to,
-        pickup_package,
-        deliver_package,
-        request_human_approval,
-        get_mission_assignment,
+        pickup_orders,
+        publish_agent_event,
+        reason_about_assignment,
+        register_assignment,
     )
-    from agent_fleet.agents import (
-        create_dispatch_agent,
-        create_courier_agent,
-        create_monitor_agent,
+    from agent_fleet.locations import WAREHOUSE
+    from agent_fleet.models import (
+        AgentDisconnectInput,
+        CrewDisconnectInput,
+        CrewRouteInput,
+        CrewRouteOrder,
+        CustomerChangeInput,
+        DeliverInput,
+        ExecuteCustomerChangeInput,
+        GenerateOrderInput,
+        MeltdownDemoInput,
+        NavigateInput,
+        PickupInput,
+        PublishAgentEventInput,
+        ReasonAboutAssignmentInput,
+        ReasonAboutAssignmentOutput,
     )
 
     _MOCK_MODE = not os.environ.get("GOOGLE_API_KEY")
 
-
-def _parse_monitor_decision(event) -> MonitorDecision:
-    """Defensively parse the monitor agent's decision from its response text."""
     try:
-        if hasattr(event, "content") and event.content and event.content.parts:
-            text = event.content.parts[0].text or ""
-        elif isinstance(event, str):
-            text = event
-        else:
-            text = str(event)
+        from google.adk.runners import Runner
+        from google.adk.sessions import InMemorySessionService
+        from google.genai.types import Content, Part
 
-        first_line = text.strip().split("\n")[0].strip().upper()
+        from agent_fleet.agents import create_order_assignment_agent
 
-        if "RETURN_TO_BASE" in first_line:
-            return MonitorDecision.RETURN_TO_BASE
-        if "ESCALATE" in first_line:
-            return MonitorDecision.ESCALATE
-        if "REROUTE" in first_line:
-            return MonitorDecision.REROUTE
-        return MonitorDecision.CONTINUE
-    except Exception:
-        return MonitorDecision.CONTINUE
+        _ADK_IMPORTS_OK = True
+    except ImportError:
+        _ADK_IMPORTS_OK = False
 
+FAST_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=30),
+    maximum_attempts=5,
+)
+NAV_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=3),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=30),
+)
 
-async def _run_agent_turn(runner: Runner, user_id: str, session_id: str, prompt: str) -> str:
-    """Run one agent turn and return the final text response.
-
-    NOTE: When temporalio.contrib.google_adk_agents ships, TemporalModel wraps
-    each LLM call as a Temporal activity automatically — making this replay-safe.
-    The Runner.run_async call itself becomes deterministic because TemporalModel
-    intercepts the model invocations and records/replays them via the activity system.
-    """
-    content = Content(parts=[Part(text=prompt)])
-    last_text = ""
-    async for event in runner.run_async(
-        user_id=user_id, session_id=session_id, new_message=content
-    ):
-        if hasattr(event, "content") and event.content and event.content.parts:
-            text = event.content.parts[0].text
-            if text:
-                last_text = text
-    return last_text
+MAX_ORDERS = 20
+ORDER_INTERVAL_SECONDS = 15
 
 
-@dataclass
-class DeliveryMissionInput:
-    """Input for DeliveryMissionWorkflow — keeps workflow params serializable."""
-    mission_id: str
-    escalation_enabled: bool = False
+# --- Per-crew continuous delivery workflow ---
 
 
 @workflow.defn
-class DeliveryMissionWorkflow:
+class CrewRouteWorkflow:
     """
-    Executes a single delivery: courier agent steps interleaved with
-    monitor agent evaluations.
+    Continuous delivery loop for a single AI-Crew.
 
-    ADK path: agent-driven with monitor checks after navigation steps.
-    Mock path: existing hardcoded 5-step sequence.
+    Waits for orders via signal, picks up at the shop, delivers to hotel,
+    then returns to waiting. Loops until told to stop.
     """
 
     def __init__(self) -> None:
-        self._human_decision: str | None = None
+        self._pending_orders: list[CrewRouteOrder] = []
+        self._stop = False
 
     @workflow.signal
-    async def human_decision(self, decision: str) -> None:
-        """Signal for human-in-the-loop escalation (only active when escalation enabled)."""
-        self._human_decision = decision
+    async def add_order(self, order: CrewRouteOrder) -> None:
+        self._pending_orders.append(order)
+
+    @workflow.signal
+    async def stop(self) -> None:
+        self._stop = True
 
     @workflow.run
-    async def run(self, inp: DeliveryMissionInput) -> str:
-        if _MOCK_MODE:
-            return await self._run_mock(inp.mission_id)
-        return await self._run_adk(inp.mission_id, inp.escalation_enabled)
+    async def run(self, inp: CrewRouteInput) -> str:
+        crew_id = inp.crew_id
+        delivered = []
+        current_lat, current_lng = WAREHOUSE.lat, WAREHOUSE.lng
 
-    async def _run_adk(self, mission_id: str, escalation_enabled: bool) -> str:
-        fast_retry = RetryPolicy(maximum_attempts=5)
-
-        dest = DELIVERY_DESTINATIONS[mission_id]["coords"]
-
-        # Create courier and monitor agents with separate sessions
-        courier_agent = create_courier_agent()
-        monitor_agent = create_monitor_agent()
-
-        session_service = InMemorySessionService()
-
-        courier_runner = Runner(
-            agent=courier_agent,
-            app_name="fleet_demo",
-            session_service=session_service,
-        )
-        monitor_runner = Runner(
-            agent=monitor_agent,
-            app_name="fleet_demo",
-            session_service=session_service,
-        )
-
-        await session_service.create_session(
-            app_name="fleet_demo", user_id=mission_id, session_id=f"{mission_id}-courier"
-        )
-        await session_service.create_session(
-            app_name="fleet_demo", user_id=mission_id, session_id=f"{mission_id}-monitor"
-        )
-
-        # Get the courier assignment via an activity (determinism-safe)
-        courier_id: str | None = None
-        while courier_id is None:
-            await workflow.sleep(timedelta(milliseconds=500))
-            assignment: GetMissionAssignmentOutput = await workflow.execute_activity(
-                get_mission_assignment,
-                GetMissionAssignmentInput(mission_id=mission_id),
-                start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=fast_retry,
-            )
-            courier_id = assignment.courier_id
-
-        # 4 step prompts for the courier agent
-        step_prompts = [
-            # Step 0: Navigate to warehouse (pickup point)
-            (
-                f"Navigate courier {courier_id} to the warehouse pickup point at "
-                f"lat={WAREHOUSE.lat}, lng={WAREHOUSE.lng} for mission {mission_id}. "
-                f"Use navigate_to with courier_id='{courier_id}', mission_id='{mission_id}', "
-                f"target_lat={WAREHOUSE.lat}, target_lng={WAREHOUSE.lng}, leg='pickup', steps=2.",
-                True,  # monitor after
-            ),
-            # Step 1: Pick up package
-            (
-                f"Pick up the package for mission {mission_id}. "
-                f"Use pickup_package with courier_id='{courier_id}', mission_id='{mission_id}'.",
-                False,
-            ),
-            # Step 2: Navigate to delivery destination
-            (
-                f"Navigate courier {courier_id} to the delivery destination at "
-                f"lat={dest.lat}, lng={dest.lng} for mission {mission_id}. "
-                f"Use navigate_to with courier_id='{courier_id}', mission_id='{mission_id}', "
-                f"target_lat={dest.lat}, target_lng={dest.lng}, leg='delivery', steps=10.",
-                True,  # monitor after
-            ),
-            # Step 3: Deliver package
-            (
-                f"Deliver the package for mission {mission_id}. "
-                f"Use deliver_package with courier_id='{courier_id}', mission_id='{mission_id}'.",
-                False,
-            ),
-        ]
-
-        for idx, (prompt, should_monitor) in enumerate(step_prompts):
-            # Execute courier agent step
-            await _run_agent_turn(
-                courier_runner, mission_id, f"{mission_id}-courier", prompt
-            )
-
-            # Monitor check after navigation steps
-            if should_monitor:
-                monitor_prompt = (
-                    f"Check safety conditions for courier {courier_id} on mission "
-                    f"{mission_id}. Check battery and weather, then decide: "
-                    f"CONTINUE or RETURN_TO_BASE."
+        while not self._stop:
+            # Wait for an order to arrive or stop signal
+            try:
+                await workflow.wait_condition(
+                    lambda: len(self._pending_orders) > 0 or self._stop,
+                    timeout=timedelta(minutes=10),
                 )
-                if escalation_enabled:
-                    monitor_prompt += " You may also decide ESCALATE if conditions are borderline."
+            except TimeoutError:
+                continue
 
-                monitor_response = await _run_agent_turn(
-                    monitor_runner, mission_id, f"{mission_id}-monitor", monitor_prompt
+            if self._stop:
+                break
+
+            # Process all pending orders
+            while self._pending_orders:
+                order = self._pending_orders.pop(0)
+
+                # Navigate to shop for pickup
+                pickup_waypoints = await workflow.execute_activity(
+                    get_route_polyline,
+                    args=[current_lat, current_lng, WAREHOUSE.lat, WAREHOUSE.lng],
+                    task_queue=DELIVERY_QUEUE,
+                    schedule_to_close_timeout=timedelta(minutes=5),
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=FAST_RETRY,
                 )
 
-                decision = _parse_monitor_decision(monitor_response)
+                await workflow.execute_activity(
+                    navigate_to,
+                    NavigateInput(
+                        crew_id=crew_id,
+                        order_id=order.order_id,
+                        target_lat=WAREHOUSE.lat,
+                        target_lng=WAREHOUSE.lng,
+                        leg="pickup",
+                        steps=15,
+                        waypoints=pickup_waypoints,
+                    ),
+                    task_queue=DELIVERY_QUEUE,
+                    schedule_to_close_timeout=timedelta(minutes=10),
+                    start_to_close_timeout=timedelta(seconds=120),
+                    heartbeat_timeout=timedelta(seconds=15),
+                    retry_policy=NAV_RETRY,
+                )
 
-                if decision == MonitorDecision.RETURN_TO_BASE:
-                    # Navigate back to warehouse
-                    abort_prompt = (
-                        f"ABORT: Return courier {courier_id} to base at "
-                        f"lat={WAREHOUSE.lat}, lng={WAREHOUSE.lng} for mission {mission_id}. "
-                        f"Use navigate_to with courier_id='{courier_id}', mission_id='{mission_id}', "
-                        f"target_lat={WAREHOUSE.lat}, target_lng={WAREHOUSE.lng}, leg='pickup', steps=8."
-                    )
-                    await _run_agent_turn(
-                        courier_runner, mission_id, f"{mission_id}-courier", abort_prompt
-                    )
-                    return f"Mission {mission_id} aborted — {courier_id} returned to base"
+                # Pick up
+                await workflow.execute_activity(
+                    pickup_orders,
+                    PickupInput(crew_id=crew_id, order_ids=[order.order_id]),
+                    task_queue=DELIVERY_QUEUE,
+                    schedule_to_close_timeout=timedelta(minutes=5),
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=FAST_RETRY,
+                )
 
-                if decision == MonitorDecision.ESCALATE and escalation_enabled:
-                    # Log the escalation
-                    await workflow.execute_activity(
-                        request_human_approval,
-                        HumanApprovalInput(
-                            mission_id=mission_id,
-                            reason=monitor_response,
-                        ),
-                        start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=fast_retry,
-                    )
-                    # Wait for human decision signal
-                    await workflow.wait_condition(
-                        lambda: self._human_decision is not None
-                    )
-                    human_choice = self._human_decision
-                    self._human_decision = None
+                current_lat, current_lng = WAREHOUSE.lat, WAREHOUSE.lng
 
-                    if human_choice == "abort":
-                        abort_prompt = (
-                            f"ABORT: Return courier {courier_id} to base at "
-                            f"lat={WAREHOUSE.lat}, lng={WAREHOUSE.lng} for mission {mission_id}. "
-                            f"Use navigate_to with courier_id='{courier_id}', mission_id='{mission_id}', "
-                            f"target_lat={WAREHOUSE.lat}, target_lng={WAREHOUSE.lng}, leg='pickup', steps=8."
-                        )
-                        await _run_agent_turn(
-                            courier_runner, mission_id, f"{mission_id}-courier", abort_prompt
-                        )
-                        return f"Mission {mission_id} aborted by human decision — {courier_id} returned to base"
+                # Navigate to hotel
+                delivery_waypoints = await workflow.execute_activity(
+                    get_route_polyline,
+                    args=[
+                        current_lat,
+                        current_lng,
+                        order.delivery_lat,
+                        order.delivery_lng,
+                    ],
+                    task_queue=DELIVERY_QUEUE,
+                    schedule_to_close_timeout=timedelta(minutes=5),
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=FAST_RETRY,
+                )
 
-                # CONTINUE — proceed to next step
+                await workflow.execute_activity(
+                    navigate_to,
+                    NavigateInput(
+                        crew_id=crew_id,
+                        order_id=order.order_id,
+                        target_lat=order.delivery_lat,
+                        target_lng=order.delivery_lng,
+                        leg="delivery",
+                        steps=30,
+                        waypoints=delivery_waypoints,
+                    ),
+                    task_queue=DELIVERY_QUEUE,
+                    schedule_to_close_timeout=timedelta(minutes=10),
+                    start_to_close_timeout=timedelta(seconds=120),
+                    heartbeat_timeout=timedelta(seconds=15),
+                    retry_policy=NAV_RETRY,
+                )
 
-        return f"Mission {mission_id} completed by {courier_id}"
+                current_lat, current_lng = order.delivery_lat, order.delivery_lng
 
-    async def _run_mock(self, mission_id: str) -> str:
-        """Hardcoded fallback when no GOOGLE_API_KEY is set."""
-        retry_policy = RetryPolicy(
-            initial_interval=timedelta(seconds=2),
-            maximum_attempts=10,
-        )
-        fast_retry = RetryPolicy(maximum_attempts=5)
+                # Deliver
+                await workflow.execute_activity(
+                    deliver_order,
+                    DeliverInput(crew_id=crew_id, order_id=order.order_id),
+                    task_queue=DELIVERY_QUEUE,
+                    schedule_to_close_timeout=timedelta(minutes=5),
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=FAST_RETRY,
+                )
+                delivered.append(order.order_id)
 
-        # Step 1: Assign a courier
-        assignment: AssignCourierOutput = await workflow.execute_activity(
-            assign_courier,
-            AssignCourierInput(mission_id=mission_id),
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=fast_retry,
-        )
-        courier_id = assignment.courier_id
-
-        # Step 2: Navigate to warehouse (pickup point)
-        await workflow.execute_activity(
-            navigate_to,
-            NavigateInput(
-                courier_id=courier_id,
-                mission_id=mission_id,
-                target_lat=WAREHOUSE.lat,
-                target_lng=WAREHOUSE.lng,
-                leg=LegType.PICKUP,
-                steps=2,  # short trip
-            ),
-            start_to_close_timeout=timedelta(seconds=120),
-            heartbeat_timeout=timedelta(seconds=5),
-            retry_policy=retry_policy,
-        )
-
-        # Step 3: Pick up package
-        await workflow.execute_activity(
-            pickup_package,
-            PackageInput(courier_id=courier_id, mission_id=mission_id),
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=fast_retry,
-        )
-
-        # Step 4: Navigate to delivery destination
-        dest = DELIVERY_DESTINATIONS[mission_id]["coords"]
-        await workflow.execute_activity(
-            navigate_to,
-            NavigateInput(
-                courier_id=courier_id,
-                mission_id=mission_id,
-                target_lat=dest.lat,
-                target_lng=dest.lng,
-                leg=LegType.DELIVERY,
-                steps=10,  # ~8 seconds of flight — plenty of time to kill
-            ),
-            start_to_close_timeout=timedelta(seconds=120),
-            heartbeat_timeout=timedelta(seconds=5),
-            retry_policy=retry_policy,
-        )
-
-        # Step 5: Deliver package
-        await workflow.execute_activity(
-            deliver_package,
-            PackageInput(courier_id=courier_id, mission_id=mission_id),
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=fast_retry,
-        )
-
-        return f"Mission {mission_id} completed by {courier_id}"
+        return f"AI-Crew {crew_id} completed {len(delivered)} deliveries: {delivered}"
 
 
-@dataclass
-class FleetDispatchInput:
-    """Input for FleetDispatchWorkflow."""
-    mission_ids: list[str]
-    escalation_enabled: bool = False
+# --- Main demo orchestrator ---
 
 
 @workflow.defn
-class FleetDispatchWorkflow:
+class MeltdownDemoWorkflow:
     """
-    Dispatches all pending missions.
+    Orchestrates the Meltdown demo with continuous order flow.
 
-    ADK path: uses Dispatch Agent to reason about assignments, then starts
-    child DeliveryMissionWorkflow per mission.
-    Mock path: starts child workflows directly (assignment happens inside).
+    Starts 3 crew child workflows, generates orders on a timer,
+    runs multi-agent reasoning per order, and signals the chosen crew.
+    Handles customer-change signals concurrently.
     """
+
+    def __init__(self) -> None:
+        self._pending_changes: list[CustomerChangeInput] = []
+        self._pending_approvals: list[bool] = []
+        self._routes_done: bool = False
+        self._disconnected_crews: set[str] = set()
+        self._disconnected_agents: set[str] = set()
+
+    # --- Signals ---
+
+    @workflow.signal
+    async def customer_change(self, change: CustomerChangeInput) -> None:
+        self._pending_changes.append(change)
+
+    @workflow.signal
+    async def change_approved(self, approved: bool) -> None:
+        self._pending_approvals.append(approved)
+
+    @workflow.signal
+    async def crew_disconnected(self, inp: CrewDisconnectInput) -> None:
+        self._disconnected_crews.add(inp.crew_id)
+        workflow.logger.info(f"Crew {inp.crew_id} disconnected — activities will retry")
+
+    @workflow.signal
+    async def crew_reconnected(self, inp: CrewDisconnectInput) -> None:
+        self._disconnected_crews.discard(inp.crew_id)
+        workflow.logger.info(f"Crew {inp.crew_id} reconnected — resuming")
+
+    @workflow.signal
+    async def agent_disconnected(self, inp: AgentDisconnectInput) -> None:
+        self._disconnected_agents.add(inp.agent_name)
+        workflow.logger.info(f"Agent {inp.agent_name} disconnected")
+
+    @workflow.signal
+    async def agent_reconnected(self, inp: AgentDisconnectInput) -> None:
+        self._disconnected_agents.discard(inp.agent_name)
+        workflow.logger.info(f"Agent {inp.agent_name} reconnected")
+
+    # --- Queries ---
+
+    @workflow.query
+    def get_status(self) -> dict:
+        return {
+            "routes_done": self._routes_done,
+            "pending_changes": len(self._pending_changes),
+            "disconnected_crews": list(self._disconnected_crews),
+            "disconnected_agents": list(self._disconnected_agents),
+        }
+
+    # --- Main entry ---
 
     @workflow.run
-    async def run(self, inp: FleetDispatchInput) -> list[str]:
-        if _MOCK_MODE:
-            return await self._run_mock(inp.mission_ids)
-        return await self._run_adk(inp.mission_ids, inp.escalation_enabled)
+    async def run(self, inp: MeltdownDemoInput) -> str:
+        workflow.logger.info(f"Meltdown demo starting (escalation={inp.escalation_enabled})")
 
-    async def _run_adk(self, mission_ids: list[str], escalation_enabled: bool) -> list[str]:
-        # Create dispatch agent
-        dispatch_agent = create_dispatch_agent()
+        # Start 3 empty crew child workflows
+        route_handles = {}
+        for i in range(1, 4):
+            crew_id = f"ai-crew-{i}"
+            handle = await workflow.start_child_workflow(
+                CrewRouteWorkflow.run,
+                CrewRouteInput(crew_id=crew_id),
+                id=f"route-{crew_id}",
+            )
+            route_handles[crew_id] = handle
+
+        # Run order generation and signal processing concurrently
+        order_task = asyncio.create_task(self._order_generation_loop(route_handles, inp.max_orders))
+        signal_task = asyncio.create_task(self._signal_loop())
+
+        # Wait for order generation to complete (all orders generated + delivered)
+        await order_task
+
+        # Stop all crews
+        self._routes_done = True
+        for handle in route_handles.values():
+            try:
+                await handle.signal(CrewRouteWorkflow.stop)
+            except Exception:
+                pass
+
+        await signal_task
+
+        # Wait for crews to finish current deliveries
+        results = []
+        for crew_id, handle in route_handles.items():
+            try:
+                result = await handle
+                results.append(result)
+            except Exception as e:
+                results.append(f"{crew_id}: {e}")
+
+        mode = "ADK" if (not _MOCK_MODE and _ADK_IMPORTS_OK) else "mock"
+        return f"Meltdown demo complete ({mode}). Results: {results}"
+
+    # --- Order generation loop ---
+
+    async def _run_adk_assignment(
+        self, inp: ReasonAboutAssignmentInput
+    ) -> ReasonAboutAssignmentOutput | None:
+        """Run ADK agents for order assignment. Returns None on failure."""
+        agent = create_order_assignment_agent()
+        if agent is None:
+            return None
+
         session_service = InMemorySessionService()
-        dispatch_runner = Runner(
-            agent=dispatch_agent,
-            app_name="fleet_demo",
+        runner = Runner(
+            agent=agent,
+            app_name="meltdown_demo",
             session_service=session_service,
         )
-        await session_service.create_session(
-            app_name="fleet_demo", user_id="dispatch", session_id="dispatch-session"
+
+        session = await session_service.create_session(
+            app_name="meltdown_demo",
+            user_id="workflow",
         )
 
-        # Ask dispatch agent to assign missions
-        missions_list = ", ".join(mission_ids)
-        dispatch_prompt = (
-            f"You have the following pending missions: {missions_list}. "
-            f"First check the fleet status, then assign each mission to an "
-            f"available courier. Assign courier-1 to {mission_ids[0]} and "
-            f"courier-2 to {mission_ids[1] if len(mission_ids) > 1 else mission_ids[0]}."
-        )
-        await _run_agent_turn(
-            dispatch_runner, "dispatch", "dispatch-session", dispatch_prompt
+        prompt = (
+            f"NEW ORDER — assign to the best crew:\n"
+            f"Order ID: {inp.order_id}\n"
+            f"Hotel: {inp.hotel}\n"
+            f"Event: {inp.event}\n"
+            f"Priority: {inp.priority}\n"
+            f"Servings: {inp.servings}\n"
+            f"Deadline: {inp.deadline_minutes} minutes\n"
+            f"Coordinates: ({inp.delivery_lat}, {inp.delivery_lng})\n\n"
+            f"Assess fleet capacity and customer priority, then the resolver "
+            f"MUST call tool_submit_assignment with the crew_id and reasoning."
         )
 
-        # Start child workflows for each mission (staggered)
-        handles = []
-        for i, mid in enumerate(mission_ids):
-            if i > 0:
-                await workflow.sleep(timedelta(seconds=3))
+        events_count = 0
+        try:
+            async for event in runner.run_async(
+                user_id="workflow",
+                session_id=session.id,
+                new_message=Content(parts=[Part(text=prompt)]),
+            ):
+                events_count += 1
+        except Exception as e:
+            workflow.logger.error(f"ADK assignment failed: {e}")
+            return None
 
-            handle = await workflow.start_child_workflow(
-                DeliveryMissionWorkflow.run,
-                DeliveryMissionInput(
-                    mission_id=mid,
-                    escalation_enabled=escalation_enabled,
+        updated_session = await session_service.get_session(
+            app_name="meltdown_demo",
+            user_id="workflow",
+            session_id=session.id,
+        )
+
+        assignment_dict = (updated_session.state or {}).get("assignment")
+        if not assignment_dict:
+            workflow.logger.warning("ADK assignment resolver did not submit an assignment")
+            return None
+
+        workflow.logger.info(
+            f"ADK assignment complete: {events_count} events, crew={assignment_dict['crew_id']}"
+        )
+        return ReasonAboutAssignmentOutput(
+            crew_id=assignment_dict["crew_id"],
+            reasoning_summary=assignment_dict.get("reasoning_summary", "ADK assignment"),
+        )
+
+    async def _order_generation_loop(
+        self,
+        route_handles: dict,
+        max_orders: int = MAX_ORDERS,
+    ) -> None:
+        """Generate orders on a timer and assign via multi-agent reasoning."""
+        for order_num in range(1, max_orders + 1):
+            if self._routes_done:
+                break
+
+            # Generate a new order
+            order = await workflow.execute_activity(
+                generate_order,
+                GenerateOrderInput(order_number=order_num),
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=FAST_RETRY,
+            )
+
+            assignment_input = ReasonAboutAssignmentInput(
+                order_id=order.order_id,
+                hotel=order.hotel,
+                delivery_lat=order.delivery_lat,
+                delivery_lng=order.delivery_lng,
+                priority=order.priority,
+                servings=order.servings,
+                deadline_minutes=order.deadline_minutes,
+                event=order.event,
+            )
+
+            assignment = None
+
+            # Try ADK agents first when available
+            if not _MOCK_MODE and _ADK_IMPORTS_OK:
+                assignment = await self._run_adk_assignment(assignment_input)
+                if assignment is not None:
+                    # ADK succeeded — register the assignment in fleet state via activity
+                    await workflow.execute_activity(
+                        register_assignment,
+                        args=[assignment.crew_id, order.order_id],
+                        task_queue=AGENTS_QUEUE,
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=FAST_RETRY,
+                    )
+
+            # Fallback to mock if ADK unavailable or failed
+            if assignment is None:
+                assignment = await workflow.execute_activity(
+                    reason_about_assignment,
+                    assignment_input,
+                    task_queue=AGENTS_QUEUE,
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=FAST_RETRY,
+                )
+
+            # Signal the chosen crew
+            crew_id = assignment.crew_id
+            if crew_id in route_handles:
+                await route_handles[crew_id].signal(
+                    CrewRouteWorkflow.add_order,
+                    CrewRouteOrder(
+                        order_id=order.order_id,
+                        hotel=order.hotel,
+                        delivery_lat=order.delivery_lat,
+                        delivery_lng=order.delivery_lng,
+                    ),
+                )
+
+            workflow.logger.info(f"Order {order_num}/{MAX_ORDERS}: {order.order_id} -> {crew_id}")
+
+            # Wait before next order
+            if order_num < max_orders:
+                await workflow.sleep(timedelta(seconds=ORDER_INTERVAL_SECONDS))
+
+    # --- Signal processing loop ---
+
+    def _has_pending_signal(self) -> bool:
+        return len(self._pending_changes) > 0
+
+    async def _signal_loop(self) -> None:
+        while not self._routes_done:
+            try:
+                await workflow.wait_condition(
+                    lambda: self._has_pending_signal() or self._routes_done,
+                    timeout=timedelta(seconds=2),
+                )
+            except TimeoutError:
+                continue
+
+            if self._routes_done:
+                break
+
+            await self._drain_pending_signals()
+
+    async def _drain_pending_signals(self) -> None:
+        while self._pending_changes:
+            change = self._pending_changes.pop(0)
+            await self._process_customer_change(change)
+
+    # --- Customer change handling ---
+
+    async def _process_customer_change(self, change: CustomerChangeInput) -> None:
+        await workflow.execute_activity(
+            publish_agent_event,
+            PublishAgentEventInput(
+                agent_name="customer_agent",
+                event_type="customer_request",
+                content=(
+                    f"Customer change request for {change.order_id}: "
+                    f"{change.change_type} — {change.new_details}"
                 ),
-                id=f"delivery-{mid}",
+            ),
+            task_queue=DELIVERY_QUEUE,
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=FAST_RETRY,
+        )
+
+        await workflow.wait_condition(lambda: len(self._pending_approvals) > 0)
+        approved = self._pending_approvals.pop(0)
+
+        if approved:
+            await workflow.execute_activity(
+                execute_customer_change,
+                ExecuteCustomerChangeInput(
+                    order_id=change.order_id,
+                    change_type=change.change_type,
+                    new_lat=change.new_lat,
+                    new_lng=change.new_lng,
+                ),
+                task_queue=DELIVERY_QUEUE,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=FAST_RETRY,
             )
-            handles.append(handle)
-
-        results = await asyncio.gather(*handles)
-        return list(results)
-
-    async def _run_mock(self, mission_ids: list[str]) -> list[str]:
-        """Hardcoded fallback — starts child workflows directly."""
-        handles = []
-        for i, mid in enumerate(mission_ids):
-            if i > 0:
-                await workflow.sleep(timedelta(seconds=3))
-
-            handle = await workflow.start_child_workflow(
-                DeliveryMissionWorkflow.run,
-                DeliveryMissionInput(mission_id=mid),
-                id=f"delivery-{mid}",
+            await workflow.execute_activity(
+                publish_agent_event,
+                PublishAgentEventInput(
+                    agent_name="resolver",
+                    event_type="change_executed",
+                    content=f"Customer change approved and executed for {change.order_id}: {change.new_details}",
+                ),
+                task_queue=DELIVERY_QUEUE,
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=FAST_RETRY,
             )
-            handles.append(handle)
-
-        results = await asyncio.gather(*handles)
-        return list(results)
+        else:
+            await workflow.execute_activity(
+                publish_agent_event,
+                PublishAgentEventInput(
+                    agent_name="resolver",
+                    event_type="change_rejected",
+                    content=f"Customer change rejected for {change.order_id}",
+                ),
+                task_queue=DELIVERY_QUEUE,
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=FAST_RETRY,
+            )

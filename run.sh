@@ -11,8 +11,16 @@ if [ -f .env ]; then
     set +a
 fi
 
-# Activate venv
-source venv/bin/activate
+# Create venv if it doesn't exist
+if [ ! -d venv ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv venv
+    source venv/bin/activate
+    echo "Installing dependencies..."
+    pip install -e ".[dev]"
+else
+    source venv/bin/activate
+fi
 
 cleanup() {
     echo ""
@@ -40,7 +48,7 @@ until temporal operator cluster health 2>/dev/null | grep -q "SERVING"; do
 done
 
 echo "Starting agent fleet server..."
-python -m agent_fleet.server &
+python3 -m agent_fleet.server &
 SERVER_PID=$!
 
 echo ""
