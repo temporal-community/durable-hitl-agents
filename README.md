@@ -20,7 +20,7 @@ Orders auto-generate on a timer from Las Vegas Strip venues. AI agents reason ab
 | Scenario | What Happens | What It Shows |
 |----------|-------------|---------------|
 | **Agent Disconnect** | Take an agent offline mid-reasoning | ADK degrades gracefully — Resolver compensates with available data. Temporal records every step that completed. Two resilience layers. |
-| **Crew Disconnect** | Take a single AI-Crew offline mid-delivery | Temporal retries the navigation activity indefinitely until reconnect — crew resumes exactly where it stopped |
+| **Crew Disconnect** | Take a single AI-Crew offline mid-delivery | Workflow cancels the running activity via cancellation scope, waits for reconnect signal, resumes. Everything flows through Temporal — API just sends signals. |
 | **Customer Change** | Submit an address change or cancellation | Human-in-the-loop: workflow pauses on `wait_condition`, resumes immediately on signal — no polling, no timeout |
 
 ## Architecture
@@ -32,20 +32,23 @@ Orders auto-generate on a timer from Las Vegas Strip venues. AI agents reason ab
 └──────────┬───────────────────────┘
            │
 ┌──────────▼────────────────────────────────────────────┐
-│  Python process (3 workers, 1 FleetState singleton)   │
+│  Python process (3 workers)                           │
 │                                                       │
-│  meltdown-orchestration worker                        │
-│  ├─ MeltdownDemoWorkflow                              │
-│  │    ├─ generate_order()       timer-based, up to 20 │
+│  meltdown-workflows worker (workflows only, no acts)  │
+│  ├─ MeltdownDemoWorkflow  (source of truth for state) │
+│  │    ├─ owns crew positions, order assignments        │
+│  │    ├─ builds CrewSnapshots → passes to activities  │
 │  │    ├─ reason_about_assignment() → AGENTS queue     │
 │  │    └─ CrewRouteWorkflow x3   child workflows       │
 │  └─ CrewRouteWorkflow                                 │
+│       ├─ owns disconnect state + cancellation scopes  │
 │       ├─ navigate_to()  → DELIVERY queue (heartbeats) │
 │       ├─ pickup_orders() → DELIVERY queue             │
-│       └─ deliver_order() → DELIVERY queue             │
+│       ├─ deliver_order() → DELIVERY queue             │
+│       └─ signals parent on delivery complete          │
 │                                                       │
 │  meltdown-delivery worker (max 20 concurrent)         │
-│  └─ navigation, pickup, deliver, customer changes     │
+│  └─ navigation, pickup, deliver, state sync, changes  │
 │                                                       │
 │  meltdown-agents worker (max 5 concurrent)            │
 │  └─ ADK assignment pipeline (via TemporalModel)       │
@@ -56,6 +59,10 @@ Orders auto-generate on a timer from Las Vegas Strip venues. AI agents reason ab
 │                         tool_search_hotel_context     │
 │       Assignment Resolver → tool_submit_assignment    │
 │       model=TemporalModel(), tools=activity_tool()    │
+│                                                       │
+│  FleetState singleton (UI projection only)            │
+│  └─ activities write here for frontend WebSocket      │
+│     workflows and activities never read it for logic  │
 └───────────────────────────────────────────────────────┘
            │
 ┌──────────▼───────────────────────┐
@@ -75,7 +82,7 @@ Orders auto-generate on a timer from Las Vegas Strip venues. AI agents reason ab
 
 Fleet Agent, Customer Agent, and Resolver are LLM Agents. The outer `order_assignment` pipeline is an Orchestrator Agent — it sequences them with no model of its own. Temporal never sees the orchestration logic; it only sees individual LLM calls and tool calls as discrete activities.
 
-**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. All three workers share the `FleetState` singleton because they run in the same process.
+**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs only workflows (no activities) — dedicated to replay. All three workers run in the same process; `FleetState` is a write-only UI projection that activities update for the frontend WebSocket.
 
 ### Activity-backed tools
 
@@ -124,22 +131,22 @@ echo 'export GOOGLE_CSE_ID="your-cse-id"' >> .env  # optional
 ## Demo Flow
 
 1. **Start Deliveries** — Orders auto-generate every 15s. AI agents reason per-order (Fleet Agent checks positions/capacity, Customer Agent evaluates priority) and assign to the best crew. Crews continuously pick up from Frosty's Ice Cream and deliver.
-2. **Agent Disconnect** — Take an agent offline → Resolver compensates with available data → reconnect → full reasoning resumes
-3. **Crew Disconnect** — Select an AI-Crew → disconnect → activities retry until reconnect → seamless resume
+2. **Crew Disconnect** — Select an AI-Crew → disconnect signal → workflow cancels activity → reconnect signal → seamless resume. Everything flows through Temporal.
+3. **Agent Disconnect** — Take an agent offline → Resolver compensates with available data → reconnect → full reasoning resumes
 4. **Customer Change** — Submit a change → workflow pauses waiting for approval → approve/reject → order updated or discarded
 
 ## Key Files
 
 | File | What it does |
 |------|-------------|
-| `agent_fleet/models.py` | Dataclass models for all Temporal payloads |
-| `agent_fleet/simulation.py` | In-memory fleet state (singleton shared by worker + server) |
-| `agent_fleet/activities.py` | Temporal activities — navigation, delivery, Maps API, agent tools |
-| `agent_fleet/workflows.py` | Temporal workflows — orchestration, signals, queries |
+| `agent_fleet/models.py` | Dataclass models for all Temporal payloads (incl. `CrewSnapshot`) |
+| `agent_fleet/simulation.py` | FleetState — UI projection only (activities write, nothing reads for logic) |
+| `agent_fleet/activities.py` | Temporal activities — navigation, delivery, Maps API, state sync, agent tools |
+| `agent_fleet/workflows.py` | Temporal workflows — owns crew state, cancellation scopes, signals, queries |
 | `agent_fleet/agents.py` | ADK agent composition — Fleet, Customer, Assignment Resolver |
-| `agent_fleet/queues.py` | Task queue name constants (orchestration / delivery / agents) |
-| `agent_fleet/worker.py` | Three Temporal workers on three task queues, all in-process |
-| `agent_fleet/server.py` | FastAPI server — APIs, WebSocket, frontend |
+| `agent_fleet/queues.py` | Task queue name constants (workflows / delivery / agents) |
+| `agent_fleet/worker.py` | Three Temporal workers — workflow-only, delivery, agents |
+| `agent_fleet/server.py` | FastAPI server — signal-only API, WebSocket, frontend |
 | `agent_fleet/locations.py` | Las Vegas Strip venue pool and random order generation |
 | `frontend/index.html` | Single-file SPA — Leaflet map, agent panels, overlays |
 

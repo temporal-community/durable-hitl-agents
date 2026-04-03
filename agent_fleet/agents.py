@@ -16,28 +16,13 @@ Architecture:
 
 from __future__ import annotations
 
-import os
 from datetime import timedelta
 
+from google.adk.agents import Agent, ParallelAgent, SequentialAgent
+from google.adk.tools import ToolContext
 from temporalio.common import RetryPolicy
-
-try:
-    from google.adk.agents import Agent, ParallelAgent, SequentialAgent
-    from google.adk.tools import ToolContext
-
-    _ADK_AVAILABLE = True
-except ImportError:
-    Agent = ParallelAgent = SequentialAgent = ToolContext = None
-    _ADK_AVAILABLE = False
-
-try:
-    from temporalio.contrib.google_adk_agents import TemporalModel
-    from temporalio.contrib.google_adk_agents.workflow import activity_tool
-
-    _TEMPORAL_ADK_AVAILABLE = True
-except ImportError:
-    TemporalModel = activity_tool = None
-    _TEMPORAL_ADK_AVAILABLE = False
+from temporalio.contrib.google_adk_agents import TemporalModel
+from temporalio.contrib.google_adk_agents.workflow import activity_tool
 
 from agent_fleet.activities import (
     tool_get_fleet_status,
@@ -46,9 +31,8 @@ from agent_fleet.activities import (
     tool_publish_agent_event,
     tool_search_hotel_context,
 )
+from agent_fleet.config import GEMINI_MODEL
 from agent_fleet.queues import AGENTS_QUEUE
-
-DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 _TOOL_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
@@ -60,55 +44,35 @@ _TOOL_RETRY = RetryPolicy(
 
 # --- Activity-backed tools (each tool call becomes a Temporal activity) ---
 
-_fleet_status_tool = (
-    activity_tool(
-        tool_get_fleet_status,
-        task_queue=AGENTS_QUEUE,
-        start_to_close_timeout=timedelta(seconds=10),
-        retry_policy=_TOOL_RETRY,
-    )
-    if _TEMPORAL_ADK_AVAILABLE
-    else None
+_fleet_status_tool = activity_tool(
+    tool_get_fleet_status,
+    task_queue=AGENTS_QUEUE,
+    start_to_close_timeout=timedelta(seconds=10),
+    retry_policy=_TOOL_RETRY,
 )
-_order_priorities_tool = (
-    activity_tool(
-        tool_get_order_priorities,
-        task_queue=AGENTS_QUEUE,
-        start_to_close_timeout=timedelta(seconds=10),
-        retry_policy=_TOOL_RETRY,
-    )
-    if _TEMPORAL_ADK_AVAILABLE
-    else None
+_order_priorities_tool = activity_tool(
+    tool_get_order_priorities,
+    task_queue=AGENTS_QUEUE,
+    start_to_close_timeout=timedelta(seconds=10),
+    retry_policy=_TOOL_RETRY,
 )
-_publish_event_tool = (
-    activity_tool(
-        tool_publish_agent_event,
-        task_queue=AGENTS_QUEUE,
-        start_to_close_timeout=timedelta(seconds=10),
-        retry_policy=_TOOL_RETRY,
-    )
-    if _TEMPORAL_ADK_AVAILABLE
-    else None
+_publish_event_tool = activity_tool(
+    tool_publish_agent_event,
+    task_queue=AGENTS_QUEUE,
+    start_to_close_timeout=timedelta(seconds=10),
+    retry_policy=_TOOL_RETRY,
 )
-_route_info_tool = (
-    activity_tool(
-        tool_get_route_info,
-        task_queue=AGENTS_QUEUE,
-        start_to_close_timeout=timedelta(seconds=15),
-        retry_policy=_TOOL_RETRY,
-    )
-    if _TEMPORAL_ADK_AVAILABLE
-    else None
+_route_info_tool = activity_tool(
+    tool_get_route_info,
+    task_queue=AGENTS_QUEUE,
+    start_to_close_timeout=timedelta(seconds=15),
+    retry_policy=_TOOL_RETRY,
 )
-_hotel_search_tool = (
-    activity_tool(
-        tool_search_hotel_context,
-        task_queue=AGENTS_QUEUE,
-        start_to_close_timeout=timedelta(seconds=15),
-        retry_policy=_TOOL_RETRY,
-    )
-    if _TEMPORAL_ADK_AVAILABLE
-    else None
+_hotel_search_tool = activity_tool(
+    tool_search_hotel_context,
+    task_queue=AGENTS_QUEUE,
+    start_to_close_timeout=timedelta(seconds=15),
+    retry_policy=_TOOL_RETRY,
 )
 
 
@@ -140,7 +104,7 @@ def create_assignment_fleet_agent() -> Agent:
     """
     return Agent(
         name="assignment_fleet_agent",
-        model=TemporalModel(DEFAULT_MODEL),
+        model=TemporalModel(GEMINI_MODEL),
         description=(
             "Operational fleet specialist for order assignment. Assesses AI-Crew "
             "positions, capacity, cooler status, and ETAs to recommend the best crew."
@@ -172,7 +136,7 @@ def create_assignment_customer_agent() -> Agent:
     """
     return Agent(
         name="assignment_customer_agent",
-        model=TemporalModel(DEFAULT_MODEL),
+        model=TemporalModel(GEMINI_MODEL),
         description=(
             "Customer priority specialist for order assignment. Evaluates order "
             "priority, urgency, deadline pressure, and hotel context."
@@ -203,7 +167,7 @@ def create_assignment_resolver() -> Agent:
     """
     return Agent(
         name="assignment_resolver",
-        model=TemporalModel(DEFAULT_MODEL),
+        model=TemporalModel(GEMINI_MODEL),
         description=(
             "Assignment coordinator. Synthesizes fleet and customer assessments "
             "to pick the best crew for a new order."
@@ -228,17 +192,12 @@ def create_assignment_resolver() -> Agent:
     )
 
 
-def create_order_assignment_agent() -> SequentialAgent | None:
+def create_order_assignment_agent() -> SequentialAgent:
     """
     Compose the full order assignment pipeline:
     1. ParallelAgent: Fleet Agent + Customer Agent assess simultaneously
     2. Assignment Resolver: synthesizes and submits crew assignment
-
-    Returns None if ADK is not available.
     """
-    if not _ADK_AVAILABLE or not _TEMPORAL_ADK_AVAILABLE:
-        return None
-
     parallel_assessment = ParallelAgent(
         name="assignment_parallel",
         sub_agents=[

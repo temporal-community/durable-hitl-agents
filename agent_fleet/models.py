@@ -113,6 +113,19 @@ class Order:
 
 
 @dataclass
+class CrewSnapshot:
+    """Workflow-owned snapshot of a crew's state, passed to activities as input."""
+
+    crew_id: str
+    lat: float
+    lng: float
+    status: str
+    capacity: int
+    current_order_count: int
+    is_disconnected: bool
+
+
+@dataclass
 class GenerateOrderInput:
     order_number: int
 
@@ -140,6 +153,8 @@ class ReasonAboutAssignmentInput:
     servings: int
     deadline_minutes: int
     event: str
+    crew_snapshots: list[CrewSnapshot] = field(default_factory=list)
+    disconnected_agents: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -157,6 +172,9 @@ class NavigateInput:
     leg: str  # LegType value — "pickup" or "delivery"
     steps: int = 8
     waypoints: list[dict] | None = None  # [{"lat": float, "lng": float}, ...]
+    is_crew_disconnected: bool = False
+    start_lat: float | None = None
+    start_lng: float | None = None
 
 
 @dataclass
@@ -171,6 +189,7 @@ class NavigateOutput:
 class PickupInput:
     crew_id: str
     order_ids: list[str]
+    is_crew_disconnected: bool = False
 
 
 @dataclass
@@ -183,6 +202,7 @@ class PickupOutput:
 class DeliverInput:
     crew_id: str
     order_id: str
+    is_crew_disconnected: bool = False
 
 
 @dataclass
@@ -269,6 +289,16 @@ class CrewRouteInput:
     crew_id: str
 
 
+@dataclass
+class OrderDeliveredInput:
+    """Signaled from CrewRouteWorkflow to parent when a delivery completes."""
+
+    crew_id: str
+    order_id: str
+    delivery_lat: float
+    delivery_lng: float
+
+
 # --- Agent events (for UI panel) ---
 
 
@@ -301,6 +331,14 @@ class CrewDisconnectInput:
 @dataclass
 class AgentDisconnectInput:
     agent_name: str  # "fleet_agent", "customer_agent", or "resolver"
+
+
+@dataclass
+class SyncCrewDisconnectInput:
+    """Pushed from workflow to FleetState after processing a disconnect/reconnect signal."""
+
+    crew_id: str
+    disconnected: bool
 
 
 @dataclass

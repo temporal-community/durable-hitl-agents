@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import math
-import os
 
 import httpx
 from temporalio import activity
 
+from agent_fleet.config import GOOGLE_API_KEY, GOOGLE_CSE_ID, GOOGLE_MAPS_API_KEY
 from agent_fleet.locations import VENUES_BY_HOTEL, generate_random_order
 from agent_fleet.models import (
     CrewStatus,
@@ -40,6 +40,7 @@ from agent_fleet.models import (
     PublishAgentEventOutput,
     ReasonAboutAssignmentInput,
     ReasonAboutAssignmentOutput,
+    SyncCrewDisconnectInput,
 )
 from agent_fleet.simulation import fleet
 
@@ -253,7 +254,7 @@ async def get_route_polyline(
     Returns a list of {"lat": float, "lng": float} waypoints.
     Falls back to mock corridor waypoints if no API key is set.
     """
-    api_key = os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key = GOOGLE_MAPS_API_KEY
 
     if not api_key:
         activity.logger.info("[NAV] No Maps API key — using mock corridor")
@@ -336,7 +337,7 @@ async def tool_get_route_info(
         destination_lng: Destination longitude
         destination_name: Human-readable name of the destination (e.g. "MGM Grand")
     """
-    api_key = os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key = GOOGLE_MAPS_API_KEY
 
     if not api_key:
         # Mock fallback — deterministic response for demo
@@ -445,8 +446,8 @@ async def _search_hotel_context(hotel_name: str) -> str:
     activity and the mock resolver. Separated so it can be called from within
     another activity (activities can't call other activities via Temporal).
     """
-    api_key = os.environ.get("GOOGLE_API_KEY")
-    search_engine_id = os.environ.get("GOOGLE_CSE_ID")
+    api_key = GOOGLE_API_KEY
+    search_engine_id = GOOGLE_CSE_ID
 
     if api_key and search_engine_id:
         try:
@@ -546,87 +547,36 @@ async def reason_about_assignment(
     Fleet Agent assesses crew positions and capacity.
     Customer Agent evaluates order priority and urgency.
     Resolver synthesizes and picks the best crew.
+
+    All decision inputs come from inp (workflow state) — not from FleetState.
+    FleetState writes are UI projection only.
     """
-    # --- Status transition notifications (fired once per assignment cycle) ---
-    reconnected_agents = await fleet.consume_reconnected_agents()
-    disconnected_crews = await fleet.consume_disconnected_crews()
-    reconnected_crews = await fleet.consume_reconnected_crews()
+    # --- Fleet Agent: find best crew from workflow-provided snapshots ---
+    fleet_agent_offline = "fleet_agent" in inp.disconnected_agents
 
-    for agent_name in reconnected_agents:
-        label = "Fleet Agent" if agent_name == "fleet_agent" else "Customer Agent"
-        await fleet.publish_agent_event(
-            agent_name,
-            "reconnected",
-            f"{label} is BACK ONLINE — resuming full assessment.",
-            summary=f"{label} back online",
-        )
-        await fleet.publish_agent_event(
-            "resolver",
-            "info",
-            f"{label} has reconnected — full assessment now available.",
-            summary=f"{label} reconnected",
-        )
-        await asyncio.sleep(0.2)
-
-    for crew_id in disconnected_crews:
-        await fleet.publish_agent_event(
-            "fleet_agent",
-            "warning",
-            f"ALERT: {crew_id} has DISCONNECTED — removing from candidate pool.",
-            summary=f"{crew_id} disconnected — excluded",
-        )
-        await fleet.publish_agent_event(
-            "resolver",
-            "warning",
-            f"NOTE: {crew_id} is DISCONNECTED — will not be assigned orders.",
-            summary=f"{crew_id} disconnected",
-        )
-        await asyncio.sleep(0.2)
-
-    for crew_id in reconnected_crews:
-        await fleet.publish_agent_event(
-            "fleet_agent",
-            "info",
-            f"{crew_id} has RECONNECTED — restored to candidate pool.",
-            summary=f"{crew_id} reconnected — available",
-        )
-        await fleet.publish_agent_event(
-            "resolver",
-            "info",
-            f"{crew_id} is back online — eligible for new assignments.",
-            summary=f"{crew_id} reconnected",
-        )
-        await asyncio.sleep(0.2)
-
-    # --- Fleet Agent: find best crew ---
-    fleet_agent_offline = await fleet.is_agent_disconnected("fleet_agent")
-
-    # Find the best crew: closest with capacity
     best_crew = None
     best_dist = float("inf")
     fleet_lines = []
-    for cid, crew in (await _get_crews_snapshot()).items():
-        available = crew["capacity"] - len(crew["current_orders"])
-        dist = math.sqrt(
-            (crew["lat"] - inp.delivery_lat) ** 2 + (crew["lng"] - inp.delivery_lng) ** 2
-        )
+    for crew in inp.crew_snapshots:
+        available = crew.capacity - crew.current_order_count
+        dist = math.sqrt((crew.lat - inp.delivery_lat) ** 2 + (crew.lng - inp.delivery_lng) ** 2)
         dist_miles = dist * 69.0
         eta_min = max(2, int(dist_miles * 3.5))
         status_tag = ""
-        if crew["disconnected"]:
+        if crew.is_disconnected:
             status_tag = " [DISCONNECTED]"
 
         fleet_lines.append(
-            f"  {cid}: {available} slots free, ~{eta_min}min ETA, "
-            f"status={crew['status']}{status_tag}"
+            f"  {crew.crew_id}: {available} slots free, ~{eta_min}min ETA, "
+            f"status={crew.status}{status_tag}"
         )
 
         # Skip crews that can't take orders
-        if crew["disconnected"] or available <= 0:
+        if crew.is_disconnected or available <= 0:
             continue
         if dist < best_dist:
             best_dist = dist
-            best_crew = cid
+            best_crew = crew.crew_id
 
     fleet_text = "\n".join(fleet_lines)
     if best_crew is None:
@@ -666,7 +616,7 @@ async def reason_about_assignment(
         await asyncio.sleep(0.3)
 
     # --- Customer Agent: priority assessment ---
-    customer_agent_offline = await fleet.is_agent_disconnected("customer_agent")
+    customer_agent_offline = "customer_agent" in inp.disconnected_agents
     urgency = (
         "URGENT"
         if inp.deadline_minutes <= 25
@@ -698,7 +648,6 @@ async def reason_about_assignment(
         await asyncio.sleep(0.3)
 
     # --- Resolver: synthesize and assign ---
-    # Build context about what data the Resolver has to work with
     offline_agents = []
     if fleet_agent_offline:
         offline_agents.append("Fleet Agent")
@@ -746,7 +695,7 @@ async def reason_about_assignment(
         summary=resolver_summary,
     )
 
-    # Register assignment in fleet state
+    # Register assignment in fleet state (UI projection)
     await fleet.assign_order_to_crew(best_crew, inp.order_id)
 
     activity.logger.info(f"Assigned {inp.order_id} ({inp.hotel}) -> {best_crew}")
@@ -763,38 +712,18 @@ async def register_assignment(crew_id: str, order_id: str) -> str:
     return f"Assigned {order_id} to {crew_id}"
 
 
-async def _get_crews_snapshot() -> dict:
-    """Get a simplified crew snapshot for agent reasoning."""
-    result = {}
-    for cid in ["ai-crew-1", "ai-crew-2", "ai-crew-3"]:
-        crew = await fleet.get_crew(cid)
-        if crew:
-            result[cid] = {
-                "lat": crew.position.lat,
-                "lng": crew.position.lng,
-                "status": crew.status.value,
-                "capacity": crew.capacity,
-                "current_orders": list(crew.current_orders),
-                "disconnected": crew.disconnected,
-            }
-    return result
-
-
 @activity.defn(name="navigate_to")
 async def navigate_to(inp: NavigateInput) -> NavigateOutput:
     """
     Simulate AI-Crew navigation by interpolating position over N steps.
 
-    Heartbeats on each step. If the worker is killed mid-navigation,
-    the heartbeat timeout fires, Temporal marks it failed, and retries
-    on the next worker — resuming the mission.
+    Heartbeats on each step. Disconnect handling is two-layer:
+    - inp.is_crew_disconnected: pre-flight check (set by workflow)
+    - Cancellation scope: mid-flight disconnect delivers CancelledError
+      on the next heartbeat() call (driven by workflow signal handler)
     """
-    if not await fleet.crew_exists(inp.crew_id):
-        raise ValueError(f"Unknown AI-Crew: {inp.crew_id}")
-
-    # Per-crew disconnect: if this crew is disconnected, fail the activity.
-    # Temporal will keep retrying until the crew is reconnected.
-    if await fleet.is_crew_disconnected(inp.crew_id):
+    # Pre-flight disconnect check — workflow passes current state as input
+    if inp.is_crew_disconnected:
         raise RuntimeError(
             f"AI-Crew {inp.crew_id} is disconnected — activity will retry on reconnect"
         )
@@ -804,21 +733,22 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
         CrewStatus.EN_ROUTE_PICKUP if leg == LegType.PICKUP.value else CrewStatus.EN_ROUTE_DELIVERY
     )
     await fleet.set_crew_status(inp.crew_id, status)
-    if inp.order_id in fleet.orders:
-        await fleet.update_order_status(
-            inp.order_id,
-            OrderStatus.IN_TRANSIT,
-            f"AI-Crew {inp.crew_id} navigating to {leg} point",
-        )
+    await fleet.update_order_status(
+        inp.order_id,
+        OrderStatus.IN_TRANSIT,
+        f"AI-Crew {inp.crew_id} navigating to {leg} point",
+    )
 
-    start_lat, start_lng = await fleet.get_crew_position(inp.crew_id)
+    # Start position from workflow state (not FleetState)
+    start_lat = inp.start_lat if inp.start_lat is not None else inp.target_lat
+    start_lng = inp.start_lng if inp.start_lng is not None else inp.target_lng
 
     # Build the path to interpolate along
     if inp.waypoints and len(inp.waypoints) >= 2:
         # Follow waypoint path from Google Maps polyline (or mock corridor)
         path = [(wp["lat"], wp["lng"]) for wp in inp.waypoints]
     else:
-        # Straight line fallback (backwards compat)
+        # Straight line fallback
         path = [(start_lat, start_lng), (inp.target_lat, inp.target_lng)]
 
     # Calculate cumulative distances along the path for proportional interpolation
@@ -829,12 +759,9 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
     total_dist = sum(segment_dists) or 1e-9
 
     for step in range(1, inp.steps + 1):
+        # Heartbeat — if workflow cancelled this activity's scope (disconnect signal),
+        # this call raises CancelledError, which propagates up to the workflow.
         activity.heartbeat(f"step {step}/{inp.steps}")
-
-        # Check disconnect mid-navigation too
-        if await fleet.is_crew_disconnected(inp.crew_id):
-            activity.logger.warning(f"{inp.crew_id} disconnected at step {step}/{inp.steps}")
-            raise RuntimeError(f"AI-Crew {inp.crew_id} disconnected mid-navigation at step {step}")
 
         # Find position along the polyline path at this fraction
         fraction = step / inp.steps
@@ -853,6 +780,7 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
                 break
             accumulated += seg_d
 
+        # UI projection write — position update for frontend WebSocket
         await fleet.update_crew_position(inp.crew_id, new_lat, new_lng)
 
         # Simulate drive time per step
@@ -872,7 +800,7 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
 @activity.defn(name="pickup_orders")
 async def pickup_orders(inp: PickupInput) -> PickupOutput:
     """Simulate picking up ice cream orders at the kitchen."""
-    if await fleet.is_crew_disconnected(inp.crew_id):
+    if inp.is_crew_disconnected:
         raise RuntimeError(f"AI-Crew {inp.crew_id} is disconnected")
     await fleet.set_crew_status(inp.crew_id, CrewStatus.PICKING_UP)
     for oid in inp.order_ids:
@@ -887,13 +815,14 @@ async def pickup_orders(inp: PickupInput) -> PickupOutput:
 @activity.defn(name="deliver_order")
 async def deliver_order(inp: DeliverInput) -> DeliverOutput:
     """Simulate delivering an ice cream order at a hotel."""
-    if await fleet.is_crew_disconnected(inp.crew_id):
+    if inp.is_crew_disconnected:
         raise RuntimeError(f"AI-Crew {inp.crew_id} is disconnected")
     await fleet.set_crew_status(inp.crew_id, CrewStatus.DELIVERING)
     await fleet.update_order_status(inp.order_id, OrderStatus.IN_TRANSIT, "Delivering to hotel")
 
     await asyncio.sleep(1.5)
 
+    # UI projection — mark order delivered and update crew status
     remaining_count = await fleet.complete_order_delivery(inp.crew_id, inp.order_id)
     if remaining_count == 0:
         await fleet.set_crew_status(inp.crew_id, CrewStatus.IDLE)
@@ -932,6 +861,28 @@ async def publish_agent_event(
     return PublishAgentEventOutput(success=True)
 
 
+# --- Workflow-driven state sync activities ---
+
+
+@activity.defn(name="sync_crew_disconnect")
+async def sync_crew_disconnect(inp: SyncCrewDisconnectInput) -> None:
+    """Sync crew disconnect/reconnect state to FleetState for the frontend.
+
+    Called by the workflow after processing a disconnect/reconnect signal.
+    Everything flows through Temporal — this is the only path to FleetState.
+    """
+    if inp.disconnected:
+        await fleet.disconnect_crew(inp.crew_id)
+    else:
+        await fleet.reconnect_crew(inp.crew_id)
+
+
+@activity.defn(name="sync_crew_recovery_complete")
+async def sync_crew_recovery_complete(crew_id: str) -> None:
+    """Clear the recovery visual indicator after replay completes."""
+    await fleet.mark_crew_recovery_complete(crew_id)
+
+
 # --- Customer change activities ---
 
 
@@ -952,4 +903,3 @@ async def execute_customer_change(
         )
 
     return ExecuteCustomerChangeOutput(success=True)
-

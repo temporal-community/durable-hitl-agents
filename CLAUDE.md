@@ -13,18 +13,20 @@ Requires a local Temporal dev server (`temporal server start-dev`).
 
 ## Architecture
 
-- **Single process**: FastAPI server + Temporal worker run in the same process (`server.py`).
-- **FleetState singleton** (`simulation.py`): in-memory state shared between worker and server.
-  Couriers, orders, cooler status, agent events — all live here.
-- **Workflows** (`workflows.py`): `MeltdownDemoWorkflow` orchestrates order generation and
-  multi-agent assignment; `CrewRouteWorkflow` is a per-crew child workflow that continuously
-  receives orders via signal, picks up at the shop, delivers, and loops.
-  Signal-driven disruption + customer-change handling.
-- **Activities** (`activities.py`): discrete retryable units — navigation with heartbeats,
-  pickup/deliver, fleet queries, disruption resolution.
+- **Single process**: FastAPI server + 3 Temporal workers run in the same process (`server.py`).
+- **Workflows own state** (`workflows.py`): `MeltdownDemoWorkflow` owns crew positions, order
+  assignments, and disconnect status. Builds `CrewSnapshot`s and passes to activities as inputs.
+  `CrewRouteWorkflow` is a per-crew child workflow with cancellation scopes for disconnect
+  handling. Signals parent on delivery complete.
+- **Activities are pure** (`activities.py`): receive all decision data as inputs, never read
+  FleetState for logic. Write to FleetState as UI projection only.
+- **FleetState** (`simulation.py`): write-only UI projection for the frontend WebSocket.
+  Activities write here; nothing reads it for decision-making.
+- **3-queue workers** (`worker.py`): workflows-only (no activities), delivery, agents.
 - **ADK agents** (`agents.py`): Fleet Agent + Customer Agent (parallel) → Resolver (sequential).
-  Runs inline in the workflow via `TemporalModel`. Falls back to `resolve_disruption_mock` if
-  `GOOGLE_API_KEY` is unset.
+  Runs inline in the workflow via `TemporalModel`. Falls back to mock if `GOOGLE_API_KEY` is unset.
+- **Server is signal-only** (`server.py`): disconnect/reconnect endpoints send Temporal signals
+  only — no direct FleetState writes. Everything flows through workflows.
 - **Frontend** (`frontend/index.html`): single-file SPA with Leaflet map, WebSocket state feed,
   agent reasoning panels.
 

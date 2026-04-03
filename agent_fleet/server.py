@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -28,6 +27,7 @@ from temporalio.service import RPCError
 
 load_dotenv()
 
+from agent_fleet.config import GOOGLE_API_KEY, GOOGLE_MAPS_API_KEY, TEMPORAL_ADDRESS
 from agent_fleet.locations import VENUES, WAREHOUSE, WAREHOUSE_LABEL
 from agent_fleet.models import (
     AgentDisconnectInput,
@@ -35,8 +35,9 @@ from agent_fleet.models import (
     CustomerChangeInput,
     MeltdownDemoInput,
 )
+from agent_fleet.queues import WORKFLOWS_QUEUE
 from agent_fleet.simulation import fleet
-from agent_fleet.worker import TASK_QUEUE, TEMPORAL_ADDRESS, create_worker
+from agent_fleet.worker import create_worker
 from agent_fleet.workflows import MeltdownDemoWorkflow
 
 logging.basicConfig(level=logging.INFO)
@@ -69,11 +70,12 @@ async def _start_workers() -> None:
                 pass
             except Exception as e:
                 logger.error(f"Worker error: {e}")
+
         return _run
 
     _worker_tasks = [asyncio.create_task(_make_run(w)()) for w in workers]
-    maps_key = "SET" if os.environ.get("GOOGLE_MAPS_API_KEY") else "NOT SET"
-    gemini_key = "SET" if os.environ.get("GOOGLE_API_KEY") else "NOT SET"
+    maps_key = "SET" if GOOGLE_MAPS_API_KEY else "NOT SET"
+    gemini_key = "SET" if GOOGLE_API_KEY else "NOT SET"
     logger.info(f"Workers started (GOOGLE_MAPS_API_KEY={maps_key}, GOOGLE_API_KEY={gemini_key})")
 
 
@@ -137,7 +139,8 @@ async def start_demo():
                 MeltdownDemoWorkflow.run,
                 MeltdownDemoInput(escalation_enabled=_escalation_enabled),
                 id="meltdown-demo",
-                task_queue=TASK_QUEUE,
+                task_queue=WORKFLOWS_QUEUE,
+                static_summary="Meltdown — ice cream fleet orchestrator",
             )
             return {
                 "status": "started",
@@ -169,19 +172,28 @@ class CrewDisconnectRequest(BaseModel):
 
 @app.post("/api/disconnect-crew")
 async def disconnect_crew(body: CrewDisconnectRequest):
-    """Disconnect a single crew — its activities will fail and Temporal will retry."""
-    await fleet.disconnect_crew(body.crew_id)
+    """Disconnect a crew — sends signals only, everything flows through Temporal."""
+    if _temporal_client is None:
+        return {"error": "Temporal client not connected"}
 
-    # Signal the workflow so it knows
-    if _temporal_client is not None:
-        try:
-            handle = _temporal_client.get_workflow_handle("meltdown-demo")
-            await handle.signal(
-                MeltdownDemoWorkflow.crew_disconnected,
-                CrewDisconnectInput(crew_id=body.crew_id),
-            )
-        except Exception as e:
-            logger.error(f"Failed to signal crew disconnect: {e}")
+    # Signal both parent orchestrator and the crew's child workflow.
+    # The workflow handles the cancellation and syncs state to FleetState via activities.
+    try:
+        parent = _temporal_client.get_workflow_handle("meltdown-demo")
+        await parent.signal(
+            MeltdownDemoWorkflow.crew_disconnected,
+            CrewDisconnectInput(crew_id=body.crew_id),
+        )
+    except Exception as e:
+        logger.error(f"Failed to signal parent workflow: {e}")
+    try:
+        child = _temporal_client.get_workflow_handle(f"route-{body.crew_id}")
+        await child.signal(
+            "crew_disconnected",
+            CrewDisconnectInput(crew_id=body.crew_id),
+        )
+    except Exception as e:
+        logger.error(f"Failed to signal crew workflow: {e}")
 
     return {
         "status": "crew_disconnected",
@@ -192,29 +204,28 @@ async def disconnect_crew(body: CrewDisconnectRequest):
 
 @app.post("/api/reconnect-crew")
 async def reconnect_crew(body: CrewDisconnectRequest):
-    """Reconnect a crew — Temporal retries its activities and it resumes."""
-    await fleet.reconnect_crew(body.crew_id)
+    """Reconnect a crew — sends signals only, everything flows through Temporal."""
+    if _temporal_client is None:
+        return {"error": "Temporal client not connected"}
 
-    # Signal the workflow
-    if _temporal_client is not None:
-        try:
-            handle = _temporal_client.get_workflow_handle("meltdown-demo")
-            await handle.signal(
-                MeltdownDemoWorkflow.crew_reconnected,
-                CrewDisconnectInput(crew_id=body.crew_id),
-            )
-        except Exception as e:
-            logger.error(f"Failed to signal crew reconnect: {e}")
-
-    # Clear recovery phase after a delay (visual replay indicator)
-    async def _clear_crew_recovery():
-        try:
-            await asyncio.sleep(3)
-            await fleet.mark_crew_recovery_complete(body.crew_id)
-        except Exception as e:
-            logger.error(f"Crew recovery clear failed: {e}")
-
-    asyncio.create_task(_clear_crew_recovery())
+    # Signal both workflows. The child workflow syncs reconnect state to FleetState
+    # and clears the recovery indicator via activities.
+    try:
+        parent = _temporal_client.get_workflow_handle("meltdown-demo")
+        await parent.signal(
+            MeltdownDemoWorkflow.crew_reconnected,
+            CrewDisconnectInput(crew_id=body.crew_id),
+        )
+    except Exception as e:
+        logger.error(f"Failed to signal parent workflow: {e}")
+    try:
+        child = _temporal_client.get_workflow_handle(f"route-{body.crew_id}")
+        await child.signal(
+            "crew_reconnected",
+            CrewDisconnectInput(crew_id=body.crew_id),
+        )
+    except Exception as e:
+        logger.error(f"Failed to signal crew workflow: {e}")
 
     return {
         "status": "crew_reconnected",
