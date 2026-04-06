@@ -2,9 +2,9 @@
 ADK agent definitions for the Meltdown ice cream delivery demo.
 
 Order assignment pipeline:
-- Fleet Agent: assesses crew positions, capacity, and ETAs for new orders
+- Fleet Agent: assesses driver positions, capacity, and ETAs for new orders
 - Customer Agent: evaluates order priority, urgency, and hotel context
-- Assignment Resolver: synthesizes both and submits a structured crew assignment
+- Assignment Resolver: synthesizes both and submits a structured driver assignment
 
 Architecture:
 - Agent execution happens inline in the workflow via TemporalModel + activity_tool.
@@ -23,6 +23,7 @@ from google.adk.tools import ToolContext
 from temporalio.common import RetryPolicy
 from temporalio.contrib.google_adk_agents import TemporalModel
 from temporalio.contrib.google_adk_agents.workflow import activity_tool
+from temporalio.workflow import ActivityConfig
 
 from agent_fleet.activities import (
     tool_get_fleet_status,
@@ -31,7 +32,7 @@ from agent_fleet.activities import (
     tool_publish_agent_event,
     tool_search_hotel_context,
 )
-from agent_fleet.config import GEMINI_MODEL
+from agent_fleet.config import DEFAULT_MODEL
 from agent_fleet.queues import AGENTS_QUEUE
 
 _TOOL_RETRY = RetryPolicy(
@@ -81,17 +82,17 @@ _hotel_search_tool = activity_tool(
 
 async def tool_submit_assignment(
     tool_context: ToolContext,
-    crew_id: str,
+    driver_id: str,
     reasoning_summary: str,
 ) -> str:
     """Submit the final order assignment decision. You MUST call this tool with your recommendation.
 
     Args:
-        crew_id: The AI-Crew ID to assign the order to (e.g. "ai-crew-1")
-        reasoning_summary: Brief explanation of why this crew was chosen
+        driver_id: The AI-Driver ID to assign the order to (e.g. "ai-driver-1")
+        reasoning_summary: Brief explanation of why this driver was chosen
     """
     tool_context.state["assignment"] = {
-        "crew_id": crew_id,
+        "driver_id": driver_id,
         "reasoning_summary": reasoning_summary,
     }
     return "Assignment submitted successfully."
@@ -99,30 +100,33 @@ async def tool_submit_assignment(
 
 def create_assignment_fleet_agent() -> Agent:
     """
-    Fleet Agent for order assignment — assesses crew positions, capacity,
-    and ETAs to recommend the best crew for a new order.
+    Fleet Agent for order assignment — assesses driver positions, capacity,
+    and ETAs to recommend the best driver for a new order.
     """
     return Agent(
         name="assignment_fleet_agent",
-        model=TemporalModel(GEMINI_MODEL),
+        model=TemporalModel(
+            DEFAULT_MODEL,
+            activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),
+        ),
         description=(
-            "Operational fleet specialist for order assignment. Assesses AI-Crew "
-            "positions, capacity, cooler status, and ETAs to recommend the best crew."
+            "Operational fleet specialist for order assignment. Assesses AI-Driver "
+            "positions, capacity, cooler status, and ETAs to recommend the best driver."
         ),
         instruction=(
             "You are the Fleet Operations AI for Meltdown Ice Cream Delivery. "
-            "A new order has arrived and you need to assess which AI-Crew is best "
+            "A new order has arrived and you need to assess which AI-Driver is best "
             "positioned to handle it.\n\n"
             "Call tool_get_fleet_status to check current fleet state, then "
-            "tool_get_route_info to compare ETAs from available crews to the "
+            "tool_get_route_info to compare ETAs from available drivers to the "
             "delivery destination.\n\n"
             "Rules:\n"
-            "- NEVER recommend a DISCONNECTED crew\n"
-            "- Skip crews at capacity (no free slots)\n"
-            "- Prefer the closest crew with capacity\n\n"
+            "- NEVER recommend a DISCONNECTED driver\n"
+            "- Skip drivers at capacity (no free slots)\n"
+            "- Prefer the closest driver with capacity\n\n"
             "Call tool_publish_agent_event with agent_name='fleet_agent' and "
             "event_type='assessment' to share your fleet scan results.\n\n"
-            "Be concise and decisive — state which crew you recommend and why."
+            "Be concise and decisive — state which driver you recommend and why."
         ),
         tools=[_fleet_status_tool, _route_info_tool, _publish_event_tool],
         output_key="fleet_assessment",
@@ -136,7 +140,10 @@ def create_assignment_customer_agent() -> Agent:
     """
     return Agent(
         name="assignment_customer_agent",
-        model=TemporalModel(GEMINI_MODEL),
+        model=TemporalModel(
+            DEFAULT_MODEL,
+            activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),
+        ),
         description=(
             "Customer priority specialist for order assignment. Evaluates order "
             "priority, urgency, deadline pressure, and hotel context."
@@ -163,30 +170,33 @@ def create_assignment_customer_agent() -> Agent:
 def create_assignment_resolver() -> Agent:
     """
     Resolver for order assignment — synthesizes fleet and customer assessments,
-    picks the best crew, and submits the structured assignment.
+    picks the best driver, and submits the structured assignment.
     """
     return Agent(
         name="assignment_resolver",
-        model=TemporalModel(GEMINI_MODEL),
+        model=TemporalModel(
+            DEFAULT_MODEL,
+            activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),
+        ),
         description=(
             "Assignment coordinator. Synthesizes fleet and customer assessments "
-            "to pick the best crew for a new order."
+            "to pick the best driver for a new order."
         ),
         instruction=(
             "You are the Assignment Coordinator for Meltdown Ice Cream Delivery. "
             "You have received assessments from the Fleet Agent (operational) and "
             "Customer Agent (customer priority) about a new order.\n\n"
             "Synthesize both perspectives:\n"
-            "- Fleet Agent recommends which crew is best positioned\n"
+            "- Fleet Agent recommends which driver is best positioned\n"
             "- Customer Agent flags urgency and priority level\n"
             "- If an agent is offline, compensate with available data\n"
-            "- NEVER assign to a DISCONNECTED crew\n\n"
+            "- NEVER assign to a DISCONNECTED driver\n\n"
             "You MUST call tool_submit_assignment with:\n"
-            "- crew_id: the AI-Crew that should get this order\n"
+            "- driver_id: the AI-Driver that should get this order\n"
             "- reasoning_summary: brief explanation of the decision\n\n"
             "Also call tool_publish_agent_event with agent_name='resolver' and "
             "event_type='plan' to announce the assignment.\n\n"
-            "Be decisive. Pick the crew and explain why in one sentence."
+            "Be decisive. Pick the driver and explain why in one sentence."
         ),
         tools=[_publish_event_tool, tool_submit_assignment],
     )
@@ -196,7 +206,7 @@ def create_order_assignment_agent() -> SequentialAgent:
     """
     Compose the full order assignment pipeline:
     1. ParallelAgent: Fleet Agent + Customer Agent assess simultaneously
-    2. Assignment Resolver: synthesizes and submits crew assignment
+    2. Assignment Resolver: synthesizes and submits driver assignment
     """
     parallel_assessment = ParallelAgent(
         name="assignment_parallel",

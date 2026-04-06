@@ -1,7 +1,7 @@
 """
 Shared simulation state for the Meltdown ice cream delivery demo.
 
-Manages crew positions, order status, and agent events.
+Manages driver positions, order status, and agent events.
 Backed by in-memory state shared between the Temporal worker and FastAPI server
 (they run in the same process).
 """
@@ -17,8 +17,8 @@ from agent_fleet.locations import WAREHOUSE
 from agent_fleet.models import (
     AgentEvent,
     Coords,
-    Crew,
-    CrewStatus,
+    Driver,
+    DriverStatus,
     Order,
     OrderPriority,
     OrderStatus,
@@ -31,7 +31,7 @@ class FleetState:
     """Global mutable state for the ice cream fleet simulation."""
 
     def __init__(self) -> None:
-        self.crews: dict[str, Crew] = {}
+        self.drivers: dict[str, Driver] = {}
         self.orders: dict[str, Order] = {}
         self.event_log: deque[dict[str, Any]] = deque(maxlen=_EVENT_LOG_MAX)
         self.agent_events: list[AgentEvent] = []
@@ -45,18 +45,18 @@ class FleetState:
         self._init_state()
 
     def _init_state(self) -> None:
-        # 3 AI-Crews starting at the ice cream shop
+        # 3 AI-Drivers starting at the ice cream shop
         for i in range(1, 4):
-            cid = f"ai-crew-{i}"
-            self.crews[cid] = Crew(
-                crew_id=cid,
+            did = f"ai-driver-{i}"
+            self.drivers[did] = Driver(
+                driver_id=did,
                 position=Coords(lat=WAREHOUSE.lat, lng=WAREHOUSE.lng),
             )
         # Orders are registered dynamically as they are generated
 
     def reset(self) -> None:
         """Reset simulation to initial state for a fresh demo run."""
-        self.crews.clear()
+        self.drivers.clear()
         self.orders.clear()
         self.event_log.clear()
         self.agent_events.clear()
@@ -67,36 +67,36 @@ class FleetState:
         }
         self._init_state()
 
-    # --- Per-crew disconnect / reconnect ---
+    # --- Per-driver disconnect / reconnect ---
 
-    async def disconnect_crew(self, crew_id: str) -> None:
-        """Mark a single crew as disconnected (UI projection only)."""
+    async def disconnect_driver(self, driver_id: str) -> None:
+        """Mark a single driver as disconnected (UI projection only)."""
         async with self._lock:
-            c = self.crews[crew_id]
-            c.status_before_disconnect = c.status
-            c.disconnected = True
-            c.status = CrewStatus.DISCONNECTED
-            self._log(f"[DISCONNECT] AI-Crew {crew_id} lost connection")
+            d = self.drivers[driver_id]
+            d.status_before_disconnect = d.status
+            d.disconnected = True
+            d.status = DriverStatus.DISCONNECTED
+            self._log(f"[DISCONNECT] AI-Driver {driver_id} lost connection")
 
-    async def reconnect_crew(self, crew_id: str) -> None:
-        """Clear disconnect flag and enter per-crew recovery phase (UI projection only)."""
+    async def reconnect_driver(self, driver_id: str) -> None:
+        """Clear disconnect flag and enter per-driver recovery phase (UI projection only)."""
         async with self._lock:
-            c = self.crews[crew_id]
-            c.disconnected = False
-            c.recovering = True
-            c.status = c.status_before_disconnect
-            self._log(f"[RECONNECT] AI-Crew {crew_id} reconnecting — replaying...")
+            d = self.drivers[driver_id]
+            d.disconnected = False
+            d.recovering = True
+            d.status = d.status_before_disconnect
+            self._log(f"[RECONNECT] AI-Driver {driver_id} reconnecting — replaying...")
 
-    async def mark_crew_recovery_complete(self, crew_id: str) -> None:
-        """Clear the per-crew recovery flag after replay completes."""
+    async def mark_driver_recovery_complete(self, driver_id: str) -> None:
+        """Clear the per-driver recovery flag after replay completes."""
         async with self._lock:
-            c = self.crews[crew_id]
-            c.recovering = False
-            self._log(f"[RECONNECT] AI-Crew {crew_id} replay complete — resumed")
+            d = self.drivers[driver_id]
+            d.recovering = False
+            self._log(f"[RECONNECT] AI-Driver {driver_id} replay complete — resumed")
 
-    async def is_crew_disconnected(self, crew_id: str) -> bool:
+    async def is_driver_disconnected(self, driver_id: str) -> bool:
         async with self._lock:
-            return self.crews[crew_id].disconnected
+            return self.drivers[driver_id].disconnected
 
     # --- Per-agent health ---
 
@@ -124,31 +124,31 @@ class FleetState:
         async with self._lock:
             return dict(self.agent_health)
 
-    # --- Crew operations ---
+    # --- Driver operations ---
 
-    async def update_crew_position(self, crew_id: str, lat: float, lng: float) -> None:
+    async def update_driver_position(self, driver_id: str, lat: float, lng: float) -> None:
         async with self._lock:
-            c = self.crews[crew_id]
-            c.position = Coords(lat=lat, lng=lng)
-            c.path_history.append({"lat": lat, "lng": lng, "t": time.time()})
+            d = self.drivers[driver_id]
+            d.position = Coords(lat=lat, lng=lng)
+            d.path_history.append({"lat": lat, "lng": lng, "t": time.time()})
 
-    async def set_crew_status(self, crew_id: str, status: CrewStatus) -> None:
+    async def set_driver_status(self, driver_id: str, status: DriverStatus) -> None:
         async with self._lock:
-            self.crews[crew_id].status = status
-            self._log(f"AI-Crew {crew_id} -> {status.value}")
+            self.drivers[driver_id].status = status
+            self._log(f"AI-Driver {driver_id} -> {status.value}")
 
-    async def get_crew_position(self, crew_id: str) -> tuple[float, float]:
+    async def get_driver_position(self, driver_id: str) -> tuple[float, float]:
         async with self._lock:
-            c = self.crews[crew_id]
-            return c.position.lat, c.position.lng
+            d = self.drivers[driver_id]
+            return d.position.lat, d.position.lng
 
-    async def crew_exists(self, crew_id: str) -> bool:
+    async def driver_exists(self, driver_id: str) -> bool:
         async with self._lock:
-            return crew_id in self.crews
+            return driver_id in self.drivers
 
-    async def get_crew(self, crew_id: str) -> Crew | None:
+    async def get_driver(self, driver_id: str) -> Driver | None:
         async with self._lock:
-            return self.crews.get(crew_id)
+            return self.drivers.get(driver_id)
 
     async def get_order(self, order_id: str) -> Order | None:
         async with self._lock:
@@ -179,16 +179,16 @@ class FleetState:
             )
             self._log(f"New order {order_id}: {label}")
 
-    async def assign_order_to_crew(self, crew_id: str, order_id: str) -> None:
-        """Assign a single order to a crew."""
+    async def assign_order_to_driver(self, driver_id: str, order_id: str) -> None:
+        """Assign a single order to a driver."""
         async with self._lock:
-            c = self.crews[crew_id]
+            d = self.drivers[driver_id]
             o = self.orders[order_id]
-            o.assigned_crew_id = crew_id
+            o.assigned_driver_id = driver_id
             o.status = OrderStatus.ASSIGNED
-            o.status_log.append(f"Assigned to {crew_id}")
-            c.current_orders.append(order_id)
-            self._log(f"Order {order_id} assigned to {crew_id}")
+            o.status_log.append(f"Assigned to {driver_id}")
+            d.current_orders.append(order_id)
+            self._log(f"Order {order_id} assigned to {driver_id}")
 
     async def update_order_status(self, order_id: str, status: OrderStatus, note: str = "") -> None:
         async with self._lock:
@@ -198,30 +198,30 @@ class FleetState:
                 o.status_log.append(note)
             self._log(f"Order {order_id} -> {status.value}: {note}")
 
-    async def complete_order_delivery(self, crew_id: str, order_id: str) -> int:
-        """Mark an order delivered and remove it from the crew's active queue."""
+    async def complete_order_delivery(self, driver_id: str, order_id: str) -> int:
+        """Mark an order delivered and remove it from the driver's active queue."""
         async with self._lock:
             o = self.orders[order_id]
             o.status = OrderStatus.DELIVERED
             o.status_log.append("Delivered successfully!")
 
-            crew = self.crews[crew_id]
-            if order_id in crew.current_orders:
-                crew.current_orders.remove(order_id)
+            driver = self.drivers[driver_id]
+            if order_id in driver.current_orders:
+                driver.current_orders.remove(order_id)
 
             self._log(f"Order {order_id} -> {OrderStatus.DELIVERED.value}: Delivered successfully!")
-            return len(crew.current_orders)
+            return len(driver.current_orders)
 
-    async def get_order_crew(self, order_id: str) -> str | None:
+    async def get_order_driver(self, order_id: str) -> str | None:
         async with self._lock:
             o = self.orders.get(order_id)
             if o is None:
                 return None
-            return o.assigned_crew_id
+            return o.assigned_driver_id
 
-    async def get_crew_orders(self, crew_id: str) -> list[str]:
+    async def get_driver_orders(self, driver_id: str) -> list[str]:
         async with self._lock:
-            return list(self.crews[crew_id].current_orders)
+            return list(self.drivers[driver_id].current_orders)
 
     async def update_order_delivery(self, order_id: str, new_lat: float, new_lng: float) -> None:
         """Update delivery coordinates for an order (customer change)."""
@@ -235,11 +235,11 @@ class FleetState:
             o = self.orders[order_id]
             o.status = OrderStatus.CANCELLED
             o.status_log.append("Cancelled by customer")
-            # Remove from crew's list
-            if o.assigned_crew_id:
-                c = self.crews[o.assigned_crew_id]
-                if order_id in c.current_orders:
-                    c.current_orders.remove(order_id)
+            # Remove from driver's list
+            if o.assigned_driver_id:
+                d = self.drivers[o.assigned_driver_id]
+                if order_id in d.current_orders:
+                    d.current_orders.remove(order_id)
             self._log(f"Order {order_id} cancelled")
 
     # --- Agent events (for UI panel) ---
@@ -264,7 +264,7 @@ class FleetState:
         """Return full state as JSON-serializable dict (for frontend)."""
         async with self._lock:
             return {
-                "crews": {cid: c.to_dict() for cid, c in self.crews.items()},
+                "drivers": {did: d.to_dict() for did, d in self.drivers.items()},
                 "orders": {oid: o.to_dict() for oid, o in self.orders.items()},
                 "agent_events": [e.to_dict() for e in self.agent_events],
                 "event_log": list(self.event_log),
@@ -275,12 +275,12 @@ class FleetState:
         """Return a text summary of fleet state for LLM consumption."""
         async with self._lock:
             lines = ["=== Fleet Status ==="]
-            for cid, c in self.crews.items():
-                orders_str = ", ".join(c.current_orders) if c.current_orders else "none"
-                disconnect_tag = " **DISCONNECTED**" if c.disconnected else ""
-                recovering_tag = " [recovering]" if c.recovering else ""
+            for did, d in self.drivers.items():
+                orders_str = ", ".join(d.current_orders) if d.current_orders else "none"
+                disconnect_tag = " **DISCONNECTED**" if d.disconnected else ""
+                recovering_tag = " [recovering]" if d.recovering else ""
                 lines.append(
-                    f"  {cid}: status={c.status.value}, "
+                    f"  {did}: status={d.status.value}, "
                     f"orders=[{orders_str}]"
                     f"{disconnect_tag}{recovering_tag}"
                 )
@@ -293,7 +293,7 @@ class FleetState:
                 lines.append(
                     f"  {oid}: {o.hotel} ({o.label}), "
                     f"priority={o.priority.value}, status={o.status.value}, "
-                    f"AI-Crew={o.assigned_crew_id or 'unassigned'}, "
+                    f"AI-Driver={o.assigned_driver_id or 'unassigned'}, "
                     f"deadline={o.deadline_minutes}min"
                 )
             return "\n".join(lines)
@@ -303,15 +303,15 @@ class FleetState:
         async with self._lock:
             lines = ["=== Order Priorities ==="]
             for oid, o in self.orders.items():
-                crew_status = ""
-                if o.assigned_crew_id:
-                    crew = self.crews.get(o.assigned_crew_id)
-                    if crew and crew.disconnected:
-                        crew_status = f" **CREW {o.assigned_crew_id} DISCONNECTED**"
+                driver_status = ""
+                if o.assigned_driver_id:
+                    driver = self.drivers.get(o.assigned_driver_id)
+                    if driver and driver.disconnected:
+                        driver_status = f" **DRIVER {o.assigned_driver_id} DISCONNECTED**"
                 lines.append(
                     f"  {oid}: {o.hotel} — {o.priority.value.upper()}, "
                     f"{o.servings} servings, deadline={o.deadline_minutes}min, "
-                    f"status={o.status.value}{crew_status}"
+                    f"status={o.status.value}{driver_status}"
                 )
             return "\n".join(lines)
 

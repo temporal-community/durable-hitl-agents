@@ -37,8 +37,9 @@
     color: var(--text-primary);
     height: 100vh;
     display: grid;
-    grid-template-columns: 420px 1fr;
-    grid-template-rows: 56px auto auto 1fr;
+    font-size: 20px;
+    grid-template-columns: 520px 1fr;
+    grid-template-rows: 64px auto auto 1fr;
   }
 
   /* --- Header --- */
@@ -56,13 +57,13 @@
     align-items: center;
   }
   header h1 {
-    font-size: 18px;
+    font-size: 24px;
     font-weight: 700;
     color: #fff;
   }
   header h1 .accent {
     font-family: 'Monoton', cursive;
-    font-size: 22px;
+    font-size: 28px;
     font-weight: 400;
     color: #ff2a6d;
     text-shadow:
@@ -71,7 +72,7 @@
       0 0 40px #ff2a6d44;
     letter-spacing: 2px;
   }
-  header h1 .sub { color: var(--text-muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
+  header h1 .sub { color: var(--text-muted); font-weight: 400; font-size: 15px; margin-left: 8px; }
   .header-right {
     display: flex;
     align-items: center;
@@ -86,7 +87,7 @@
     opacity: 0.9;
   }
   .brand-name {
-    font-size: 13px;
+    font-size: 15px;
     font-weight: 600;
     color: var(--text-muted);
     letter-spacing: 0.3px;
@@ -106,8 +107,8 @@
     align-items: stretch;
   }
   .tab-bar .tab {
-    padding: 10px 24px;
-    font-size: 12px;
+    padding: 14px 24px;
+    font-size: 16px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -134,7 +135,7 @@
     grid-column: 1 / -1;
     background: #161922;
     border-bottom: 1px solid #2a2d3a;
-    padding: 8px 24px;
+    padding: 12px 24px;
   }
   .tab-panel {
     display: none;
@@ -145,10 +146,10 @@
   .tab-panel.active { display: flex; }
 
   .btn {
-    padding: 6px 14px;
+    padding: 8px 16px;
     border: none;
     border-radius: 6px;
-    font-size: 12px;
+    font-size: 17px;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -165,8 +166,8 @@
   .btn-disrupt:hover { background: #ea580c; }
   .btn-change { background: #a855f7; color: #fff; }
   .btn-change:hover { background: #9333ea; }
-  .btn-approve { background: #22c55e; color: #fff; font-size: 11px; padding: 4px 10px; }
-  .btn-reject { background: #ef4444; color: #fff; font-size: 11px; padding: 4px 10px; }
+  .btn-approve { background: #22c55e; color: #fff; font-size: 15px; padding: 6px 12px; }
+  .btn-reject { background: #ef4444; color: #fff; font-size: 15px; padding: 6px 12px; }
   .btn-reset { background: #374151; color: #9ca3af; }
   .btn-reset:hover { background: #4b5563; color: #fff; }
 
@@ -174,7 +175,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: 15px;
     font-weight: 600;
   }
   .worker-dot {
@@ -198,12 +199,15 @@
   }
 
   .panel-section {
-    padding: 12px 16px;
+    padding: 14px 20px;
     border-bottom: 1px solid #2a2d3a;
+    position: relative;
+    z-index: 1;
+    background: var(--surface-0);
   }
 
   .section-label {
-    font-size: 11px;
+    font-size: 18px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -217,7 +221,7 @@
   }
   .section-label::after {
     content: '\25B4';
-    font-size: 10px;
+    font-size: 14px;
     color: #4b5563;
     transition: transform 0.2s ease;
   }
@@ -235,8 +239,8 @@
     overflow-y: auto;
   }
   .agent-panel.collapsed {
-    flex: 0;
-    overflow: hidden;
+    flex: 0 0 auto;
+    overflow: visible;
   }
 
   /* Middle sections (couriers/orders) — compact, collapsible */
@@ -284,8 +288,8 @@
   .agent-box-header {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
+    gap: 10px;
+    padding: 10px 14px;
     background: #1a1d28;
   }
   .agent-box-icon {
@@ -301,14 +305,14 @@
     flex-shrink: 0;
   }
   .agent-box-name {
-    font-size: 11px;
+    font-size: 15px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--agent-color);
   }
   .agent-box-role {
-    font-size: 10px;
+    font-size: 13px;
     color: #6b7280;
     font-weight: 400;
     text-transform: none;
@@ -316,7 +320,7 @@
   }
   .agent-box-status {
     margin-left: auto;
-    font-size: 9px;
+    font-size: 13px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -355,20 +359,20 @@
     transition: max-height 0.3s ease, padding 0.3s ease;
   }
   .agent-box.active .agent-box-body {
-    padding: 8px 12px;
-    max-height: 160px;
+    padding: 10px 14px;
+    max-height: 180px;
     overflow-y: auto;
   }
   .agent-box-entry {
-    font-size: 11px;
+    font-size: 15px;
     line-height: 1.5;
     color: #d1d5db;
-    padding: 6px 0;
+    padding: 8px 0;
     border-bottom: 1px solid #2a2d3a;
   }
   .agent-box-entry:last-child { border-bottom: none; }
   .agent-box-entry .entry-type {
-    font-size: 9px;
+    font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -390,7 +394,7 @@
     border-bottom: 1px solid var(--temporal-uv-dim);
   }
   .phase-separator span {
-    font-size: 9px;
+    font-size: 12px;
     font-weight: 700;
     letter-spacing: 1.5px;
     color: var(--temporal-uv);
@@ -410,7 +414,7 @@
 
   .agent-empty {
     color: #4b5563;
-    font-size: 12px;
+    font-size: 15px;
     font-style: italic;
     padding: 16px;
     text-align: center;
@@ -420,12 +424,12 @@
   .card {
     background: #1e2130;
     border-radius: 8px;
-    padding: 10px 12px;
+    padding: 12px 16px;
     border: 1px solid #2a2d3a;
-    margin-bottom: 6px;
+    margin-bottom: 8px;
   }
   .card h3 {
-    font-size: 12px;
+    font-size: 16px;
     font-weight: 600;
     margin-bottom: 4px;
     display: flex;
@@ -434,8 +438,8 @@
   }
   .status-pill {
     display: inline-block;
-    font-size: 9px;
-    padding: 2px 7px;
+    font-size: 12px;
+    padding: 3px 8px;
     border-radius: 10px;
     font-weight: 600;
     text-transform: uppercase;
@@ -461,7 +465,7 @@
   .priority-vip { color: #f97316; font-weight: 700; }
   .priority-standard { color: #6b7280; }
 
-  .detail { font-size: 11px; color: #6b7280; margin-top: 2px; }
+  .detail { font-size: 15px; color: #6b7280; margin-top: 3px; }
 
   @keyframes pulse {
     0%, 100% { opacity: 1; }
@@ -558,7 +562,7 @@
   }
   .vegas-name {
     font-family: 'Monoton', cursive;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 400;
     color: #cc0000;
     letter-spacing: 1px;
@@ -647,7 +651,7 @@
   }
   .retro-name {
     font-family: 'Monoton', cursive;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 400;
     color: #ff69b4;
     letter-spacing: 1px;
@@ -741,9 +745,9 @@
     background: var(--surface-1);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 6px 12px;
+    padding: 8px 14px;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: 15px;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -768,8 +772,8 @@
   }
   .style-picker-menu.open { display: block; }
   .style-option {
-    padding: 8px 14px;
-    font-size: 12px;
+    padding: 10px 14px;
+    font-size: 15px;
     font-weight: 500;
     color: var(--text-primary);
     cursor: pointer;
@@ -786,7 +790,7 @@
     max-height: 200px;
     overflow-y: auto;
     font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 10px;
+    font-size: 14px;
     color: #6b7280;
     background: #111318;
     border-radius: 6px;
@@ -824,7 +828,7 @@
     display: none;
   }
   .entry-ellipsis {
-    font-size: 10px;
+    font-size: 13px;
     color: var(--agent-color, #6b7280);
     opacity: 0.6;
     cursor: pointer;
@@ -858,8 +862,8 @@
   .crew-disconnect-banner {
     display: none;
     position: fixed;
-    top: 56px;
-    left: 420px;
+    top: 64px;
+    left: 520px;
     right: 0;
     background: rgba(239, 68, 68, 0.88);
     z-index: 999;
@@ -873,14 +877,14 @@
     animation: none;
   }
   .crew-disconnect-banner .banner-text {
-    font-size: 13px;
+    font-size: 18px;
     font-weight: 700;
     color: #fff;
     text-transform: uppercase;
     letter-spacing: 1.5px;
   }
   .crew-disconnect-banner .banner-sub {
-    font-size: 11px;
+    font-size: 15px;
     color: rgba(255,255,255,0.85);
     margin-top: 2px;
   }
@@ -891,16 +895,16 @@
     color: #e0e0e0;
     border: 1px solid #2a2d3a;
     border-radius: 6px;
-    padding: 5px 8px;
-    font-size: 12px;
+    padding: 7px 10px;
+    font-size: 16px;
   }
   .agent-select {
     background: #1e2130;
     color: #e0e0e0;
     border: 1px solid #2a2d3a;
     border-radius: 6px;
-    padding: 5px 8px;
-    font-size: 12px;
+    padding: 7px 10px;
+    font-size: 16px;
   }
 </style>
 </head>
@@ -951,27 +955,27 @@
   <div class="tab-panel" id="panel-crew">
     <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
     <select id="crew-disconnect-select" class="crew-select">
-      <option value="ai-crew-1">AI-Crew 1</option>
-      <option value="ai-crew-2">AI-Crew 2</option>
-      <option value="ai-crew-3">AI-Crew 3</option>
+      <option value="ai-driver-1">AI-Driver 1</option>
+      <option value="ai-driver-2">AI-Driver 2</option>
+      <option value="ai-driver-3">AI-Driver 3</option>
     </select>
-    <button class="btn" onclick="disconnectCrew()">Disconnect Crew</button>
+    <button class="btn" onclick="disconnectCrew()">Service Lost</button>
     <button class="btn btn-restart" onclick="reconnectCrew()">Reconnect Crew</button>
     <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
   </div>
   <div class="tab-panel" id="panel-customer">
     <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
-    <select id="change-order" style="background:#1e2130;color:#e0e0e0;border:1px solid #2a2d3a;border-radius:6px;padding:5px 8px;font-size:12px;">
+    <select id="change-order" style="background:#1e2130;color:#e0e0e0;border:1px solid #2a2d3a;border-radius:6px;padding:7px 10px;font-size:16px;">
       <option value="order-1">order-1 (MGM Grand)</option>
       <option value="order-2" selected>order-2 (Caesars Palace)</option>
       <option value="order-3">order-3 (Mandalay Bay)</option>
     </select>
-    <select id="change-type" style="background:#1e2130;color:#e0e0e0;border:1px solid #2a2d3a;border-radius:6px;padding:5px 8px;font-size:12px;">
+    <select id="change-type" style="background:#1e2130;color:#e0e0e0;border:1px solid #2a2d3a;border-radius:6px;padding:7px 10px;font-size:16px;">
       <option value="address_change">Address Change</option>
       <option value="cancel">Cancel Order</option>
     </select>
     <button class="btn btn-change" onclick="submitCustomerChange()">Submit Change</button>
-    <span id="change-status" style="font-size:11px;color:#fbbf24;display:none;">Awaiting approval...</span>
+    <span id="change-status" style="font-size:16px;color:#fbbf24;display:none;">Awaiting approval...</span>
     <button class="btn btn-approve" id="btn-approve" onclick="approveChange(true)" style="display:none;">Approve</button>
     <button class="btn btn-reject" id="btn-reject" onclick="approveChange(false)" style="display:none;">Reject</button>
     <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
@@ -981,7 +985,7 @@
 <div class="left-panel">
   <!-- Agent Reasoning Panel -->
   <div class="panel-section agent-panel" id="section-agents">
-    <div class="section-label" onclick="toggleSection('section-agents')">AI-Crew Fleet Intelligence</div>
+    <div class="section-label" onclick="toggleSection('section-agents')">AI-Driver Fleet Intelligence</div>
     <div class="section-body">
       <div id="agent-events" class="agent-boxes">
         <div class="agent-box fleet_agent" id="agent-box-fleet_agent">
@@ -1024,7 +1028,7 @@
   <!-- Couriers + Orders (middle, compact) -->
   <div class="mid-sections">
     <div class="panel-section collapsed" id="section-couriers">
-      <div class="section-label" onclick="toggleSection('section-couriers')">AI-Crews</div>
+      <div class="section-label" onclick="toggleSection('section-couriers')">AI-Drivers</div>
       <div class="section-body">
         <div id="crew-cards"></div>
       </div>
@@ -1049,8 +1053,8 @@
 <div id="map"></div>
 
 <div id="crew-disconnect-banner" class="crew-disconnect-banner">
-  <div class="banner-text"><span id="crew-banner-text">AI-Crew Disconnected</span></div>
-  <div class="banner-sub"><span id="crew-banner-sub">Other crews continue delivering. Temporal will retry when reconnected.</span></div>
+  <div class="banner-text"><span id="crew-banner-text">AI-Driver Disconnected</span></div>
+  <div class="banner-sub"><span id="crew-banner-sub">Other drivers continue delivering. Temporal will retry when reconnected.</span></div>
 </div>
 
 <script>
@@ -1240,11 +1244,11 @@ function connectWS() {
   ws = new WebSocket(`${protocol}//${location.host}/ws`);
   ws.onmessage = (e) => {
     const state = JSON.parse(e.data);
-    updateCrews(state.crews);
+    updateCrews(state.drivers);
     updateOrders(state.orders);
     updateAgentEvents(state.agent_events, state.agent_health);
     updateEventLog(state.event_log);
-    updateCrewDisconnectBanner(state.crews);
+    updateCrewDisconnectBanner(state.drivers);
   };
   ws.onclose = () => setTimeout(connectWS, 1000);
 }
@@ -1257,30 +1261,30 @@ function updateCrews(crews) {
     const color = CREW_COLORS[c.status] || '#94a3b8';
 
     // Calculate bearing from previous position
-    let bearing = prevPositions[c.crew_id]?.bearing || 0;
-    const prev = prevPositions[c.crew_id]?.pos;
+    let bearing = prevPositions[c.driver_id]?.bearing || 0;
+    const prev = prevPositions[c.driver_id]?.pos;
     if (prev && (prev[0] !== pos[0] || prev[1] !== pos[1])) {
       bearing = getBearing(prev, pos);
     }
-    prevPositions[c.crew_id] = { pos, bearing };
+    prevPositions[c.driver_id] = { pos, bearing };
 
-    if (!crewMarkers[c.crew_id]) {
-      crewMarkers[c.crew_id] = L.marker(pos, { icon: crewIcon(color, false, bearing) }).addTo(map);
-      crewMarkers[c.crew_id].bindTooltip(c.crew_id, { direction: 'top', offset: [0, -24] });
-      crewTrails[c.crew_id] = L.polyline([], {
+    if (!crewMarkers[c.driver_id]) {
+      crewMarkers[c.driver_id] = L.marker(pos, { icon: crewIcon(color, false, bearing) }).addTo(map);
+      crewMarkers[c.driver_id].bindTooltip(c.driver_id, { direction: 'top', offset: [0, -24] });
+      crewTrails[c.driver_id] = L.polyline([], {
         color, weight: 2, opacity: 0.4, dashArray: '4 6',
       }).addTo(map);
     } else {
-      crewMarkers[c.crew_id].setLatLng(pos);
-      crewMarkers[c.crew_id].setIcon(crewIcon(color, false, bearing));
+      crewMarkers[c.driver_id].setLatLng(pos);
+      crewMarkers[c.driver_id].setIcon(crewIcon(color, false, bearing));
     }
 
     if (c.status === 'idle') {
       // Clear trail after delivery completes
-      crewTrails[c.crew_id].setLatLngs([]);
+      crewTrails[c.driver_id].setLatLngs([]);
     } else if (c.path_history && c.path_history.length > 0) {
-      crewTrails[c.crew_id].setLatLngs(c.path_history.map(p => [p.lat, p.lng]));
-      crewTrails[c.crew_id].setStyle({ color });
+      crewTrails[c.driver_id].setLatLngs(c.path_history.map(p => [p.lat, p.lng]));
+      crewTrails[c.driver_id].setStyle({ color });
     }
   });
 
@@ -1290,7 +1294,7 @@ function updateCrews(crews) {
     const orders = c.current_orders.length > 0 ? c.current_orders.join(', ') : 'none';
     return `
       <div class="card">
-        <h3>${c.crew_id} <span class="status-pill status-${c.status}">${c.status.replace(/_/g, ' ')}</span></h3>
+        <h3>${c.driver_id} <span class="status-pill status-${c.status}">${c.status.replace(/_/g, ' ')}</span></h3>
         <div class="detail">Orders: ${orders}</div>
       </div>
     `;
@@ -1311,7 +1315,7 @@ function updateOrders(orders) {
           <span class="status-pill status-${o.status}">${o.status.replace(/_/g, ' ')}</span>
         </h3>
         <div class="detail">${o.label} &middot; ${o.servings} servings</div>
-        <div class="detail">AI-Crew: ${o.assigned_crew_id || 'unassigned'} &middot; Deadline: ${o.deadline_minutes}min</div>
+        <div class="detail">AI-Driver: ${o.assigned_driver_id || 'unassigned'} &middot; Deadline: ${o.deadline_minutes}min</div>
         ${lastLog ? `<div class="detail" style="color: #9ca3af;">${lastLog}</div>` : ''}
       </div>
     `;
@@ -1530,17 +1534,17 @@ async function approveChange(approved) {
   }, 3000);
 }
 
-// --- Per-crew disconnect/reconnect ---
+// --- Per-driver disconnect/reconnect ---
 async function disconnectCrew() {
-  const crewId = document.getElementById('crew-disconnect-select').value;
-  const result = await api('disconnect-crew', 'POST', { crew_id: crewId });
-  console.log('Crew disconnected:', result);
+  const driverId = document.getElementById('crew-disconnect-select').value;
+  const result = await api('disconnect-crew', 'POST', { driver_id: driverId });
+  console.log('Driver disconnected:', result);
 }
 
 async function reconnectCrew() {
-  const crewId = document.getElementById('crew-disconnect-select').value;
-  const result = await api('reconnect-crew', 'POST', { crew_id: crewId });
-  console.log('Crew reconnected:', result);
+  const driverId = document.getElementById('crew-disconnect-select').value;
+  const result = await api('reconnect-crew', 'POST', { driver_id: driverId });
+  console.log('Driver reconnected:', result);
 }
 
 function updateCrewDisconnectBanner(crews) {
@@ -1552,16 +1556,16 @@ function updateCrewDisconnectBanner(crews) {
   const recovering = Object.values(crews).filter(c => c.recovering);
 
   if (recovering.length > 0) {
-    const ids = recovering.map(c => c.crew_id).join(', ');
+    const ids = recovering.map(c => c.driver_id).join(', ');
     banner.classList.add('active', 'recovering');
     textEl.textContent = `Replaying — ${ids}`;
     subEl.textContent = 'Temporal restoring workflow state from durable history...';
   } else if (disconnected.length > 0) {
-    const ids = disconnected.map(c => c.crew_id).join(', ');
+    const ids = disconnected.map(c => c.driver_id).join(', ');
     banner.classList.add('active');
     banner.classList.remove('recovering');
     textEl.textContent = `${ids} Disconnected`;
-    subEl.textContent = 'Other crews continue delivering. Temporal will retry when reconnected.';
+    subEl.textContent = 'Other drivers continue delivering. Temporal will retry when reconnected.';
   } else {
     banner.classList.remove('active', 'recovering');
   }

@@ -9,7 +9,7 @@ from typing import Any
 # --- Enums ---
 
 
-class CrewStatus(str, enum.Enum):
+class DriverStatus(str, enum.Enum):
     IDLE = "idle"
     EN_ROUTE_PICKUP = "en_route_pickup"
     PICKING_UP = "picking_up"
@@ -55,21 +55,21 @@ class Coords:
 
 
 @dataclass
-class Crew:
-    crew_id: str
+class Driver:
+    driver_id: str
     position: Coords
     battery_pct: float = 100.0
-    status: CrewStatus = CrewStatus.IDLE
+    status: DriverStatus = DriverStatus.IDLE
     capacity: int = 3
     current_orders: list[str] = field(default_factory=list)
     path_history: list[dict[str, float]] = field(default_factory=list)
     disconnected: bool = False
     recovering: bool = False
-    status_before_disconnect: CrewStatus = CrewStatus.IDLE
+    status_before_disconnect: DriverStatus = DriverStatus.IDLE
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "crew_id": self.crew_id,
+            "driver_id": self.driver_id,
             "position": self.position.to_dict(),
             "battery_pct": self.battery_pct,
             "status": self.status.value,
@@ -89,7 +89,7 @@ class Order:
     priority: OrderPriority
     servings: int
     delivery_coords: Coords
-    assigned_crew_id: str | None = None
+    assigned_driver_id: str | None = None
     status: OrderStatus = OrderStatus.PENDING
     deadline_minutes: int = 45
     status_log: list[str] = field(default_factory=list)
@@ -102,7 +102,7 @@ class Order:
             "priority": self.priority.value,
             "servings": self.servings,
             "delivery_coords": self.delivery_coords.to_dict(),
-            "assigned_crew_id": self.assigned_crew_id,
+            "assigned_driver_id": self.assigned_driver_id,
             "status": self.status.value,
             "deadline_minutes": self.deadline_minutes,
             "status_log": self.status_log,
@@ -113,10 +113,10 @@ class Order:
 
 
 @dataclass
-class CrewSnapshot:
-    """Workflow-owned snapshot of a crew's state, passed to activities as input."""
+class DriverSnapshot:
+    """Workflow-owned snapshot of a driver's state, passed to activities as input."""
 
-    crew_id: str
+    driver_id: str
     lat: float
     lng: float
     status: str
@@ -153,33 +153,33 @@ class ReasonAboutAssignmentInput:
     servings: int
     deadline_minutes: int
     event: str
-    crew_snapshots: list[CrewSnapshot] = field(default_factory=list)
+    driver_snapshots: list[DriverSnapshot] = field(default_factory=list)
     disconnected_agents: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ReasonAboutAssignmentOutput:
-    crew_id: str
+    driver_id: str
     reasoning_summary: str
 
 
 @dataclass
 class NavigateInput:
-    crew_id: str
+    driver_id: str
     order_id: str
     target_lat: float
     target_lng: float
     leg: str  # LegType value — "pickup" or "delivery"
     steps: int = 8
     waypoints: list[dict] | None = None  # [{"lat": float, "lng": float}, ...]
-    is_crew_disconnected: bool = False
+    is_driver_disconnected: bool = False
     start_lat: float | None = None
     start_lng: float | None = None
 
 
 @dataclass
 class NavigateOutput:
-    crew_id: str
+    driver_id: str
     arrived: bool
     final_lat: float
     final_lng: float
@@ -187,27 +187,27 @@ class NavigateOutput:
 
 @dataclass
 class PickupInput:
-    crew_id: str
+    driver_id: str
     order_ids: list[str]
-    is_crew_disconnected: bool = False
+    is_driver_disconnected: bool = False
 
 
 @dataclass
 class PickupOutput:
-    crew_id: str
+    driver_id: str
     success: bool
 
 
 @dataclass
 class DeliverInput:
-    crew_id: str
+    driver_id: str
     order_id: str
-    is_crew_disconnected: bool = False
+    is_driver_disconnected: bool = False
 
 
 @dataclass
 class DeliverOutput:
-    crew_id: str
+    driver_id: str
     order_id: str
     success: bool
 
@@ -273,11 +273,11 @@ class ExecuteCustomerChangeOutput:
     success: bool
 
 
-# --- Crew route workflow payloads ---
+# --- Driver route workflow payloads ---
 
 
 @dataclass
-class CrewRouteOrder:
+class DriverRouteOrder:
     order_id: str
     hotel: str
     delivery_lat: float
@@ -285,15 +285,25 @@ class CrewRouteOrder:
 
 
 @dataclass
-class CrewRouteInput:
-    crew_id: str
+class OrderUpdateInput:
+    """Signaled to DriverRouteWorkflow when an order's delivery changes."""
+
+    order_id: str
+    change_type: str  # "address_change" or "cancel"
+    new_lat: float | None = None
+    new_lng: float | None = None
+
+
+@dataclass
+class DriverRouteInput:
+    driver_id: str
 
 
 @dataclass
 class OrderDeliveredInput:
-    """Signaled from CrewRouteWorkflow to parent when a delivery completes."""
+    """Signaled from DriverRouteWorkflow to parent when a delivery completes."""
 
-    crew_id: str
+    driver_id: str
     order_id: str
     delivery_lat: float
     delivery_lng: float
@@ -324,8 +334,8 @@ class AgentEvent:
 
 
 @dataclass
-class CrewDisconnectInput:
-    crew_id: str
+class DriverDisconnectInput:
+    driver_id: str
 
 
 @dataclass
@@ -334,10 +344,10 @@ class AgentDisconnectInput:
 
 
 @dataclass
-class SyncCrewDisconnectInput:
+class SyncDriverDisconnectInput:
     """Pushed from workflow to FleetState after processing a disconnect/reconnect signal."""
 
-    crew_id: str
+    driver_id: str
     disconnected: bool
 
 

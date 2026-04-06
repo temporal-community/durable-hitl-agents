@@ -14,20 +14,24 @@ from agent_fleet.activities import (
     generate_order,
     get_fleet_status,
     get_order_priorities,
-    get_route_polyline,
     navigate_to,
     pickup_orders,
     publish_agent_event,
     reason_about_assignment,
     register_assignment,
-    sync_crew_disconnect,
-    sync_crew_recovery_complete,
+    sync_driver_disconnect,
+    sync_driver_recovery_complete,
 )
 from agent_fleet.locations import VENUES
+from agent_fleet.mock_activities import (
+    mock_get_route_polyline,
+    mock_tool_get_route_info,
+    mock_tool_search_hotel_context,
+)
 from agent_fleet.models import (
-    CrewRouteInput,
-    CrewRouteOrder,
     CustomerChangeInput,
+    DriverRouteInput,
+    DriverRouteOrder,
     MeltdownDemoInput,
 )
 from agent_fleet.queues import AGENTS_QUEUE, DELIVERY_QUEUE, WORKFLOWS_QUEUE
@@ -40,32 +44,15 @@ async def env():
         yield env
 
 
-ALL_ACTIVITIES = [
-    generate_order,
-    reason_about_assignment,
-    register_assignment,
-    navigate_to,
-    pickup_orders,
-    deliver_order,
-    get_fleet_status,
-    get_order_priorities,
-    publish_agent_event,
-    execute_customer_change,
-    get_route_polyline,
-    sync_crew_disconnect,
-    sync_crew_recovery_complete,
-]
-
-
 @asynccontextmanager
 async def run_workers(env: WorkflowEnvironment):
-    """Start three workers matching production topology."""
-    from agent_fleet.workflows import CrewRouteWorkflow, MeltdownDemoWorkflow
+    """Start three workers matching production topology, using mock API activities."""
+    from agent_fleet.workflows import DriverRouteWorkflow, MeltdownDemoWorkflow
 
     workflow_worker = Worker(
         env.client,
         task_queue=WORKFLOWS_QUEUE,
-        workflows=[MeltdownDemoWorkflow, CrewRouteWorkflow],
+        workflows=[MeltdownDemoWorkflow, DriverRouteWorkflow],
     )
     delivery_worker = Worker(
         env.client,
@@ -76,12 +63,12 @@ async def run_workers(env: WorkflowEnvironment):
             pickup_orders,
             deliver_order,
             execute_customer_change,
-            get_route_polyline,
+            mock_get_route_polyline,  # mock — no real Google Maps API in tests
             get_fleet_status,
             get_order_priorities,
             publish_agent_event,
-            sync_crew_disconnect,
-            sync_crew_recovery_complete,
+            sync_driver_disconnect,
+            sync_driver_recovery_complete,
         ],
     )
     agents_worker = Worker(
@@ -90,6 +77,8 @@ async def run_workers(env: WorkflowEnvironment):
         activities=[
             reason_about_assignment,
             register_assignment,
+            mock_tool_get_route_info,  # mock
+            mock_tool_search_hotel_context,  # mock
         ],
     )
 
@@ -97,9 +86,9 @@ async def run_workers(env: WorkflowEnvironment):
         yield
 
 
-async def test_crew_route_completes_with_signal(env: WorkflowEnvironment):
-    """CrewRouteWorkflow receives an order via signal, delivers it, then stops."""
-    from agent_fleet.workflows import CrewRouteWorkflow
+async def test_driver_route_completes_with_signal(env: WorkflowEnvironment):
+    """DriverRouteWorkflow receives an order via signal, delivers it, then stops."""
+    from agent_fleet.workflows import DriverRouteWorkflow
 
     venue = VENUES[0]  # MGM Grand
 
@@ -113,20 +102,20 @@ async def test_crew_route_completes_with_signal(env: WorkflowEnvironment):
         delivery_coords=venue["coords"],
         deadline_minutes=30,
     )
-    await fleet.assign_order_to_crew("ai-crew-1", "order-1")
+    await fleet.assign_order_to_driver("ai-driver-1", "order-1")
 
     async with run_workers(env):
         handle = await env.client.start_workflow(
-            CrewRouteWorkflow.run,
-            CrewRouteInput(crew_id="ai-crew-1"),
-            id="test-route-ai-crew-1",
+            DriverRouteWorkflow.run,
+            DriverRouteInput(driver_id="ai-driver-1"),
+            id="test-route-ai-driver-1",
             task_queue=WORKFLOWS_QUEUE,
         )
 
         # Signal the order
         await handle.signal(
-            CrewRouteWorkflow.add_order,
-            CrewRouteOrder(
+            DriverRouteWorkflow.add_order,
+            DriverRouteOrder(
                 order_id="order-1",
                 hotel=venue["hotel"],
                 delivery_lat=venue["coords"].lat,
@@ -136,15 +125,15 @@ async def test_crew_route_completes_with_signal(env: WorkflowEnvironment):
 
         # Let it process, then stop
         await asyncio.sleep(2)
-        await handle.signal(CrewRouteWorkflow.stop)
+        await handle.signal(DriverRouteWorkflow.stop)
 
         result = await handle.result()
-        assert "ai-crew-1" in result
+        assert "ai-driver-1" in result
         assert "1 deliveries" in result or "completed" in result.lower()
 
 
 async def test_meltdown_demo_completes(env: WorkflowEnvironment):
-    """Full demo workflow generates orders, assigns crews, and completes."""
+    """Full demo workflow generates orders, assigns drivers, and completes."""
     from agent_fleet.workflows import MeltdownDemoWorkflow
 
     async with run_workers(env):

@@ -1,6 +1,6 @@
 """Simulation state tests."""
 
-from agent_fleet.models import CrewStatus, OrderStatus
+from agent_fleet.models import DriverStatus, OrderStatus
 from agent_fleet.simulation import fleet
 
 
@@ -22,15 +22,15 @@ async def test_register_and_get_order():
     assert order.priority == "vip"
 
 
-async def test_crew_disconnect_and_reconnect():
-    await fleet.disconnect_crew("ai-crew-1")
-    assert await fleet.is_crew_disconnected("ai-crew-1") is True
+async def test_driver_disconnect_and_reconnect():
+    await fleet.disconnect_driver("ai-driver-1")
+    assert await fleet.is_driver_disconnected("ai-driver-1") is True
 
-    crew = await fleet.get_crew("ai-crew-1")
-    assert crew.status == CrewStatus.DISCONNECTED
+    driver = await fleet.get_driver("ai-driver-1")
+    assert driver.status == DriverStatus.DISCONNECTED
 
-    await fleet.reconnect_crew("ai-crew-1")
-    assert await fleet.is_crew_disconnected("ai-crew-1") is False
+    await fleet.reconnect_driver("ai-driver-1")
+    assert await fleet.is_driver_disconnected("ai-driver-1") is False
 
 
 async def test_agent_disconnect_and_reconnect():
@@ -42,7 +42,7 @@ async def test_agent_disconnect_and_reconnect():
     assert await fleet.is_agent_online("fleet_agent") is True
 
 
-async def test_assign_order_to_crew():
+async def test_assign_order_to_driver():
     from agent_fleet.models import Coords
 
     await fleet.register_order(
@@ -54,11 +54,11 @@ async def test_assign_order_to_crew():
         delivery_coords=Coords(lat=36.1162, lng=-115.1745),
         deadline_minutes=40,
     )
-    await fleet.assign_order_to_crew("ai-crew-1", "order-1")
+    await fleet.assign_order_to_driver("ai-driver-1", "order-1")
 
     order = await fleet.get_order("order-1")
-    assert order.assigned_crew_id == "ai-crew-1"
+    assert order.assigned_driver_id == "ai-driver-1"
     assert order.status == OrderStatus.ASSIGNED
 
-    crew = await fleet.get_crew("ai-crew-1")
-    assert "order-1" in crew.current_orders
+    driver = await fleet.get_driver("ai-driver-1")
+    assert "order-1" in driver.current_orders
