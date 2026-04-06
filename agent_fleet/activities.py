@@ -46,112 +46,6 @@ from agent_fleet.simulation import fleet
 
 # --- Polyline decoding and route fetching ---
 
-# Known locations for mock waypoint generation (Las Vegas Strip)
-_STRIP_POINTS = {
-    "warehouse": (36.1280, -115.1530),
-    "caesars": (36.1162, -115.1745),
-    "mgm": (36.1024, -115.1696),
-    "mandalay": (36.0919, -115.1761),
-}
-
-# Intermediate points along Las Vegas Blvd from warehouse heading south
-# Las Vegas Blvd S — anchor points verified against map tiles + interpolated
-# The strip runs SSE from Venetian, bends at Flamingo, then curves SW to Mandalay
-# Coordinates placed ON the road centerline as shown on CartoDB/Stadia tiles
-_STRIP_CORRIDOR = [
-    # --- Paradise Rd to the Strip (new shop location east of the Strip) ---
-    # Frosty's Ice Cream on Paradise Rd near Convention Center
-    (36.12800, -115.15300),
-    # Head west on Convention Center Dr / Desert Inn Rd toward the Strip
-    (36.12800, -115.15500),
-    (36.12800, -115.15700),
-    (36.12800, -115.15900),
-    (36.12800, -115.16100),
-    (36.12800, -115.16300),
-    (36.12800, -115.16500),
-    (36.12800, -115.16700),
-    (36.12800, -115.16900),
-    # Reach Las Vegas Blvd and turn south
-    (36.12700, -115.17050),
-    (36.12500, -115.17080),
-    (36.12350, -115.17090),
-    # Venetian / Palazzo — LV Blvd here is at ~-115.1710
-    (36.12200, -115.17100),
-    (36.12150, -115.17105),
-    (36.12100, -115.17110),
-    (36.12050, -115.17120),
-    (36.12000, -115.17130),
-    # LINQ / Harrah's
-    (36.11950, -115.17150),
-    (36.11900, -115.17170),
-    (36.11850, -115.17200),
-    (36.11800, -115.17220),
-    # Flamingo intersection — road at ~-115.1726
-    (36.11750, -115.17240),
-    (36.11700, -115.17260),
-    # Caesars Palace (marker: 36.1162, -115.1745)
-    (36.11670, -115.17300),
-    (36.11650, -115.17350),
-    (36.11620, -115.17450),  # Caesars marker
-    (36.11580, -115.17460),
-    (36.11540, -115.17470),
-    # Bellagio — road at ~-115.1742
-    (36.11500, -115.17420),
-    (36.11450, -115.17410),
-    (36.11400, -115.17400),
-    (36.11350, -115.17390),
-    (36.11300, -115.17380),
-    (36.11250, -115.17370),
-    (36.11200, -115.17360),
-    # Cosmopolitan
-    (36.11150, -115.17355),
-    (36.11100, -115.17350),
-    (36.11050, -115.17350),
-    (36.11000, -115.17350),
-    (36.10940, -115.17350),
-    # CityCenter / Aria — road bends slightly east
-    (36.10880, -115.17340),
-    (36.10830, -115.17330),
-    (36.10780, -115.17310),
-    (36.10730, -115.17300),
-    (36.10680, -115.17290),
-    (36.10630, -115.17280),
-    # Park MGM
-    (36.10580, -115.17270),
-    (36.10530, -115.17265),
-    (36.10480, -115.17260),
-    (36.10430, -115.17255),
-    # Tropicana / MGM Grand (marker: 36.1024, -115.1725)
-    (36.10380, -115.17250),
-    (36.10330, -115.17250),
-    (36.10280, -115.17250),
-    (36.10240, -115.17250),  # MGM Grand marker
-    (36.10200, -115.17250),
-    (36.10150, -115.17260),
-    (36.10100, -115.17270),
-    (36.10050, -115.17290),
-    # South of MGM — road curves southwest
-    (36.10000, -115.17310),
-    (36.09950, -115.17330),
-    (36.09900, -115.17360),
-    (36.09850, -115.17390),
-    (36.09800, -115.17420),
-    # Excalibur / Luxor
-    (36.09750, -115.17450),
-    (36.09700, -115.17480),
-    (36.09650, -115.17500),
-    (36.09600, -115.17520),
-    (36.09550, -115.17540),
-    (36.09500, -115.17560),
-    # Mandalay Bay approach (marker: 36.0919, -115.1761)
-    (36.09450, -115.17570),
-    (36.09400, -115.17580),
-    (36.09350, -115.17590),
-    (36.09300, -115.17600),
-    (36.09250, -115.17610),
-    (36.09190, -115.17610),  # Mandalay Bay marker
-]
-
 
 def decode_polyline(encoded: str) -> list[tuple[float, float]]:
     """Decode a Google Maps encoded polyline string into (lat, lng) tuples."""
@@ -192,56 +86,6 @@ def decode_polyline(encoded: str) -> list[tuple[float, float]]:
     return points
 
 
-def _mock_route_waypoints(
-    origin_lat: float,
-    origin_lng: float,
-    dest_lat: float,
-    dest_lng: float,
-) -> list[dict[str, float]]:
-    """Generate mock waypoints that follow the Las Vegas Strip corridor.
-
-    Finds the closest corridor points to origin and destination, then returns
-    the slice of the corridor between them (plus origin/dest endpoints).
-    """
-
-    def _closest_corridor_idx(lat: float, lng: float) -> int:
-        best_idx = 0
-        best_dist = float("inf")
-        for i, (clat, clng) in enumerate(_STRIP_CORRIDOR):
-            d = math.sqrt((lat - clat) ** 2 + (lng - clng) ** 2)
-            if d < best_dist:
-                best_dist = d
-                best_idx = i
-        return best_idx
-
-    start_idx = _closest_corridor_idx(origin_lat, origin_lng)
-    end_idx = _closest_corridor_idx(dest_lat, dest_lng)
-
-    # Build waypoints: origin -> corridor slice -> destination
-    waypoints = [{"lat": origin_lat, "lng": origin_lng}]
-
-    if start_idx <= end_idx:
-        corridor_slice = _STRIP_CORRIDOR[start_idx : end_idx + 1]
-    else:
-        corridor_slice = list(reversed(_STRIP_CORRIDOR[end_idx : start_idx + 1]))
-
-    for clat, clng in corridor_slice:
-        # Skip if too close to origin (already added)
-        if len(waypoints) == 1:
-            d = math.sqrt((clat - origin_lat) ** 2 + (clng - origin_lng) ** 2)
-            if d < 0.0005:
-                continue
-        waypoints.append({"lat": clat, "lng": clng})
-
-    # Add final destination if not already close to last waypoint
-    last = waypoints[-1]
-    d = math.sqrt((dest_lat - last["lat"]) ** 2 + (dest_lng - last["lng"]) ** 2)
-    if d > 0.0005:
-        waypoints.append({"lat": dest_lat, "lng": dest_lng})
-
-    return waypoints
-
-
 @activity.defn(name="get_route_polyline")
 async def get_route_polyline(
     origin_lat: float,
@@ -252,45 +96,31 @@ async def get_route_polyline(
     """Fetch route waypoints from Google Maps Directions API (decoded polyline).
 
     Returns a list of {"lat": float, "lng": float} waypoints.
-    Falls back to mock corridor waypoints if no API key is set.
+    Failures propagate to Temporal's retry mechanism — no silent fallback.
+    In mock mode, the worker registers a mock version of this activity instead.
     """
-    api_key = GOOGLE_MAPS_API_KEY
-
-    if not api_key:
-        activity.logger.info("[NAV] No Maps API key — using mock corridor")
-        return _mock_route_waypoints(origin_lat, origin_lng, dest_lat, dest_lng)
-
     origin = f"{origin_lat},{origin_lng}"
     destination = f"{dest_lat},{dest_lng}"
     url = "https://maps.googleapis.com/maps/api/directions/json"
     params = {
         "origin": origin,
         "destination": destination,
-        "key": api_key,
+        "key": GOOGLE_MAPS_API_KEY,
         "mode": "driving",
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        resp = await client.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
 
-        if data.get("status") != "OK" or not data.get("routes"):
-            activity.logger.warning(
-                f"Maps API status for polyline: {data.get('status')}, using mock"
-            )
-            return _mock_route_waypoints(origin_lat, origin_lng, dest_lat, dest_lng)
+    if data.get("status") != "OK" or not data.get("routes"):
+        raise RuntimeError(f"Maps Directions API returned status: {data.get('status')}")
 
-        # Decode the overview polyline
-        encoded = data["routes"][0]["overview_polyline"]["points"]
-        decoded = decode_polyline(encoded)
-        activity.logger.info(f"[NAV] Using Google Maps polyline ({len(decoded)} points)")
-        return [{"lat": lat, "lng": lng} for lat, lng in decoded]
-
-    except Exception as e:
-        activity.logger.warning(f"Maps polyline API error, using mock: {e}")
-        return _mock_route_waypoints(origin_lat, origin_lng, dest_lat, dest_lng)
+    encoded = data["routes"][0]["overview_polyline"]["points"]
+    decoded = decode_polyline(encoded)
+    activity.logger.info(f"[NAV] Google Maps polyline: {len(decoded)} points")
+    return [{"lat": lat, "lng": lng} for lat, lng in decoded]
 
 
 # --- Flat-signature tool activities (called by ADK agents via activity_tool) ---
@@ -329,6 +159,7 @@ async def tool_get_route_info(
 
     Returns distance, duration, and step-by-step directions.
     Use this to assess reroute feasibility and ETAs for AI-Crew dispatching.
+    Failures propagate to Temporal's retry mechanism.
 
     Args:
         origin_lat: Starting latitude
@@ -337,13 +168,7 @@ async def tool_get_route_info(
         destination_lng: Destination longitude
         destination_name: Human-readable name of the destination (e.g. "MGM Grand")
     """
-    api_key = GOOGLE_MAPS_API_KEY
-
-    if not api_key:
-        # Mock fallback — deterministic response for demo
-        return _mock_route_info(
-            origin_lat, origin_lng, destination_lat, destination_lng, destination_name
-        )
+    import re
 
     origin = f"{origin_lat},{origin_lng}"
     destination = f"{destination_lat},{destination_lng}"
@@ -351,79 +176,38 @@ async def tool_get_route_info(
     params = {
         "origin": origin,
         "destination": destination,
-        "key": api_key,
+        "key": GOOGLE_MAPS_API_KEY,
         "mode": "driving",
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        resp = await client.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
 
-        if data.get("status") != "OK" or not data.get("routes"):
-            activity.logger.warning(f"Maps API status: {data.get('status')}")
-            return _mock_route_info(
-                origin_lat, origin_lng, destination_lat, destination_lng, destination_name
-            )
+    if data.get("status") != "OK" or not data.get("routes"):
+        raise RuntimeError(f"Maps Directions API returned status: {data.get('status')}")
 
-        route = data["routes"][0]
-        leg = route["legs"][0]
-        distance = leg["distance"]["text"]
-        duration = leg["duration"]["text"]
-        # Duration in minutes for structured agent reasoning
-        eta_minutes = max(1, leg["duration"]["value"] // 60)
+    route = data["routes"][0]
+    leg = route["legs"][0]
+    distance = leg["distance"]["text"]
+    duration = leg["duration"]["text"]
+    eta_minutes = max(1, leg["duration"]["value"] // 60)
 
-        steps = []
-        for i, step in enumerate(leg["steps"][:5], 1):
-            instruction = step["html_instructions"]
-            # Strip HTML tags for clean text
-            import re
+    steps = []
+    for i, step in enumerate(leg["steps"][:5], 1):
+        instruction = step["html_instructions"]
+        instruction = re.sub(r"<[^>]+>", " ", instruction).strip()
+        steps.append(f"  {i}. {instruction} ({step['distance']['text']})")
 
-            instruction = re.sub(r"<[^>]+>", " ", instruction).strip()
-            steps.append(f"  {i}. {instruction} ({step['distance']['text']})")
-
-        dest_label = destination_name or f"({destination_lat:.4f}, {destination_lng:.4f})"
-        steps_text = "\n".join(steps)
-        return (
-            f"Route to {dest_label}:\n"
-            f"  Distance: {distance}\n"
-            f"  ETA: {duration}\n"
-            f"  ETA_MINUTES: {eta_minutes}\n"
-            f"  Key directions:\n{steps_text}"
-        )
-
-    except Exception as e:
-        activity.logger.warning(f"Maps API error, using mock: {e}")
-        return _mock_route_info(
-            origin_lat, origin_lng, destination_lat, destination_lng, destination_name
-        )
-
-
-def _mock_route_info(
-    origin_lat: float,
-    origin_lng: float,
-    dest_lat: float,
-    dest_lng: float,
-    dest_name: str,
-) -> str:
-    """Deterministic mock route info for demo without Maps API key."""
-    dlat = dest_lat - origin_lat
-    dlng = dest_lng - origin_lng
-    # Rough distance in miles (Las Vegas scale)
-    dist_miles = math.sqrt(dlat**2 + dlng**2) * 69.0
-    eta_minutes = max(3, int(dist_miles * 3.5))
-
-    dest_label = dest_name or f"({dest_lat:.4f}, {dest_lng:.4f})"
+    dest_label = destination_name or f"({destination_lat:.4f}, {destination_lng:.4f})"
+    steps_text = "\n".join(steps)
     return (
         f"Route to {dest_label}:\n"
-        f"  Distance: {dist_miles:.1f} mi\n"
-        f"  ETA: {eta_minutes} mins\n"
+        f"  Distance: {distance}\n"
+        f"  ETA: {duration}\n"
         f"  ETA_MINUTES: {eta_minutes}\n"
-        f"  Key directions:\n"
-        f"    1. Head south on Las Vegas Blvd (0.5 mi)\n"
-        f"    2. Continue on Las Vegas Blvd S ({max(0.1, dist_miles - 0.5):.1f} mi)\n"
-        f"    3. Arrive at {dest_label}"
+        f"  Key directions:\n{steps_text}"
     )
 
 
@@ -432,77 +216,35 @@ async def tool_search_hotel_context(hotel_name: str) -> str:
     """Search for live context about a Las Vegas hotel — current events, VIP bookings, reputation.
 
     Use this to understand delivery urgency for a specific hotel destination.
+    Failures propagate to Temporal's retry mechanism.
 
     Args:
         hotel_name: Name of the hotel (e.g. "MGM Grand", "Caesars Palace", "Mandalay Bay")
     """
-    return await _search_hotel_context(hotel_name)
-
-
-async def _search_hotel_context(hotel_name: str) -> str:
-    """Search for hotel context — tries Google Search API, falls back to mock.
-
-    This is the shared implementation used by both the tool_search_hotel_context
-    activity and the mock resolver. Separated so it can be called from within
-    another activity (activities can't call other activities via Temporal).
-    """
-    api_key = GOOGLE_API_KEY
-    search_engine_id = GOOGLE_CSE_ID
-
-    if api_key and search_engine_id:
-        try:
-            query = f"{hotel_name} Las Vegas current events today"
-            url = "https://www.googleapis.com/customsearch/v1"
-            params = {
-                "key": api_key,
-                "cx": search_engine_id,
-                "q": query,
-                "num": 3,
-            }
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                data = resp.json()
-
-            items = data.get("items", [])
-            if items:
-                results = []
-                for item in items[:3]:
-                    title = item.get("title", "")
-                    snippet = item.get("snippet", "")
-                    results.append(f"- {title}: {snippet}")
-                return f"Live search results for {hotel_name}:\n" + "\n".join(results)
-        except Exception:
-            pass
-
-    return _mock_hotel_context(hotel_name)
-
-
-def _mock_hotel_context(hotel_name: str) -> str:
-    """Deterministic mock hotel context for demo without Search API."""
-    contexts = {
-        "MGM Grand": (
-            f"- {hotel_name}: Currently hosting Wet Republic pool party series. "
-            f"High guest volume with VIP catering expectations.\n"
-            f"- {hotel_name}: Grand Garden Arena has a major event tonight — "
-            f"hotel is at peak occupancy with elevated service standards."
-        ),
-        "Caesars Palace": (
-            f"- {hotel_name}: Banquet halls booked for a corporate gala tonight. "
-            f"Caesars is known for premium event standards.\n"
-            f"- {hotel_name}: Colosseum show tonight means 4,000+ guests on property."
-        ),
-        "Mandalay Bay": (
-            f"- {hotel_name}: Tech conference in session at the Convention Center. "
-            f"Conference catering is time-sensitive — dessert course is scheduled.\n"
-            f"- {hotel_name}: VIP-only venue — all orders treated as highest priority."
-        ),
+    query = f"{hotel_name} Las Vegas current events today"
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": GOOGLE_API_KEY,
+        "cx": GOOGLE_CSE_ID,
+        "q": query,
+        "num": 3,
     }
-    # Fuzzy match hotel name
-    for key, context in contexts.items():
-        if key.lower() in hotel_name.lower() or hotel_name.lower() in key.lower():
-            return f"Hotel intelligence for {hotel_name}:\n{context}"
-    return f"No specific intelligence available for {hotel_name}."
+
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        resp = await client.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+
+    items = data.get("items", [])
+    if not items:
+        return f"No search results found for {hotel_name}."
+
+    results = []
+    for item in items[:3]:
+        title = item.get("title", "")
+        snippet = item.get("snippet", "")
+        results.append(f"- {title}: {snippet}")
+    return f"Live search results for {hotel_name}:\n" + "\n".join(results)
 
 
 # --- Core delivery activities ---

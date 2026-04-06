@@ -22,14 +22,14 @@ VENUES: list[dict] = [
         "coords": Coords(lat=36.1024, lng=-115.1725),
         "map_label": "MGM Grand",
         "events": ["pool party", "Grand Garden Arena concert", "celebrity chef dinner"],
-        "vip_tier": "platinum",
+        "vip_tier": "gold",
     },
     {
         "hotel": "Caesars Palace",
         "coords": Coords(lat=36.1162, lng=-115.1745),
         "map_label": "Caesars",
         "events": ["corporate gala", "Colosseum show afterparty", "Forum Shops VIP event"],
-        "vip_tier": "platinum",
+        "vip_tier": "silver",
     },
     {
         "hotel": "Mandalay Bay",

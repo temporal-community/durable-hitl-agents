@@ -93,8 +93,8 @@ class CrewRouteWorkflow:
 
     Disconnect handling uses two Temporal-idiomatic mechanisms:
     - is_crew_disconnected input flag: catches "already disconnected at activity start"
-    - Cancellation scope: catches "disconnect signal arrives mid-activity" — the
-      workflow cancels the running activity, which receives CancelledError on its
+    - Activity handle cancellation: catches "disconnect signal arrives mid-activity" —
+      signal handler calls handle.cancel(), activity receives CancelledError on its
       next heartbeat() call.
     """
 
@@ -102,7 +102,7 @@ class CrewRouteWorkflow:
         self._pending_orders: list[CrewRouteOrder] = []
         self._stop = False
         self._is_disconnected: bool = False
-        self._active_scope: workflow.CancellationScope | None = None
+        self._active_nav_handle: workflow.ActivityHandle | None = None
         self._current_lat: float = 0.0
         self._current_lng: float = 0.0
 
@@ -119,8 +119,8 @@ class CrewRouteWorkflow:
     @workflow.signal
     async def crew_disconnected(self, inp: CrewDisconnectInput) -> None:
         self._is_disconnected = True
-        if self._active_scope:
-            self._active_scope.cancel()
+        if self._active_nav_handle:
+            self._active_nav_handle.cancel()
         workflow.logger.info(f"Crew {inp.crew_id} disconnected — cancelling active activity")
 
     @workflow.signal
@@ -148,10 +148,12 @@ class CrewRouteWorkflow:
 
     async def _sync_disconnect_to_ui(self, crew_id: str, disconnected: bool) -> None:
         """Push disconnect/reconnect state to FleetState for the frontend."""
+        state = "disconnected" if disconnected else "reconnected"
         await workflow.execute_activity(
             sync_crew_disconnect,
             SyncCrewDisconnectInput(crew_id=crew_id, disconnected=disconnected),
             task_queue=DELIVERY_QUEUE,
+            summary=f"{crew_id} — {state}",
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=FAST_RETRY,
         )
@@ -162,6 +164,7 @@ class CrewRouteWorkflow:
                 sync_crew_recovery_complete,
                 crew_id,
                 task_queue=DELIVERY_QUEUE,
+                summary=f"{crew_id} — recovery complete",
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=FAST_RETRY,
             )
@@ -178,12 +181,12 @@ class CrewRouteWorkflow:
             workflow.logger.info(f"{crew_id} reconnected — resuming delivery")
 
     async def _navigate_with_disconnect_guard(
-        self, crew_id: str, nav_input: NavigateInput, summary: str = ""
+        self, crew_id: str, nav_input: NavigateInput
     ) -> NavigateOutput:
-        """Execute navigate_to with cancellation scope for mid-flight disconnect.
+        """Execute navigate_to with activity cancellation for mid-flight disconnect.
 
         If a crew_disconnected signal arrives during navigation:
-        1. Signal handler cancels the active scope
+        1. Signal handler calls handle.cancel() on the running activity
         2. Activity receives CancelledError on its next heartbeat() call
         3. Workflow catches it, waits for reconnect, retries navigation
         """
@@ -203,18 +206,16 @@ class CrewRouteWorkflow:
                 start_lng=self._current_lng,
             )
             try:
-                self._active_scope = workflow.CancellationScope()
-                async with self._active_scope:
-                    return await workflow.execute_activity(
-                        navigate_to,
-                        nav_input,
-                        task_queue=DELIVERY_QUEUE,
-                        summary=summary,
-                        schedule_to_close_timeout=timedelta(minutes=10),
-                        start_to_close_timeout=timedelta(seconds=120),
-                        heartbeat_timeout=timedelta(seconds=15),
-                        retry_policy=NAV_RETRY,
-                    )
+                self._active_nav_handle = workflow.start_activity(
+                    navigate_to,
+                    nav_input,
+                    task_queue=DELIVERY_QUEUE,
+                    schedule_to_close_timeout=timedelta(minutes=10),
+                    start_to_close_timeout=timedelta(seconds=120),
+                    heartbeat_timeout=timedelta(seconds=15),
+                    retry_policy=NAV_RETRY,
+                )
+                return await self._active_nav_handle
             except asyncio.CancelledError:
                 if self._is_disconnected:
                     workflow.logger.info(
@@ -223,7 +224,7 @@ class CrewRouteWorkflow:
                     continue
                 raise
             finally:
-                self._active_scope = None
+                self._active_nav_handle = None
 
     # --- Main entry ---
 
@@ -275,7 +276,6 @@ class CrewRouteWorkflow:
                         start_lat=self._current_lat,
                         start_lng=self._current_lng,
                     ),
-                    summary=f"{crew_id} — navigating to shop for {order.order_id}",
                 )
                 self._current_lat = nav_result.final_lat
                 self._current_lng = nav_result.final_lng
@@ -328,7 +328,6 @@ class CrewRouteWorkflow:
                         start_lat=self._current_lat,
                         start_lng=self._current_lng,
                     ),
-                    summary=f"{crew_id} — delivering {order.order_id} to {order.hotel}",
                 )
                 self._current_lat = nav_result.final_lat
                 self._current_lng = nav_result.final_lng
@@ -351,16 +350,21 @@ class CrewRouteWorkflow:
                 delivered.append(order.order_id)
 
                 # Signal parent workflow that delivery is complete
-                parent = workflow.get_external_workflow_handle(PARENT_WORKFLOW_ID)
-                await parent.signal(
-                    "order_delivered",
-                    OrderDeliveredInput(
-                        crew_id=crew_id,
-                        order_id=order.order_id,
-                        delivery_lat=order.delivery_lat,
-                        delivery_lng=order.delivery_lng,
-                    ),
-                )
+                try:
+                    parent = workflow.get_external_workflow_handle(PARENT_WORKFLOW_ID)
+                    await parent.signal(
+                        "order_delivered",
+                        OrderDeliveredInput(
+                            crew_id=crew_id,
+                            order_id=order.order_id,
+                            delivery_lat=order.delivery_lat,
+                            delivery_lng=order.delivery_lng,
+                        ),
+                    )
+                except Exception:
+                    workflow.logger.warning(
+                        f"Could not signal parent for {order.order_id} delivery"
+                    )
 
         return f"AI-Crew {crew_id} completed {len(delivered)} deliveries: {delivered}"
 
@@ -637,7 +641,7 @@ class MeltdownDemoWorkflow:
                         register_assignment,
                         args=[assignment.crew_id, order.order_id],
                         task_queue=AGENTS_QUEUE,
-                        summary=f"Register {order.order_id} → {assignment.crew_id}",
+                        summary=f"Resolver — register {order.order_id} → {assignment.crew_id}",
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=FAST_RETRY,
                     )
@@ -648,7 +652,7 @@ class MeltdownDemoWorkflow:
                     reason_about_assignment,
                     assignment_input,
                     task_queue=AGENTS_QUEUE,
-                    summary=f"Mock assignment for {order.order_id}",
+                    summary=f"Fleet + Customer + Resolver — assign {order.order_id}",
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=FAST_RETRY,
                 )
@@ -715,7 +719,7 @@ class MeltdownDemoWorkflow:
                 ),
             ),
             task_queue=DELIVERY_QUEUE,
-            summary=f"Customer change request — {change.order_id}",
+            summary=f"Customer Agent — change request for {change.order_id}",
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=FAST_RETRY,
         )
@@ -733,7 +737,7 @@ class MeltdownDemoWorkflow:
                     new_lng=change.new_lng,
                 ),
                 task_queue=DELIVERY_QUEUE,
-                summary=f"Execute customer change — {change.order_id}",
+                summary=f"Resolver — execute change for {change.order_id}",
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=FAST_RETRY,
             )
@@ -748,7 +752,7 @@ class MeltdownDemoWorkflow:
                     ),
                 ),
                 task_queue=DELIVERY_QUEUE,
-                summary=f"Change approved — {change.order_id}",
+                summary=f"Resolver — change approved for {change.order_id}",
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=FAST_RETRY,
             )
@@ -761,7 +765,7 @@ class MeltdownDemoWorkflow:
                     content=f"Customer change rejected for {change.order_id}",
                 ),
                 task_queue=DELIVERY_QUEUE,
-                summary=f"Change rejected — {change.order_id}",
+                summary=f"Resolver — change rejected for {change.order_id}",
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=FAST_RETRY,
             )

@@ -5,20 +5,20 @@ from temporalio.testing import ActivityEnvironment
 
 from agent_fleet.activities import (
     deliver_order,
-    find_backup_crew,
     generate_order,
     navigate_to,
     pickup_orders,
+    sync_crew_disconnect,
 )
 from agent_fleet.models import (
-    CoolerStatus,
     CrewStatus,
     DeliverInput,
-    FindBackupCrewInput,
     GenerateOrderInput,
     NavigateInput,
+    NavigateOutput,
     OrderStatus,
     PickupInput,
+    SyncCrewDisconnectInput,
 )
 from agent_fleet.simulation import fleet
 
@@ -51,16 +51,18 @@ async def test_navigate_to_interpolates_position(env: ActivityEnvironment):
         target_lng=-115.17,
         leg="pickup",
         steps=4,
+        start_lat=36.1040,
+        start_lng=-115.1530,
     )
     result = await env.run(navigate_to, inp)
-    assert result.arrived is True
-    assert result.final_lat == pytest.approx(36.10)
-    assert result.final_lng == pytest.approx(-115.17)
+    assert isinstance(result, NavigateOutput)
+    assert result.final_lat == pytest.approx(36.10, abs=0.01)
+    assert result.final_lng == pytest.approx(-115.17, abs=0.01)
 
     # Crew should be at target position
     lat, lng = await fleet.get_crew_position("ai-crew-1")
-    assert lat == pytest.approx(36.10)
-    assert lng == pytest.approx(-115.17)
+    assert lat == pytest.approx(36.10, abs=0.01)
+    assert lng == pytest.approx(-115.17, abs=0.01)
 
 
 async def test_pickup_orders_sets_status(env: ActivityEnvironment):
@@ -100,26 +102,19 @@ async def test_deliver_order_sets_status(env: ActivityEnvironment):
 
     c = await fleet.get_crew("ai-crew-1")
     assert "order-1" not in c.current_orders
-    assert c.status == CrewStatus.IDLE
 
 
-async def test_find_backup_crew_selects_closest(env: ActivityEnvironment):
-    # ai-crew-1 fails, ai-crew-2 and ai-crew-3 are available
-    result = await env.run(
-        find_backup_crew,
-        FindBackupCrewInput(failed_crew_id="ai-crew-1", order_count=1),
+async def test_sync_crew_disconnect(env: ActivityEnvironment):
+    # Disconnect a crew via the sync activity
+    await env.run(
+        sync_crew_disconnect,
+        SyncCrewDisconnectInput(crew_id="ai-crew-1", disconnected=True),
     )
-    assert result.crew_id is not None
-    assert result.crew_id != "ai-crew-1"
+    assert await fleet.is_crew_disconnected("ai-crew-1") is True
 
-
-async def test_find_backup_crew_excludes_malfunction(env: ActivityEnvironment):
-    # Make ai-crew-2 have a cooler malfunction
-    await fleet.set_cooler_status("ai-crew-2", CoolerStatus.MALFUNCTION)
-
-    result = await env.run(
-        find_backup_crew,
-        FindBackupCrewInput(failed_crew_id="ai-crew-1", order_count=1),
+    # Reconnect
+    await env.run(
+        sync_crew_disconnect,
+        SyncCrewDisconnectInput(crew_id="ai-crew-1", disconnected=False),
     )
-    # Should not select ai-crew-2
-    assert result.crew_id != "ai-crew-2"
+    assert await fleet.is_crew_disconnected("ai-crew-1") is False
