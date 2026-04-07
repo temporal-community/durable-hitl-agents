@@ -31,44 +31,52 @@ Orders auto-generate on a timer from Las Vegas Strip venues. AI agents reason ab
 │   (workflow state + replay)      │
 └──────────┬───────────────────────┘
            │
-┌──────────▼────────────────────────────────────────────┐
-│  Python process (3 workers)                           │
-│                                                       │
-│  meltdown-workflows worker (workflows only, no acts)  │
-│  ├─ MeltdownDemoWorkflow  (source of truth for state) │
-│  │    ├─ owns driver positions, order assignments      │
-│  │    ├─ builds DriverSnapshots → passes to activities│
-│  │    ├─ reason_about_assignment() → AGENTS queue     │
-│  │    └─ DriverRouteWorkflow x3   child workflows     │
-│  └─ DriverRouteWorkflow                               │
-│       ├─ owns disconnect state + cancellation scopes  │
-│       ├─ navigate_to()  → DELIVERY queue (heartbeats) │
-│       ├─ pickup_orders() → DELIVERY queue             │
-│       ├─ deliver_order() → DELIVERY queue             │
-│       └─ signals parent on delivery complete          │
-│                                                       │
-│  meltdown-delivery worker (max 20 concurrent)         │
-│  └─ navigation, pickup, deliver, state sync, changes  │
-│                                                       │
-│  meltdown-agents worker (max 5 concurrent)            │
-│  └─ ADK assignment pipeline (via TemporalModel)       │
-│       ParallelAgent:                                  │
-│       ├─ Fleet Agent    tool_get_fleet_status         │
-│       │                 tool_get_route_info (Maps)    │
-│       └─ Customer Agent tool_get_order_priorities     │
-│                         tool_search_hotel_context     │
-│       Assignment Resolver → tool_submit_assignment    │
-│       TemporalModel(activity_config→AGENTS_QUEUE)     │
-│                                                       │
-│  FleetState singleton (UI projection only)            │
-│  └─ activities write here for frontend WebSocket      │
-│     workflows and activities never read it for logic  │
-└───────────────────────────────────────────────────────┘
-           │
-┌──────────▼───────────────────────┐
-│     FastAPI + WebSocket          │
-│     └─ Frontend (Leaflet map)    │
-└──────────────────────────────────┘
+     ┌─────┴─────────────────────────────────┐
+     │                                       │
+┌────▼─────────────────────────────────┐ ┌───▼──────────────────────────┐
+│  Worker process (3 workers)          │ │  Server process              │
+│                                      │ │  FastAPI + WebSocket         │
+│  meltdown-workflows worker           │ │                              │
+│  ├─ MeltdownDemoWorkflow (state)     │ │  Queries Temporal for state: │
+│  │    ├─ owns driver positions,      │ │  ├─ MeltdownDemoWorkflow     │
+│  │    │   order assignments          │ │  │   .get_status             │
+│  │    ├─ builds DriverSnapshots      │ │  └─ DriverRouteWorkflow     │
+│  │    ├─ _run_adk_assignment()       │ │      .get_status             │
+│  │    │   inline (live mode)         │ │                              │
+│  │    ├─ OrderGenerationWorkflow     │ │  Sends signals only:         │
+│  │    │   child (timer + orders)     │ │  disconnect, reconnect,      │
+│  │    └─ DriverRouteWorkflow x3      │ │  customer change, start      │
+│  │        child workflows            │ │                              │
+│  └─ DriverRouteWorkflow              │ │  No workers, no FleetState   │
+│       ├─ owns disconnect state +     │ └──────────────────────────────┘
+│       │   cancellation scopes        │
+│       ├─ tracks status, path_history,│
+│       │   is_disconnected,           │
+│       │   is_recovering,             │
+│       │   current_orders             │
+│       ├─ navigate_to() → DELIVERY    │
+│       ├─ pickup_orders() → DELIVERY  │
+│       ├─ deliver_order() → DELIVERY  │
+│       └─ signals parent on complete  │
+│                                      │
+│  meltdown-delivery worker (max 20)   │
+│  └─ navigation, pickup, deliver,     │
+│     order generation, changes        │
+│                                      │
+│  meltdown-agents worker (max 5)      │
+│  └─ ADK tool activities              │
+│       (via TemporalModel):           │
+│       ParallelAgent:                 │
+│       ├─ Fleet Agent                 │
+│       │   tool_get_fleet_status      │
+│       │   tool_get_route_info (Maps) │
+│       └─ Customer Agent              │
+│           tool_get_order_priorities  │
+│           google_search (grounding)  │
+│       Resolver →                     │
+│         tool_submit_assignment       │
+│       TemporalModel(→AGENTS_QUEUE)   │
+└──────────────────────────────────────┘
 ```
 
 **How ADK and Temporal map to each other:**
@@ -78,35 +86,38 @@ Orders auto-generate on a timer from Las Vegas Strip venues. AI agents reason ab
 | **LLM Agent** (`Agent` + `TemporalModel`) | Each Gemini call → `invoke_model` activity, recorded in event log |
 | **Orchestrator Agent** (`SequentialAgent`, `ParallelAgent`) | Pure Python coordination — no Temporal activity, no LLM |
 | **Tool call** (via `activity_tool`) | Each tool invocation → named Temporal activity, retryable + replayable |
-| **Entire agent pipeline** | Runs inside one Temporal activity (`reason_about_assignment`) |
+| **Entire agent pipeline** | Runs inline in the workflow via `_run_adk_assignment()` (live); as a single activity `reason_about_assignment` (mock) |
 
 Fleet Agent, Customer Agent, and Resolver are LLM Agents. The outer `order_assignment` pipeline is an Orchestrator Agent — it sequences them with no model of its own. Temporal never sees the orchestration logic; it only sees individual LLM calls and tool calls as discrete activities.
 
-**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs only workflows (no activities) — dedicated to replay. `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). `TemporalModel` uses `ActivityConfig(task_queue=AGENTS_QUEUE)` to route LLM calls to the agents worker. All three workers run in the same process; `FleetState` is a write-only UI projection that activities update for the frontend WebSocket.
+**Two processes**: `run.sh` starts a worker process and a server process (plus Temporal dev server). The server queries Temporal workflows for state (`_build_snapshot_from_queries()`) and sends signals only — no workers, no FleetState reads. Workers run three Temporal workers on three task queues.
+
+**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs only workflows (no activities) — dedicated to replay. `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). `TemporalModel` uses `ActivityConfig(task_queue=AGENTS_QUEUE)` to route LLM calls to the agents worker.
 
 ### What each agent reasons about
 
 | Agent | Reasoning | Tools |
 |-------|-----------|-------|
 | **Fleet Agent** (operational) | Driver positions, capacity (free slots), ETAs to destination, disconnect status — excludes unavailable drivers | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps) |
-| **Customer Agent** (priority) | VIP vs standard tier, deadline pressure, hotel events (conferences, galas), servings/guest count | `tool_get_order_priorities`, `tool_search_hotel_context` (Google Search) |
+| **Customer Agent** (priority) | VIP vs standard tier, deadline pressure, hotel events (conferences, galas), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
 | **Resolver** (synthesis) | Weighs Fleet + Customer assessments, compensates if either agent is offline, picks final driver | `tool_submit_assignment`, `tool_publish_agent_event` |
 
 Fleet and Customer run **in parallel** (`ParallelAgent`), then the Resolver runs **sequentially** after both complete (`SequentialAgent`). All tools are wrapped with `activity_tool()` — each call is a Temporal activity, recorded in the event log. If the worker restarts mid-call, results replay from the log.
 
+> **Note:** Gemini's built-in `google_search` grounding normally can't be combined with custom function tools in the same request. ADK's `GoogleSearchTool(bypass_multi_tools_limit=True)` enables this — the Customer Agent uses Google Search alongside `tool_get_order_priorities` and `tool_publish_agent_event` in a single agent, no sub-agent needed.
+
 ### Mock mode
 
-Each API-backed activity checks its own key independently at worker startup. Maps activities need `GOOGLE_MAPS_API_KEY`, search needs both `GOOGLE_API_KEY` and `GOOGLE_CSE_ID`. Missing keys get per-service mock fallbacks from `mock_activities.py` — same Temporal activity names, deterministic data. ADK agents (`MOCK_MODE`) key off `GOOGLE_API_KEY` only. The startup log shows per-service status (e.g., `ADK=LIVE, Maps=MOCK, Search=LIVE`). Real activities let failures propagate to Temporal's retry mechanism.
+Mock mode is completely separate from live code. The `agent_fleet/mock/` folder contains its own `activities.py` and `worker.py`. The decision happens once at startup in `worker.py`: if `GOOGLE_API_KEY` is set, live workers run (with `GoogleAdkPlugin`, ADK inline in workflows); if not, mock workers from `agent_fleet/mock/worker.py` run instead. Live code has zero mock awareness — no `MOCK_MODE` flag, no `_get_api_activities()`, no per-key fallback selection. Mock activities use `@activity.defn(name=...)` overrides to match live activity names so workflows don't know or care which version is running. Real activities let failures propagate to Temporal's retry mechanism.
 
 ## Prerequisites
 
 - Python 3.11+
 - [Temporal CLI](https://docs.temporal.io/cli) (`brew install temporal`)
-- Google Gemini API key (for ADK agents; falls back to mock mode without it)
-- Google Maps API key (optional, must be a Maps-enabled key — falls back to mock route data)
-- Google Custom Search Engine ID (optional — falls back to curated hotel data)
+- Google Gemini API key (`GOOGLE_API_KEY`) — required for live mode; without it the entire demo runs in mock mode. Restricted to **Generative Language API**.
+- Google Maps API key (`GOOGLE_MAPS_API_KEY`) — used for route polylines and ETAs. Restricted to **Directions API**. This must be a separate key from `GOOGLE_API_KEY` because the Generative Language API cannot share a key with standard Google Cloud APIs.
 
-Each API key is checked independently. Without `GOOGLE_API_KEY`, ADK agents run in mock mode. Without `GOOGLE_MAPS_API_KEY`, route activities use mock data. Without `GOOGLE_CSE_ID`, hotel search uses curated context. You can run with any combination — the startup log shows which services are live vs mock.
+The startup decision is binary: `GOOGLE_API_KEY` set → live workers (ADK + all API activities), not set → mock workers (deterministic data, no LLM calls). Default model is `gemini-2.5-flash` (override with `DEFAULT_MODEL` env var).
 
 ## Quick Start
 
@@ -116,13 +127,12 @@ Each API key is checked independently. Without `GOOGLE_API_KEY`, ADK agents run 
 pip install -e ".[dev]"
 echo 'export GOOGLE_API_KEY="your-gemini-key"' > .env
 echo 'export GOOGLE_MAPS_API_KEY="your-maps-key"' >> .env  # optional, must be Maps-enabled
-echo 'export GOOGLE_CSE_ID="your-cse-id"' >> .env  # optional
 ```
 
 ### 2. Run
 
 ```bash
-./run.sh    # starts Temporal dev server + FastAPI app
+./run.sh    # starts Temporal dev server + worker process + server process
 ```
 
 ### 3. Open the dashboard
@@ -144,15 +154,15 @@ echo 'export GOOGLE_CSE_ID="your-cse-id"' >> .env  # optional
 | File | What it does |
 |------|-------------|
 | `agent_fleet/models.py` | Dataclass models for all Temporal payloads (incl. `DriverSnapshot`) |
-| `agent_fleet/simulation.py` | FleetState — UI projection only (activities write, nothing reads for logic) |
-| `agent_fleet/activities.py` | Temporal activities — navigation, delivery, Maps API, state sync, agent tools |
-| `agent_fleet/mock_activities.py` | Mock activity implementations — registered in mock mode, same activity names |
-| `agent_fleet/workflows.py` | Temporal workflows — owns driver state, cancellation scopes, signals, queries |
+| `agent_fleet/simulation.py` | FleetState — SQLite WAL-backed write-only UI projection (`fleet_state.db`, cross-process; used by mock activities only) |
+| `agent_fleet/activities.py` | Temporal activities — navigation, delivery, Maps API, agent tools |
+| `agent_fleet/workflows.py` | Temporal workflows — owns driver state, cancellation scopes, signals, queries. Includes `OrderGenerationWorkflow` |
 | `agent_fleet/agents.py` | ADK agent composition — Fleet, Customer, Assignment Resolver |
-| `agent_fleet/config.py` | Centralized env config — API keys, model name, Temporal address, mock mode |
+| `agent_fleet/config.py` | Centralized env config — `GOOGLE_API_KEY`, `GOOGLE_MAPS_API_KEY`, `DEFAULT_MODEL`, `TEMPORAL_ADDRESS` |
 | `agent_fleet/queues.py` | Task queue name constants (workflows / delivery / agents) |
-| `agent_fleet/worker.py` | Three Temporal workers — workflow-only, delivery, agents |
-| `agent_fleet/server.py` | FastAPI server — signal-only API, WebSocket, frontend |
+| `agent_fleet/worker.py` | Three Temporal workers — workflow-only, delivery, agents. Live/mock decision at startup |
+| `agent_fleet/mock/` | Self-contained mock mode — `activities.py` (deterministic mocks with `name=` overrides) and `worker.py` (3 workers, no GoogleAdkPlugin) |
+| `agent_fleet/server.py` | FastAPI server — queries Temporal for state, signal-only API, WebSocket, frontend |
 | `agent_fleet/locations.py` | Las Vegas Strip venue pool and random order generation |
 | `frontend/index.html` | Single-file SPA — Leaflet map, agent panels, overlays |
 

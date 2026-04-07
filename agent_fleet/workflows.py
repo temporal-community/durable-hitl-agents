@@ -1,9 +1,12 @@
 """
 Temporal workflows for the Meltdown ice cream delivery demo.
 
-MeltdownDemoWorkflow — main orchestrator. Starts 3 driver child workflows,
-generates orders on a timer, runs multi-agent reasoning per order, and
-signals the chosen driver. Handles customer-change signals concurrently.
+MeltdownDemoWorkflow — main orchestrator. Starts driver and order-generation
+child workflows. Owns driver state, runs multi-agent assignment per order,
+and signals the chosen driver. Handles customer-change signals concurrently.
+
+OrderGenerationWorkflow — child workflow that generates orders on a timer
+and signals the parent with each new order for assignment.
 
 DriverRouteWorkflow — per-driver continuous delivery loop (child workflow).
 Waits for orders via signal, picks up at the shop, delivers, repeats.
@@ -31,13 +34,9 @@ with workflow.unsafe.imports_passed_through():
         navigate_to,
         pickup_orders,
         publish_agent_event,
-        reason_about_assignment,
         register_assignment,
-        sync_driver_disconnect,
-        sync_driver_recovery_complete,
     )
     from agent_fleet.agents import create_order_assignment_agent
-    from agent_fleet.config import MOCK_MODE as _MOCK_MODE
     from agent_fleet.locations import WAREHOUSE
     from agent_fleet.models import (
         AgentDisconnectInput,
@@ -52,13 +51,14 @@ with workflow.unsafe.imports_passed_through():
         MeltdownDemoInput,
         NavigateInput,
         NavigateOutput,
+        OrderAssignmentResult,
         OrderDeliveredInput,
+        OrderGenerationInput,
         OrderUpdateInput,
         PickupInput,
         PublishAgentEventInput,
         ReasonAboutAssignmentInput,
         ReasonAboutAssignmentOutput,
-        SyncDriverDisconnectInput,
     )
     from agent_fleet.queues import AGENTS_QUEUE, DELIVERY_QUEUE
 
@@ -66,7 +66,6 @@ FAST_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
     maximum_interval=timedelta(seconds=30),
-    maximum_attempts=5,
 )
 NAV_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=3),
@@ -106,12 +105,18 @@ class DriverRouteWorkflow:
         self._active_nav_handle: workflow.ActivityHandle | None = None
         self._current_lat: float = 0.0
         self._current_lng: float = 0.0
+        self._driver_id: str = ""
+        self._status: str = "idle"
+        self._current_orders: list[str] = []
+        self._path_history: list[dict] = []
+        self._is_recovering: bool = False
 
     # --- Signals ---
 
     @workflow.signal
     async def add_order(self, order: DriverRouteOrder) -> None:
         self._pending_orders.append(order)
+        self._current_orders.append(order.order_id)
 
     @workflow.signal
     async def stop(self) -> None:
@@ -120,6 +125,7 @@ class DriverRouteWorkflow:
     @workflow.signal
     async def driver_disconnected(self, inp: DriverDisconnectInput) -> None:
         self._is_disconnected = True
+        self._status = "disconnected"
         if self._active_nav_handle:
             self._active_nav_handle.cancel()
         workflow.logger.info(f"Driver {inp.driver_id} disconnected — cancelling active activity")
@@ -157,47 +163,30 @@ class DriverRouteWorkflow:
     @workflow.query
     def get_status(self) -> dict:
         return {
+            "driver_id": self._driver_id,
             "lat": self._current_lat,
             "lng": self._current_lng,
+            "status": self._status,
             "is_disconnected": self._is_disconnected,
+            "is_recovering": self._is_recovering,
+            "current_orders": list(self._current_orders),
+            "path_history": list(self._path_history),
             "pending_orders": len(self._pending_orders),
         }
 
     # --- Helpers ---
 
-    async def _sync_disconnect_to_ui(self, driver_id: str, disconnected: bool) -> None:
-        """Push disconnect/reconnect state to FleetState for the frontend."""
-        state = "disconnected" if disconnected else "reconnected"
-        await workflow.execute_activity(
-            sync_driver_disconnect,
-            SyncDriverDisconnectInput(driver_id=driver_id, disconnected=disconnected),
-            task_queue=DELIVERY_QUEUE,
-            summary=f"{driver_id} — {state}",
-            start_to_close_timeout=timedelta(seconds=10),
-            retry_policy=FAST_RETRY,
-        )
-        if not disconnected:
-            # Clear recovery visual after a short delay
-            await workflow.sleep(timedelta(seconds=3))
-            await workflow.execute_activity(
-                sync_driver_recovery_complete,
-                driver_id,
-                task_queue=DELIVERY_QUEUE,
-                summary=f"{driver_id} — recovery complete",
-                start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=FAST_RETRY,
-            )
-
     async def _await_reconnect(self, driver_id: str) -> None:
-        """Block until driver is reconnected, syncing state to FleetState via activities."""
+        """Block until driver is reconnected. Query exposes disconnect/recovery state."""
         if self._is_disconnected:
-            # Sync disconnect to frontend
-            await self._sync_disconnect_to_ui(driver_id, disconnected=True)
+            self._status = "disconnected"
             workflow.logger.info(f"{driver_id} disconnected — waiting for reconnect")
             await workflow.wait_condition(lambda: not self._is_disconnected)
-            # Sync reconnect to frontend
-            await self._sync_disconnect_to_ui(driver_id, disconnected=False)
+            self._is_recovering = True
+            self._status = "recovering"
             workflow.logger.info(f"{driver_id} reconnected — resuming delivery")
+            await workflow.sleep(timedelta(seconds=3))
+            self._is_recovering = False
 
     async def _navigate_with_disconnect_guard(
         self, driver_id: str, nav_input: NavigateInput
@@ -250,6 +239,7 @@ class DriverRouteWorkflow:
     @workflow.run
     async def run(self, inp: DriverRouteInput) -> str:
         driver_id = inp.driver_id
+        self._driver_id = driver_id
         delivered: list[str] = []
         self._current_lat, self._current_lng = WAREHOUSE.lat, WAREHOUSE.lng
 
@@ -271,6 +261,7 @@ class DriverRouteWorkflow:
                 order = self._pending_orders.pop(0)
 
                 # Navigate to shop for pickup
+                self._status = "en_route_pickup"
                 pickup_waypoints = await workflow.execute_activity(
                     get_route_polyline,
                     args=[self._current_lat, self._current_lng, WAREHOUSE.lat, WAREHOUSE.lng],
@@ -298,26 +289,41 @@ class DriverRouteWorkflow:
                 )
                 self._current_lat = nav_result.final_lat
                 self._current_lng = nav_result.final_lng
-
-                # Pick up
-                await self._await_reconnect(driver_id)
-                await workflow.execute_activity(
-                    pickup_orders,
-                    PickupInput(
-                        driver_id=driver_id,
-                        order_ids=[order.order_id],
-                        is_driver_disconnected=self._is_disconnected,
-                    ),
-                    task_queue=DELIVERY_QUEUE,
-                    summary=f"{driver_id} — picking up {order.order_id}",
-                    schedule_to_close_timeout=timedelta(minutes=5),
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=FAST_RETRY,
+                self._path_history.append(
+                    {"lat": nav_result.final_lat, "lng": nav_result.final_lng}
                 )
+
+                # Pick up (retry on disconnect between check and activity start)
+                self._status = "picking_up"
+                while True:
+                    await self._await_reconnect(driver_id)
+                    try:
+                        await workflow.execute_activity(
+                            pickup_orders,
+                            PickupInput(
+                                driver_id=driver_id,
+                                order_ids=[order.order_id],
+                                is_driver_disconnected=self._is_disconnected,
+                            ),
+                            task_queue=DELIVERY_QUEUE,
+                            summary=f"{driver_id} — picking up {order.order_id}",
+                            schedule_to_close_timeout=timedelta(minutes=5),
+                            start_to_close_timeout=timedelta(seconds=30),
+                            retry_policy=FAST_RETRY,
+                        )
+                        break
+                    except Exception:
+                        if self._is_disconnected:
+                            workflow.logger.info(
+                                f"{driver_id} disconnected during pickup — retrying on reconnect"
+                            )
+                            continue
+                        raise
 
                 self._current_lat, self._current_lng = WAREHOUSE.lat, WAREHOUSE.lng
 
                 # Navigate to hotel
+                self._status = "en_route_delivery"
                 delivery_waypoints = await workflow.execute_activity(
                     get_route_polyline,
                     args=[
@@ -350,23 +356,43 @@ class DriverRouteWorkflow:
                 )
                 self._current_lat = nav_result.final_lat
                 self._current_lng = nav_result.final_lng
-
-                # Deliver
-                await self._await_reconnect(driver_id)
-                await workflow.execute_activity(
-                    deliver_order,
-                    DeliverInput(
-                        driver_id=driver_id,
-                        order_id=order.order_id,
-                        is_driver_disconnected=self._is_disconnected,
-                    ),
-                    task_queue=DELIVERY_QUEUE,
-                    summary=f"{driver_id} — delivered {order.order_id} to {order.hotel}",
-                    schedule_to_close_timeout=timedelta(minutes=5),
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=FAST_RETRY,
+                self._path_history.append(
+                    {"lat": nav_result.final_lat, "lng": nav_result.final_lng}
                 )
+
+                # Deliver (retry on disconnect between check and activity start)
+                self._status = "delivering"
+                while True:
+                    await self._await_reconnect(driver_id)
+                    try:
+                        await workflow.execute_activity(
+                            deliver_order,
+                            DeliverInput(
+                                driver_id=driver_id,
+                                order_id=order.order_id,
+                                is_driver_disconnected=self._is_disconnected,
+                            ),
+                            task_queue=DELIVERY_QUEUE,
+                            summary=f"{driver_id} — delivered {order.order_id} to {order.hotel}",
+                            schedule_to_close_timeout=timedelta(minutes=5),
+                            start_to_close_timeout=timedelta(seconds=30),
+                            retry_policy=FAST_RETRY,
+                        )
+                        break
+                    except Exception:
+                        if self._is_disconnected:
+                            workflow.logger.info(
+                                f"{driver_id} disconnected during delivery — retrying on reconnect"
+                            )
+                            continue
+                        raise
                 delivered.append(order.order_id)
+
+                # Remove from current_orders tracking
+                try:
+                    self._current_orders.remove(order.order_id)
+                except ValueError:
+                    pass
 
                 # Signal parent workflow that delivery is complete
                 try:
@@ -380,12 +406,83 @@ class DriverRouteWorkflow:
                             delivery_lng=order.delivery_lng,
                         ),
                     )
-                except Exception:
+                except Exception as e:
                     workflow.logger.warning(
-                        f"Could not signal parent for {order.order_id} delivery"
+                        f"Could not signal parent for {order.order_id} delivery: {e}"
                     )
 
+            # All pending orders processed — driver is idle
+            self._status = "idle"
+            self._path_history.clear()
+
         return f"AI-Driver {driver_id} completed {len(delivered)} deliveries: {delivered}"
+
+
+# --- Order generation child workflow ---
+
+
+@workflow.defn
+class OrderGenerationWorkflow:
+    """Generates orders on a timer and signals parent with each new order.
+
+    The parent workflow owns driver state and handles assignment.
+    This workflow is purely a timer + order generator.
+    """
+
+    def __init__(self) -> None:
+        self._stop = False
+
+    @workflow.signal
+    async def stop(self) -> None:
+        self._stop = True
+
+    @workflow.query
+    def get_status(self) -> dict:
+        return {"stop": self._stop}
+
+    @workflow.run
+    async def run(self, inp: OrderGenerationInput) -> str:
+        for order_num in range(1, inp.max_orders + 1):
+            if self._stop:
+                break
+
+            # Generate a new order
+            order = await workflow.execute_activity(
+                generate_order,
+                GenerateOrderInput(order_number=order_num),
+                task_queue=DELIVERY_QUEUE,
+                summary=f"Generate order #{order_num}",
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=FAST_RETRY,
+            )
+
+            # Signal parent with the new order
+            parent = workflow.get_external_workflow_handle(PARENT_WORKFLOW_ID)
+            await parent.signal(
+                "new_order",
+                OrderAssignmentResult(
+                    order_id=order.order_id,
+                    hotel=order.hotel,
+                    delivery_lat=order.delivery_lat,
+                    delivery_lng=order.delivery_lng,
+                    driver_id="",  # Not yet assigned — parent handles assignment
+                    reasoning_summary="",
+                    priority=order.priority,
+                    servings=order.servings,
+                    deadline_minutes=order.deadline_minutes,
+                    event=order.event,
+                ),
+            )
+
+            workflow.logger.info(
+                f"Order {order_num}/{inp.max_orders}: {order.order_id} signaled to parent"
+            )
+
+            # Wait before next order
+            if order_num < inp.max_orders:
+                await workflow.sleep(timedelta(seconds=inp.order_interval_seconds))
+
+        return f"Order generation complete — {inp.max_orders} orders generated"
 
 
 # --- Main demo orchestrator ---
@@ -408,6 +505,7 @@ class MeltdownDemoWorkflow:
     def __init__(self) -> None:
         self._pending_changes: list[CustomerChangeInput] = []
         self._pending_approvals: list[bool] = []
+        self._pending_new_orders: list[OrderAssignmentResult] = []
         self._routes_done: bool = False
         self._disconnected_drivers: set[str] = set()
         self._disconnected_agents: set[str] = set()
@@ -416,6 +514,16 @@ class MeltdownDemoWorkflow:
         self._driver_last_position: dict[str, tuple[float, float]] = {}
         self._orders_generated: int = 0
         self._route_handles: dict = {}
+        self._order_gen_handle: workflow.ChildWorkflowHandle | None = None
+        # Order tracking for queries
+        self._orders: dict[str, dict] = {}
+        # Agent event tracking for queries
+        self._agent_events: list[dict] = []
+        self._agent_health: dict[str, bool] = {
+            "fleet_agent": True,
+            "customer_agent": True,
+            "resolver": True,
+        }
 
     # --- Signals ---
 
@@ -440,22 +548,44 @@ class MeltdownDemoWorkflow:
     @workflow.signal
     async def agent_disconnected(self, inp: AgentDisconnectInput) -> None:
         self._disconnected_agents.add(inp.agent_name)
+        self._agent_health[inp.agent_name] = False
         workflow.logger.info(f"Agent {inp.agent_name} disconnected")
 
     @workflow.signal
     async def agent_reconnected(self, inp: AgentDisconnectInput) -> None:
         self._disconnected_agents.discard(inp.agent_name)
+        self._agent_health[inp.agent_name] = True
         workflow.logger.info(f"Agent {inp.agent_name} reconnected")
 
     @workflow.signal
     async def order_delivered(self, inp: OrderDeliveredInput) -> None:
         """Signaled by DriverRouteWorkflow when a delivery completes."""
         driver_id = inp.driver_id
+        before = len(self._driver_orders.get(driver_id, []))
         if driver_id in self._driver_orders:
             if inp.order_id in self._driver_orders[driver_id]:
                 self._driver_orders[driver_id].remove(inp.order_id)
+        after = len(self._driver_orders.get(driver_id, []))
         self._driver_last_position[driver_id] = (inp.delivery_lat, inp.delivery_lng)
-        workflow.logger.info(f"Order {inp.order_id} delivered by {driver_id}")
+        if inp.order_id in self._orders:
+            self._orders[inp.order_id]["status"] = "delivered"
+        workflow.logger.info(
+            f"Order {inp.order_id} delivered by {driver_id} "
+            f"(orders: {before} → {after})"
+        )
+
+    @workflow.signal
+    async def new_order(self, order: OrderAssignmentResult) -> None:
+        """Signaled by OrderGenerationWorkflow with each new order to assign."""
+        self._pending_new_orders.append(order)
+
+    @workflow.signal
+    async def add_agent_event(self, event: dict) -> None:
+        """Accept agent reasoning events pushed from activities via workflow signal."""
+        self._agent_events.append(event)
+        # Keep last 100 events
+        if len(self._agent_events) > 100:
+            self._agent_events = self._agent_events[-100:]
 
     # --- Queries ---
 
@@ -468,10 +598,9 @@ class MeltdownDemoWorkflow:
             "disconnected_drivers": list(self._disconnected_drivers),
             "disconnected_agents": list(self._disconnected_agents),
             "driver_orders": {cid: list(oids) for cid, oids in self._driver_orders.items()},
-            "driver_positions": {
-                cid: {"lat": pos[0], "lng": pos[1]}
-                for cid, pos in self._driver_last_position.items()
-            },
+            "orders": dict(self._orders),
+            "agent_events": list(self._agent_events),
+            "agent_health": dict(self._agent_health),
         }
 
     # --- Helpers ---
@@ -507,7 +636,7 @@ class MeltdownDemoWorkflow:
             self._driver_orders[driver_id] = []
             self._driver_last_position[driver_id] = (WAREHOUSE.lat, WAREHOUSE.lng)
 
-        # Start 3 empty driver child workflows
+        # Start 3 driver child workflows
         self._route_handles = {}
         for i in range(1, 4):
             driver_id = f"ai-driver-{i}"
@@ -519,14 +648,30 @@ class MeltdownDemoWorkflow:
             )
             self._route_handles[driver_id] = handle
 
-        # Run order generation and signal processing concurrently
-        order_task = asyncio.create_task(self._order_generation_loop(inp.max_orders))
-        signal_task = asyncio.create_task(self._signal_loop())
+        # Start order generation as a child workflow
+        self._order_gen_handle = await workflow.start_child_workflow(
+            OrderGenerationWorkflow.run,
+            OrderGenerationInput(
+                max_orders=inp.max_orders,
+                order_interval_seconds=ORDER_INTERVAL_SECONDS,
+            ),
+            id="order-generation",
+            static_summary="Order generation + agent assignment",
+        )
 
-        # Wait for order generation to complete (all orders generated + delivered)
-        await order_task
+        # Process new orders and customer changes concurrently
+        order_task = asyncio.create_task(self._process_new_orders())
+        change_task = asyncio.create_task(self._process_customer_changes())
 
-        # Stop all drivers
+        # Wait for order generation to complete
+        await self._order_gen_handle
+
+        # Drain any remaining orders that arrived via signal before stopping
+        while self._pending_new_orders:
+            order = self._pending_new_orders.pop(0)
+            await self._assign_order(order)
+
+        # Stop all drivers and concurrent loops
         self._routes_done = True
         for handle in self._route_handles.values():
             try:
@@ -534,7 +679,8 @@ class MeltdownDemoWorkflow:
             except Exception:
                 pass
 
-        await signal_task
+        await change_task
+        await order_task
 
         # Wait for drivers to finish current deliveries
         results = []
@@ -545,18 +691,21 @@ class MeltdownDemoWorkflow:
             except Exception as e:
                 results.append(f"{driver_id}: {e}")
 
-        mode = "ADK" if not _MOCK_MODE else "mock"
-        return f"Meltdown demo complete ({mode}). Results: {results}"
+        return f"Meltdown demo complete. Results: {results}"
 
-    # --- Order generation loop ---
+    # --- ADK inline assignment (live mode) ---
 
     async def _run_adk_assignment(
         self, inp: ReasonAboutAssignmentInput
-    ) -> ReasonAboutAssignmentOutput | None:
-        """Run ADK agents for order assignment. Returns None on failure."""
+    ) -> ReasonAboutAssignmentOutput:
+        """Run ADK agents inline in the workflow.
+
+        Each LLM call and tool call is a separate Temporal activity via
+        TemporalModel + activity_tool. This gives per-call durability and
+        visibility in the Temporal UI. Failures propagate — Temporal retries.
+        """
+        workflow.logger.info(f"Running ADK assignment for {inp.order_id}")
         agent = create_order_assignment_agent()
-        if agent is None:
-            return None
 
         session_service = InMemorySessionService()
         runner = Runner(
@@ -570,7 +719,17 @@ class MeltdownDemoWorkflow:
             user_id="workflow",
         )
 
+        # Build agent status context
+        agent_status_lines = []
+        if inp.disconnected_agents:
+            for agent in inp.disconnected_agents:
+                agent_status_lines.append(
+                    f"⚠️ {agent} is OFFLINE — compensate with available data."
+                )
+        agent_context = "\n".join(agent_status_lines) + "\n\n" if agent_status_lines else ""
+
         prompt = (
+            f"{agent_context}"
             f"NEW ORDER — assign to the best driver:\n"
             f"Order ID: {inp.order_id}\n"
             f"Hotel: {inp.hotel}\n"
@@ -584,16 +743,12 @@ class MeltdownDemoWorkflow:
         )
 
         events_count = 0
-        try:
-            async for event in runner.run_async(
-                user_id="workflow",
-                session_id=session.id,
-                new_message=Content(parts=[Part(text=prompt)]),
-            ):
-                events_count += 1
-        except Exception as e:
-            workflow.logger.error(f"ADK assignment failed: {e}")
-            return None
+        async for event in runner.run_async(
+            user_id="workflow",
+            session_id=session.id,
+            new_message=Content(parts=[Part(text=prompt)]),
+        ):
+            events_count += 1
 
         updated_session = await session_service.get_session(
             app_name="meltdown_demo",
@@ -603,8 +758,7 @@ class MeltdownDemoWorkflow:
 
         assignment_dict = (updated_session.state or {}).get("assignment")
         if not assignment_dict:
-            workflow.logger.warning("ADK assignment resolver did not submit an assignment")
-            return None
+            raise RuntimeError("ADK assignment resolver did not submit an assignment")
 
         workflow.logger.info(
             f"ADK assignment complete: {events_count} events, driver={assignment_dict['driver_id']}"
@@ -614,98 +768,101 @@ class MeltdownDemoWorkflow:
             reasoning_summary=assignment_dict.get("reasoning_summary", "ADK assignment"),
         )
 
-    async def _order_generation_loop(
-        self,
-        max_orders: int = MAX_ORDERS,
-    ) -> None:
-        """Generate orders on a timer and assign via multi-agent reasoning."""
-        for order_num in range(1, max_orders + 1):
+    # --- New order processing (triggered by signals from OrderGenerationWorkflow) ---
+
+    async def _process_new_orders(self) -> None:
+        """Process new orders as they arrive via signal from OrderGenerationWorkflow."""
+        while not self._routes_done:
+            await workflow.wait_condition(
+                lambda: len(self._pending_new_orders) > 0 or self._routes_done,
+            )
+
             if self._routes_done:
                 break
 
-            # Generate a new order
-            order = await workflow.execute_activity(
-                generate_order,
-                GenerateOrderInput(order_number=order_num),
-                task_queue=DELIVERY_QUEUE,
-                summary=f"Generate order #{order_num}",
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=FAST_RETRY,
+            while self._pending_new_orders:
+                order = self._pending_new_orders.pop(0)
+                await self._assign_order(order)
+
+    async def _assign_order(self, order: OrderAssignmentResult) -> None:
+        """Run ADK assignment for a new order and signal the chosen driver."""
+        self._orders_generated += 1
+
+        # Track order in workflow state
+        self._orders[order.order_id] = {
+            "order_id": order.order_id,
+            "hotel": order.hotel,
+            "priority": order.priority,
+            "servings": order.servings,
+            "delivery_lat": order.delivery_lat,
+            "delivery_lng": order.delivery_lng,
+            "assigned_driver_id": None,
+            "status": "pending",
+            "deadline_minutes": order.deadline_minutes,
+        }
+
+        # Build driver snapshots from workflow state — passed to activity as input
+        driver_snapshots = self._build_driver_snapshots()
+
+        assignment_input = ReasonAboutAssignmentInput(
+            order_id=order.order_id,
+            hotel=order.hotel,
+            delivery_lat=order.delivery_lat,
+            delivery_lng=order.delivery_lng,
+            priority=order.priority,
+            servings=order.servings,
+            deadline_minutes=order.deadline_minutes,
+            event=order.event,
+            driver_snapshots=driver_snapshots,
+            disconnected_agents=list(self._disconnected_agents),
+        )
+
+        assignment = await self._run_adk_assignment(assignment_input)
+        await workflow.execute_activity(
+            register_assignment,
+            args=[assignment.driver_id, order.order_id],
+            task_queue=AGENTS_QUEUE,
+            summary=f"Resolver — register {order.order_id} → {assignment.driver_id}",
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=FAST_RETRY,
+        )
+
+        # Store agent events returned by the assignment activity
+        for evt in assignment.agent_events:
+            self._agent_events.append(evt)
+        if len(self._agent_events) > 100:
+            self._agent_events = self._agent_events[-100:]
+
+        # Update workflow-owned driver state
+        driver_id = assignment.driver_id
+        if driver_id in self._driver_orders:
+            self._driver_orders[driver_id].append(order.order_id)
+
+        # Update order tracking
+        if order.order_id in self._orders:
+            self._orders[order.order_id]["assigned_driver_id"] = driver_id
+            self._orders[order.order_id]["status"] = "assigned"
+
+        # Signal the chosen driver
+        if driver_id in self._route_handles:
+            await self._route_handles[driver_id].signal(
+                DriverRouteWorkflow.add_order,
+                DriverRouteOrder(
+                    order_id=order.order_id,
+                    hotel=order.hotel,
+                    delivery_lat=order.delivery_lat,
+                    delivery_lng=order.delivery_lng,
+                ),
             )
-            self._orders_generated = order_num
 
-            # Build driver snapshots from workflow state — passed to activity as input
-            driver_snapshots = self._build_driver_snapshots()
-
-            assignment_input = ReasonAboutAssignmentInput(
-                order_id=order.order_id,
-                hotel=order.hotel,
-                delivery_lat=order.delivery_lat,
-                delivery_lng=order.delivery_lng,
-                priority=order.priority,
-                servings=order.servings,
-                deadline_minutes=order.deadline_minutes,
-                event=order.event,
-                driver_snapshots=driver_snapshots,
-                disconnected_agents=list(self._disconnected_agents),
-            )
-
-            assignment = None
-
-            # Try ADK agents first when available
-            if not _MOCK_MODE:
-                assignment = await self._run_adk_assignment(assignment_input)
-                if assignment is not None:
-                    # ADK succeeded — register the assignment in fleet state via activity
-                    await workflow.execute_activity(
-                        register_assignment,
-                        args=[assignment.driver_id, order.order_id],
-                        task_queue=AGENTS_QUEUE,
-                        summary=f"Resolver — register {order.order_id} → {assignment.driver_id}",
-                        start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=FAST_RETRY,
-                    )
-
-            # Fallback to mock if ADK unavailable or failed
-            if assignment is None:
-                assignment = await workflow.execute_activity(
-                    reason_about_assignment,
-                    assignment_input,
-                    task_queue=AGENTS_QUEUE,
-                    summary=f"Fleet + Customer + Resolver — assign {order.order_id}",
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=FAST_RETRY,
-                )
-
-            # Update workflow-owned driver state
-            driver_id = assignment.driver_id
-            if driver_id in self._driver_orders:
-                self._driver_orders[driver_id].append(order.order_id)
-
-            # Signal the chosen driver
-            if driver_id in self._route_handles:
-                await self._route_handles[driver_id].signal(
-                    DriverRouteWorkflow.add_order,
-                    DriverRouteOrder(
-                        order_id=order.order_id,
-                        hotel=order.hotel,
-                        delivery_lat=order.delivery_lat,
-                        delivery_lng=order.delivery_lng,
-                    ),
-                )
-
-            workflow.logger.info(f"Order {order_num}/{MAX_ORDERS}: {order.order_id} -> {driver_id}")
-
-            # Wait before next order
-            if order_num < max_orders:
-                await workflow.sleep(timedelta(seconds=ORDER_INTERVAL_SECONDS))
+        workflow.logger.info(f"Order {self._orders_generated}: {order.order_id} → {driver_id}")
 
     # --- Signal processing loop ---
 
     def _has_pending_signal(self) -> bool:
         return len(self._pending_changes) > 0
 
-    async def _signal_loop(self) -> None:
+    async def _process_customer_changes(self) -> None:
         while not self._routes_done:
             await workflow.wait_condition(
                 lambda: self._has_pending_signal() or self._routes_done,

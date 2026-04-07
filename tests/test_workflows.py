@@ -1,8 +1,15 @@
-"""Integration tests for Temporal workflows using time-skipping test environment."""
+"""Integration tests for Temporal workflows using time-skipping test environment.
+
+DriverRouteWorkflow and OrderGenerationWorkflow are tested with mock
+activities — no API keys needed. These cover the core Temporal patterns:
+signals, activities, cancellation, child workflows.
+
+MeltdownDemoWorkflow requires the full ADK stack (Gemini + GoogleAdkPlugin)
+and is tested manually via ./run.sh.
+"""
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import timedelta
 
 import pytest
 from temporalio.testing import WorkflowEnvironment
@@ -17,24 +24,14 @@ from agent_fleet.activities import (
     navigate_to,
     pickup_orders,
     publish_agent_event,
-    reason_about_assignment,
-    register_assignment,
-    sync_driver_disconnect,
-    sync_driver_recovery_complete,
 )
 from agent_fleet.locations import VENUES
-from agent_fleet.mock_activities import (
-    mock_get_route_polyline,
-    mock_tool_get_route_info,
-    mock_tool_search_hotel_context,
-)
+from agent_fleet.mock.activities import mock_get_route_polyline
 from agent_fleet.models import (
-    CustomerChangeInput,
     DriverRouteInput,
     DriverRouteOrder,
-    MeltdownDemoInput,
 )
-from agent_fleet.queues import AGENTS_QUEUE, DELIVERY_QUEUE, WORKFLOWS_QUEUE
+from agent_fleet.queues import DELIVERY_QUEUE, WORKFLOWS_QUEUE
 from agent_fleet.simulation import fleet
 
 
@@ -45,14 +42,14 @@ async def env():
 
 
 @asynccontextmanager
-async def run_workers(env: WorkflowEnvironment):
-    """Start three workers matching production topology, using mock API activities."""
-    from agent_fleet.workflows import DriverRouteWorkflow, MeltdownDemoWorkflow
+async def run_delivery_workers(env: WorkflowEnvironment):
+    """Start workers for delivery workflow tests (no ADK needed)."""
+    from agent_fleet.workflows import DriverRouteWorkflow, OrderGenerationWorkflow
 
     workflow_worker = Worker(
         env.client,
         task_queue=WORKFLOWS_QUEUE,
-        workflows=[MeltdownDemoWorkflow, DriverRouteWorkflow],
+        workflows=[DriverRouteWorkflow, OrderGenerationWorkflow],
     )
     delivery_worker = Worker(
         env.client,
@@ -63,26 +60,14 @@ async def run_workers(env: WorkflowEnvironment):
             pickup_orders,
             deliver_order,
             execute_customer_change,
-            mock_get_route_polyline,  # mock — no real Google Maps API in tests
+            mock_get_route_polyline,
             get_fleet_status,
             get_order_priorities,
             publish_agent_event,
-            sync_driver_disconnect,
-            sync_driver_recovery_complete,
-        ],
-    )
-    agents_worker = Worker(
-        env.client,
-        task_queue=AGENTS_QUEUE,
-        activities=[
-            reason_about_assignment,
-            register_assignment,
-            mock_tool_get_route_info,  # mock
-            mock_tool_search_hotel_context,  # mock
         ],
     )
 
-    async with workflow_worker, delivery_worker, agents_worker:
+    async with workflow_worker, delivery_worker:
         yield
 
 
@@ -90,9 +75,8 @@ async def test_driver_route_completes_with_signal(env: WorkflowEnvironment):
     """DriverRouteWorkflow receives an order via signal, delivers it, then stops."""
     from agent_fleet.workflows import DriverRouteWorkflow
 
-    venue = VENUES[0]  # MGM Grand
+    venue = VENUES[0]
 
-    # Register the order in fleet state so activities can update UI projection
     await fleet.register_order(
         order_id="order-1",
         hotel=venue["hotel"],
@@ -104,7 +88,7 @@ async def test_driver_route_completes_with_signal(env: WorkflowEnvironment):
     )
     await fleet.assign_order_to_driver("ai-driver-1", "order-1")
 
-    async with run_workers(env):
+    async with run_delivery_workers(env):
         handle = await env.client.start_workflow(
             DriverRouteWorkflow.run,
             DriverRouteInput(driver_id="ai-driver-1"),
@@ -112,7 +96,6 @@ async def test_driver_route_completes_with_signal(env: WorkflowEnvironment):
             task_queue=WORKFLOWS_QUEUE,
         )
 
-        # Signal the order
         await handle.signal(
             DriverRouteWorkflow.add_order,
             DriverRouteOrder(
@@ -123,7 +106,6 @@ async def test_driver_route_completes_with_signal(env: WorkflowEnvironment):
             ),
         )
 
-        # Let it process, then stop
         await asyncio.sleep(2)
         await handle.signal(DriverRouteWorkflow.stop)
 
@@ -132,48 +114,43 @@ async def test_driver_route_completes_with_signal(env: WorkflowEnvironment):
         assert "1 deliveries" in result or "completed" in result.lower()
 
 
-async def test_meltdown_demo_completes(env: WorkflowEnvironment):
-    """Full demo workflow generates orders, assigns drivers, and completes."""
-    from agent_fleet.workflows import MeltdownDemoWorkflow
+async def test_driver_route_handles_multiple_orders(env: WorkflowEnvironment):
+    """DriverRouteWorkflow processes multiple orders sequentially."""
+    from agent_fleet.workflows import DriverRouteWorkflow
 
-    async with run_workers(env):
-        result = await env.client.execute_workflow(
-            MeltdownDemoWorkflow.run,
-            MeltdownDemoInput(escalation_enabled=False, max_orders=2),
-            id="test-meltdown-demo",
-            task_queue=WORKFLOWS_QUEUE,
-            execution_timeout=timedelta(minutes=10),
+    for i, venue in enumerate(VENUES[:2], 1):
+        await fleet.register_order(
+            order_id=f"order-{i}",
+            hotel=venue["hotel"],
+            label=f"{venue['hotel']} test",
+            priority="standard",
+            servings=40,
+            delivery_coords=venue["coords"],
+            deadline_minutes=30,
         )
-        assert "complete" in result.lower()
+        await fleet.assign_order_to_driver("ai-driver-1", f"order-{i}")
 
-
-async def test_meltdown_demo_handles_customer_change(env: WorkflowEnvironment):
-    from agent_fleet.workflows import MeltdownDemoWorkflow
-
-    async with run_workers(env):
+    async with run_delivery_workers(env):
         handle = await env.client.start_workflow(
-            MeltdownDemoWorkflow.run,
-            MeltdownDemoInput(escalation_enabled=False, max_orders=2),
-            id="test-meltdown-demo-customer-changes",
+            DriverRouteWorkflow.run,
+            DriverRouteInput(driver_id="ai-driver-1"),
+            id="test-route-multi",
             task_queue=WORKFLOWS_QUEUE,
-            execution_timeout=timedelta(minutes=10),
         )
 
-        # Wait for orders to be generated
-        await asyncio.sleep(3)
+        for i, venue in enumerate(VENUES[:2], 1):
+            await handle.signal(
+                DriverRouteWorkflow.add_order,
+                DriverRouteOrder(
+                    order_id=f"order-{i}",
+                    hotel=venue["hotel"],
+                    delivery_lat=venue["coords"].lat,
+                    delivery_lng=venue["coords"].lng,
+                ),
+            )
 
-        await handle.signal(
-            MeltdownDemoWorkflow.customer_change,
-            CustomerChangeInput(
-                order_id="order-1",
-                change_type="address_change",
-                new_details="Move to alternate loading bay",
-                new_lat=36.1111,
-                new_lng=-115.1666,
-            ),
-        )
-
-        await handle.signal(MeltdownDemoWorkflow.change_approved, True)
+        await asyncio.sleep(5)
+        await handle.signal(DriverRouteWorkflow.stop)
 
         result = await handle.result()
-        assert "complete" in result.lower()
+        assert "2 deliveries" in result

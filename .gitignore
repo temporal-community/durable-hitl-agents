@@ -3,3 +3,6 @@ venv/
 __pycache__/
 *.pyc
 .DS_Store
+fleet_state.db
+fleet_state.db-wal
+fleet_state.db-shm

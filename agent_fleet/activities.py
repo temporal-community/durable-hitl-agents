@@ -8,16 +8,14 @@ Each activity is a discrete, retryable unit of work. Activities handle:
 - Customer change execution
 """
 
-from __future__ import annotations
-
 import asyncio
 import math
 
 import httpx
 from temporalio import activity
 
-from agent_fleet.config import GOOGLE_API_KEY, GOOGLE_CSE_ID, GOOGLE_MAPS_API_KEY
-from agent_fleet.locations import VENUES_BY_HOTEL, generate_random_order
+from agent_fleet.config import GOOGLE_MAPS_API_KEY
+from agent_fleet.locations import generate_random_order
 from agent_fleet.models import (
     DeliverInput,
     DeliverOutput,
@@ -38,9 +36,6 @@ from agent_fleet.models import (
     PickupOutput,
     PublishAgentEventInput,
     PublishAgentEventOutput,
-    ReasonAboutAssignmentInput,
-    ReasonAboutAssignmentOutput,
-    SyncDriverDisconnectInput,
 )
 from agent_fleet.simulation import fleet
 
@@ -86,7 +81,7 @@ def decode_polyline(encoded: str) -> list[tuple[float, float]]:
     return points
 
 
-@activity.defn(name="get_route_polyline")
+@activity.defn
 async def get_route_polyline(
     origin_lat: float,
     origin_lng: float,
@@ -96,8 +91,7 @@ async def get_route_polyline(
     """Fetch route waypoints from Google Maps Directions API (decoded polyline).
 
     Returns a list of {"lat": float, "lng": float} waypoints.
-    Failures propagate to Temporal's retry mechanism — no silent fallback.
-    In mock mode, the worker registers a mock version of this activity instead.
+    Failures propagate to Temporal's retry mechanism.
     """
     origin = f"{origin_lat},{origin_lng}"
     destination = f"{dest_lat},{dest_lng}"
@@ -126,19 +120,19 @@ async def get_route_polyline(
 # --- Flat-signature tool activities (called by ADK agents via activity_tool) ---
 
 
-@activity.defn(name="tool_get_fleet_status")
+@activity.defn
 async def tool_get_fleet_status() -> str:
     """Check current fleet state: AI-Driver positions, cooler conditions, orders."""
     return await fleet.get_fleet_summary()
 
 
-@activity.defn(name="tool_get_order_priorities")
+@activity.defn
 async def tool_get_order_priorities() -> str:
     """Check order priority details: VIP vs standard, deadlines, servings."""
     return await fleet.get_order_priorities_summary()
 
 
-@activity.defn(name="tool_publish_agent_event")
+@activity.defn
 async def tool_publish_agent_event(
     agent_name: str, event_type: str, content: str, summary: str = ""
 ) -> str:
@@ -147,7 +141,7 @@ async def tool_publish_agent_event(
     return "Event published."
 
 
-@activity.defn(name="tool_get_route_info")
+@activity.defn
 async def tool_get_route_info(
     origin_lat: float,
     origin_lng: float,
@@ -211,46 +205,10 @@ async def tool_get_route_info(
     )
 
 
-@activity.defn(name="tool_search_hotel_context")
-async def tool_search_hotel_context(hotel_name: str) -> str:
-    """Search for live context about a Las Vegas hotel — current events, VIP bookings, reputation.
-
-    Use this to understand delivery urgency for a specific hotel destination.
-    Failures propagate to Temporal's retry mechanism.
-
-    Args:
-        hotel_name: Name of the hotel (e.g. "MGM Grand", "Caesars Palace", "Mandalay Bay")
-    """
-    query = f"{hotel_name} Las Vegas current events today"
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        "key": GOOGLE_API_KEY,
-        "cx": GOOGLE_CSE_ID,
-        "q": query,
-        "num": 3,
-    }
-
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-    items = data.get("items", [])
-    if not items:
-        return f"No search results found for {hotel_name}."
-
-    results = []
-    for item in items[:3]:
-        title = item.get("title", "")
-        snippet = item.get("snippet", "")
-        results.append(f"- {title}: {snippet}")
-    return f"Live search results for {hotel_name}:\n" + "\n".join(results)
-
-
 # --- Core delivery activities ---
 
 
-@activity.defn(name="generate_order")
+@activity.defn
 async def generate_order(inp: GenerateOrderInput) -> GenerateOrderOutput:
     """Generate a random order from the venue pool and register it in fleet state."""
     order_data = generate_random_order(inp.order_number)
@@ -279,155 +237,14 @@ async def generate_order(inp: GenerateOrderInput) -> GenerateOrderOutput:
     )
 
 
-@activity.defn(name="reason_about_assignment")
-async def reason_about_assignment(
-    inp: ReasonAboutAssignmentInput,
-) -> ReasonAboutAssignmentOutput:
-    """
-    Multi-agent reasoning to decide which driver should handle a new order.
-
-    Fleet Agent assesses driver positions and capacity.
-    Customer Agent evaluates order priority and urgency.
-    Resolver synthesizes and picks the best driver.
-
-    All decision inputs come from inp (workflow state) — not from FleetState.
-    FleetState writes are UI projection only.
-    """
-    # --- Fleet Agent: find best driver from workflow-provided snapshots ---
-    fleet_agent_offline = "fleet_agent" in inp.disconnected_agents
-
-    best_driver = None
-    best_dist = float("inf")
-    for driver in inp.driver_snapshots:
-        available = driver.capacity - driver.current_order_count
-        dist = math.sqrt(
-            (driver.lat - inp.delivery_lat) ** 2 + (driver.lng - inp.delivery_lng) ** 2
-        )
-
-        # Skip drivers that can't take orders
-        if driver.is_disconnected or available <= 0:
-            continue
-        if dist < best_dist:
-            best_dist = dist
-            best_driver = driver.driver_id
-    if best_driver is None:
-        # Fallback: pick any driver with capacity even if busy
-        best_driver = "ai-driver-1"
-
-    best_eta = max(2, int(best_dist * 69.0 * 3.5))
-
-    # Map driver IDs to driver labels for display
-    def _driver_label(cid: str) -> str:
-        if cid.startswith("ai-driver-"):
-            return f"Driver {cid.split('-')[-1]}"
-        return cid
-
-    if fleet_agent_offline:
-        # Fleet Agent is offline — publish offline notice and skip its assessment
-        await fleet.publish_agent_event(
-            "fleet_agent",
-            "offline",
-            "Fleet Agent offline — resolver using last-known data.",
-            summary="Fleet Agent offline",
-        )
-        await asyncio.sleep(0.2)
-    else:
-        await fleet.publish_agent_event(
-            "fleet_agent",
-            "tool_call",
-            f"New order — {inp.hotel}. Scanning fleet.",
-            summary=f"New order — {inp.hotel}",
-        )
-        await asyncio.sleep(0.4)
-
-        await fleet.publish_agent_event(
-            "fleet_agent",
-            "assessment",
-            f"{_driver_label(best_driver)} — closest, ~{best_eta}min ETA.",
-            summary=f"{_driver_label(best_driver)} — ETA {best_eta}min",
-        )
-        await asyncio.sleep(0.3)
-
-    # --- Customer Agent: priority assessment ---
-    customer_agent_offline = "customer_agent" in inp.disconnected_agents
-    urgency = (
-        "URGENT"
-        if inp.deadline_minutes <= 25
-        else ("TIGHT" if inp.deadline_minutes <= 35 else "comfortable")
-    )
-    venue_info = VENUES_BY_HOTEL.get(inp.hotel, {})
-    vip_tier = venue_info.get("vip_tier", "standard")
-
-    if customer_agent_offline:
-        await fleet.publish_agent_event(
-            "customer_agent",
-            "offline",
-            "Customer Agent offline — using order metadata.",
-            summary="Customer Agent offline",
-        )
-        await asyncio.sleep(0.2)
-    else:
-        urgency_note = "Time-critical" if urgency != "comfortable" else "Standard"
-        await fleet.publish_agent_event(
-            "customer_agent",
-            "assessment",
-            f"{inp.priority.upper()} / {vip_tier} — {inp.servings} servings, "
-            f"{inp.deadline_minutes}min deadline. {urgency_note}.",
-            summary=f"{inp.priority.upper()} — {urgency} deadline",
-        )
-        await asyncio.sleep(0.3)
-
-    # --- Resolver: synthesize and assign ---
-    offline_agents = []
-    if fleet_agent_offline:
-        offline_agents.append("Fleet Agent")
-    if customer_agent_offline:
-        offline_agents.append("Customer Agent")
-
-    best_label = _driver_label(best_driver)
-    if offline_agents:
-        offline_list = " and ".join(offline_agents)
-        if fleet_agent_offline and customer_agent_offline:
-            resolver_context = f"Degraded — {offline_list} offline. Best-effort."
-        elif fleet_agent_offline:
-            resolver_context = "Degraded — Fleet Agent offline. Using last-known positions."
-        else:
-            resolver_context = "Degraded — Customer Agent offline. Using order metadata."
-        resolver_summary = f"Assigned {best_label} (degraded)"
-    else:
-        resolver_context = ""
-        resolver_summary = f"Assigned to {best_label}"
-
-    resolver_body = ""
-    if resolver_context:
-        resolver_body += resolver_context + "\n"
-    resolver_body += f"{best_label} -> {inp.hotel}, ETA ~{best_eta}min."
-
-    await fleet.publish_agent_event(
-        "resolver",
-        "plan",
-        resolver_body,
-        summary=resolver_summary,
-    )
-
-    # Register assignment in fleet state (UI projection)
-    await fleet.assign_order_to_driver(best_driver, inp.order_id)
-
-    activity.logger.info(f"Assigned {inp.order_id} ({inp.hotel}) -> {best_driver}")
-    return ReasonAboutAssignmentOutput(
-        driver_id=best_driver,
-        reasoning_summary=f"{_driver_label(best_driver)} — closest, ~{best_eta}min ETA",
-    )
-
-
-@activity.defn(name="register_assignment")
+@activity.defn
 async def register_assignment(driver_id: str, order_id: str) -> str:
-    """Register an ADK-decided assignment in fleet state (replay-safe mutation)."""
+    """Register an ADK-decided assignment in fleet state (UI projection)."""
     await fleet.assign_order_to_driver(driver_id, order_id)
     return f"Assigned {order_id} to {driver_id}"
 
 
-@activity.defn(name="navigate_to")
+@activity.defn
 async def navigate_to(inp: NavigateInput) -> NavigateOutput:
     """
     Simulate AI-Driver navigation by interpolating position over N steps.
@@ -462,7 +279,7 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
 
     # Build the path to interpolate along
     if inp.waypoints and len(inp.waypoints) >= 2:
-        # Follow waypoint path from Google Maps polyline (or mock corridor)
+        # Follow waypoint path from Google Maps polyline
         path = [(wp["lat"], wp["lng"]) for wp in inp.waypoints]
     else:
         # Straight line fallback
@@ -514,7 +331,7 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
     )
 
 
-@activity.defn(name="pickup_orders")
+@activity.defn
 async def pickup_orders(inp: PickupInput) -> PickupOutput:
     """Simulate picking up ice cream orders at the kitchen."""
     if inp.is_driver_disconnected:
@@ -529,7 +346,7 @@ async def pickup_orders(inp: PickupInput) -> PickupOutput:
     return PickupOutput(driver_id=inp.driver_id, success=True)
 
 
-@activity.defn(name="deliver_order")
+@activity.defn
 async def deliver_order(inp: DeliverInput) -> DeliverOutput:
     """Simulate delivering an ice cream order at a hotel."""
     if inp.is_driver_disconnected:
@@ -551,14 +368,14 @@ async def deliver_order(inp: DeliverInput) -> DeliverOutput:
 # --- Agent tool activities (called by ADK agents via activity_tool) ---
 
 
-@activity.defn(name="get_fleet_status")
+@activity.defn
 async def get_fleet_status(inp: GetFleetStatusInput) -> GetFleetStatusOutput:
     """Return fleet status summary for Fleet Agent consumption."""
     summary = await fleet.get_fleet_summary()
     return GetFleetStatusOutput(summary=summary)
 
 
-@activity.defn(name="get_order_priorities")
+@activity.defn
 async def get_order_priorities(
     inp: GetOrderPrioritiesInput,
 ) -> GetOrderPrioritiesOutput:
@@ -567,7 +384,7 @@ async def get_order_priorities(
     return GetOrderPrioritiesOutput(summary=summary)
 
 
-@activity.defn(name="publish_agent_event")
+@activity.defn
 async def publish_agent_event(
     inp: PublishAgentEventInput,
 ) -> PublishAgentEventOutput:
@@ -578,32 +395,10 @@ async def publish_agent_event(
     return PublishAgentEventOutput(success=True)
 
 
-# --- Workflow-driven state sync activities ---
-
-
-@activity.defn(name="sync_driver_disconnect")
-async def sync_driver_disconnect(inp: SyncDriverDisconnectInput) -> None:
-    """Sync driver disconnect/reconnect state to FleetState for the frontend.
-
-    Called by the workflow after processing a disconnect/reconnect signal.
-    Everything flows through Temporal — this is the only path to FleetState.
-    """
-    if inp.disconnected:
-        await fleet.disconnect_driver(inp.driver_id)
-    else:
-        await fleet.reconnect_driver(inp.driver_id)
-
-
-@activity.defn(name="sync_driver_recovery_complete")
-async def sync_driver_recovery_complete(driver_id: str) -> None:
-    """Clear the recovery visual indicator after replay completes."""
-    await fleet.mark_driver_recovery_complete(driver_id)
-
-
 # --- Customer change activities ---
 
 
-@activity.defn(name="execute_customer_change")
+@activity.defn
 async def execute_customer_change(
     inp: ExecuteCustomerChangeInput,
 ) -> ExecuteCustomerChangeOutput:

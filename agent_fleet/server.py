@@ -5,6 +5,8 @@ Serves the frontend, exposes fleet state via WebSocket, and provides
 API endpoints for demo control (start, reset, driver/agent disconnect,
 customer change, approve/reject).
 
+Workers run in a separate process (python -m agent_fleet.worker).
+
 Run with:
     python -m agent_fleet.server
 """
@@ -23,11 +25,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from temporalio.client import Client
+from temporalio.contrib.pydantic import PydanticPayloadConverter
+from temporalio.converter import DataConverter
 from temporalio.service import RPCError
 
 load_dotenv()
 
-from agent_fleet.config import GOOGLE_API_KEY, GOOGLE_MAPS_API_KEY, TEMPORAL_ADDRESS
+from agent_fleet.config import TEMPORAL_ADDRESS
 from agent_fleet.locations import VENUES, WAREHOUSE, WAREHOUSE_LABEL
 from agent_fleet.models import (
     AgentDisconnectInput,
@@ -37,64 +41,18 @@ from agent_fleet.models import (
 )
 from agent_fleet.queues import WORKFLOWS_QUEUE
 from agent_fleet.simulation import fleet
-from agent_fleet.worker import create_worker
 from agent_fleet.workflows import MeltdownDemoWorkflow
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Quiet Temporal SDK internals — "Timer started", replay chatter, etc.
-logging.getLogger("temporalio.worker").setLevel(logging.WARNING)
-logging.getLogger("temporalio.activity").setLevel(logging.WARNING)
-logging.getLogger("temporalio.workflow").setLevel(logging.WARNING)
-
 # --- Runtime state ---
 
 _escalation_enabled = False
-_worker_tasks: list[asyncio.Task] = []
 _temporal_client: Client | None = None
 
 
-# --- Worker lifecycle ---
-
-
-async def _start_workers() -> None:
-    global _worker_tasks, _temporal_client
-    if _worker_tasks and any(not t.done() for t in _worker_tasks):
-        logger.warning("Workers already running")
-        return
-
-    _temporal_client = await Client.connect(TEMPORAL_ADDRESS)
-    workers = await create_worker(_temporal_client)
-
-    def _make_run(w):
-        async def _run():
-            try:
-                await w.run()
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.error(f"Worker error: {e}")
-
-        return _run
-
-    _worker_tasks = [asyncio.create_task(_make_run(w)()) for w in workers]
-    maps_key = "SET" if GOOGLE_MAPS_API_KEY else "NOT SET"
-    gemini_key = "SET" if GOOGLE_API_KEY else "NOT SET"
-    logger.info(f"Workers started (GOOGLE_MAPS_API_KEY={maps_key}, GOOGLE_API_KEY={gemini_key})")
-
-
-async def _stop_workers() -> None:
-    global _worker_tasks
-    running = [t for t in _worker_tasks if not t.done()]
-    if not running:
-        logger.warning("No workers running to stop")
-        return
-    for t in running:
-        t.cancel()
-    await asyncio.gather(*running, return_exceptions=True)
-    _worker_tasks = []
-    logger.info("Workers stopped")
+# --- Workflow management ---
 
 
 async def _cancel_running_workflows() -> None:
@@ -120,9 +78,15 @@ async def _cancel_running_workflows() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await _start_workers()
+    global _temporal_client
+    _temporal_client = await Client.connect(
+        TEMPORAL_ADDRESS,
+        data_converter=DataConverter(
+            payload_converter_class=PydanticPayloadConverter,
+        ),
+    )
+    logger.info(f"Connected to Temporal at {TEMPORAL_ADDRESS}")
     yield
-    await _stop_workers()
 
 
 app = FastAPI(title="Meltdown Ice Cream Delivery", lifespan=lifespan)
@@ -162,9 +126,9 @@ async def start_demo():
 
 @app.post("/api/reset")
 async def reset_demo():
-    """Cancel running workflows and reset simulation state."""
+    """Cancel running workflows and reset state."""
     await _cancel_running_workflows()
-    fleet.reset()
+    await fleet.reset()
     return {"status": "reset"}
 
 
@@ -181,8 +145,10 @@ async def disconnect_driver(body: DriverDisconnectRequest):
     if _temporal_client is None:
         return {"error": "Temporal client not connected"}
 
-    # Signal both parent orchestrator and the driver's child workflow.
-    # The workflow handles the cancellation and syncs state to FleetState via activities.
+    # Update FleetState for frontend display
+    await fleet.disconnect_driver(body.driver_id)
+
+    # Signal both parent orchestrator and the driver's child workflow
     try:
         parent = _temporal_client.get_workflow_handle("meltdown-demo")
         await parent.signal(
@@ -213,8 +179,17 @@ async def reconnect_driver(body: DriverDisconnectRequest):
     if _temporal_client is None:
         return {"error": "Temporal client not connected"}
 
-    # Signal both workflows. The child workflow syncs reconnect state to FleetState
-    # and clears the recovery indicator via activities.
+    # Update FleetState for frontend display
+    await fleet.reconnect_driver(body.driver_id)
+
+    # Clear recovery indicator after a short delay
+    async def _clear_recovery():
+        await asyncio.sleep(3)
+        await fleet.mark_driver_recovery_complete(body.driver_id)
+
+    asyncio.create_task(_clear_recovery())
+
+    # Signal both workflows
     try:
         parent = _temporal_client.get_workflow_handle("meltdown-demo")
         await parent.signal(
@@ -251,10 +226,9 @@ class AgentDisconnectRequest(BaseModel):
 
 @app.post("/api/disconnect-agent")
 async def disconnect_agent(body: AgentDisconnectRequest):
-    """Take a specific agent offline. Other agents compensate."""
+    """Take a specific agent offline."""
     await fleet.disconnect_agent(body.agent_name)
 
-    # Signal the workflow
     if _temporal_client is not None:
         try:
             handle = _temporal_client.get_workflow_handle("meltdown-demo")
@@ -277,7 +251,6 @@ async def reconnect_agent(body: AgentDisconnectRequest):
     """Bring a specific agent back online."""
     await fleet.reconnect_agent(body.agent_name)
 
-    # Signal the workflow
     if _temporal_client is not None:
         try:
             handle = _temporal_client.get_workflow_handle("meltdown-demo")
@@ -287,13 +260,6 @@ async def reconnect_agent(body: AgentDisconnectRequest):
             )
         except Exception as e:
             logger.error(f"Failed to signal agent reconnect: {e}")
-
-    await fleet.publish_agent_event(
-        body.agent_name,
-        "reconnected",
-        f"{body.agent_name} is back online and ready for reasoning.",
-        summary=f"{body.agent_name} reconnected",
-    )
 
     return {
         "status": "agent_reconnected",
@@ -377,10 +343,19 @@ async def toggle_escalation():
 # --- State query endpoints ---
 
 
+async def _build_snapshot() -> dict:
+    """Build frontend state from FleetState (SQLite, shared across processes).
+
+    Activities write positions, statuses, and agent events to FleetState.
+    Server disconnect/reconnect endpoints write disconnect state directly.
+    """
+    return await fleet.snapshot()
+
+
 @app.get("/api/state")
 async def get_state():
-    """Get current fleet state as JSON."""
-    return await fleet.snapshot()
+    """Get current fleet state by querying Temporal workflows."""
+    return await _build_snapshot()
 
 
 @app.get("/api/locations")
@@ -411,12 +386,13 @@ async def get_locations():
 
 @app.websocket("/ws")
 async def websocket_state(ws: WebSocket):
-    """Push fleet state to the frontend every 300ms."""
+    """Push fleet state to the frontend every 300ms via Temporal workflow queries."""
     await ws.accept()
     last_snapshot: str | None = None
     try:
         while True:
-            data = json.dumps(await fleet.snapshot())
+            snapshot = await _build_snapshot()
+            data = json.dumps(snapshot)
             if data != last_snapshot:
                 await ws.send_text(data)
                 last_snapshot = data

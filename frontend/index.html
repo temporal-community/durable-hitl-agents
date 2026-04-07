@@ -1151,16 +1151,16 @@ function getBearing(prev, curr) {
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
-function crewIcon(color, hasAlert, bearing) {
+function crewIcon(color, isDisconnected, bearing) {
   // 🚚 emoji faces left by default. Flip when heading east (0-180) so truck faces forward.
   const flip = typeof bearing === 'number' && bearing <= 180;
-  const alertDot = hasAlert
-    ? `<div style="position:absolute;top:-4px;right:-4px;width:12px;height:12px;background:#ef4444;border-radius:50%;border:2px solid #fff;animation:pulse 1s infinite;z-index:10;"></div>`
+  const ring = isDisconnected
+    ? `<div style="position:absolute;top:-6px;left:50%;transform:translateX(-50%);width:56px;height:56px;border:3px solid #ef4444;border-radius:50%;animation:pulse 1.5s infinite;z-index:0;"></div>`
     : '';
   return L.divIcon({
     className: 'crew-marker',
     html: `<div style="position:relative;width:52px;height:44px;">
-      ${alertDot}
+      ${ring}
       <div style="position:absolute;top:-8px;left:50%;transform:translateX(-50%);font-size:30px;line-height:1;z-index:2;">🍦</div>
       <div style="margin-top:18px;font-size:28px;line-height:1;text-align:center;${flip ? 'transform:scaleX(-1);' : ''}">🚚</div>
       <div style="position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:36px;height:4px;background:${color};border-radius:2px;opacity:0.8;"></div>
@@ -1268,15 +1268,16 @@ function updateCrews(crews) {
     }
     prevPositions[c.driver_id] = { pos, bearing };
 
+    const isDisconnected = c.disconnected || c.status === 'disconnected';
     if (!crewMarkers[c.driver_id]) {
-      crewMarkers[c.driver_id] = L.marker(pos, { icon: crewIcon(color, false, bearing) }).addTo(map);
+      crewMarkers[c.driver_id] = L.marker(pos, { icon: crewIcon(color, isDisconnected, bearing) }).addTo(map);
       crewMarkers[c.driver_id].bindTooltip(c.driver_id, { direction: 'top', offset: [0, -24] });
       crewTrails[c.driver_id] = L.polyline([], {
         color, weight: 2, opacity: 0.4, dashArray: '4 6',
       }).addTo(map);
     } else {
       crewMarkers[c.driver_id].setLatLng(pos);
-      crewMarkers[c.driver_id].setIcon(crewIcon(color, false, bearing));
+      crewMarkers[c.driver_id].setIcon(crewIcon(color, isDisconnected, bearing));
     }
 
     if (c.status === 'idle') {
@@ -1328,7 +1329,7 @@ let prevEventCounts = { fleet_agent: 0, customer_agent: 0, resolver: 0 };
 let prevTotalCount = 0;
 let _pendingChangeDetails = '';
 
-const SNIPPET_LEN = 120;
+const SNIPPET_LEN = 60;
 
 function updateAgentEvents(events, agentHealth) {
   if (!events) return;

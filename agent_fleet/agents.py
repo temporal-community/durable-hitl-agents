@@ -20,17 +20,17 @@ from datetime import timedelta
 
 from google.adk.agents import Agent, ParallelAgent, SequentialAgent
 from google.adk.tools import ToolContext
+from google.adk.tools.google_search_tool import GoogleSearchTool
 from temporalio.common import RetryPolicy
 from temporalio.contrib.google_adk_agents import TemporalModel
-from temporalio.contrib.google_adk_agents.workflow import activity_tool
 from temporalio.workflow import ActivityConfig
 
+from agent_fleet._activity_tool import activity_tool
 from agent_fleet.activities import (
     tool_get_fleet_status,
     tool_get_order_priorities,
     tool_get_route_info,
     tool_publish_agent_event,
-    tool_search_hotel_context,
 )
 from agent_fleet.config import DEFAULT_MODEL
 from agent_fleet.queues import AGENTS_QUEUE
@@ -48,30 +48,28 @@ _TOOL_RETRY = RetryPolicy(
 _fleet_status_tool = activity_tool(
     tool_get_fleet_status,
     task_queue=AGENTS_QUEUE,
+    summary="Fleet Agent — get fleet status",
     start_to_close_timeout=timedelta(seconds=10),
     retry_policy=_TOOL_RETRY,
 )
 _order_priorities_tool = activity_tool(
     tool_get_order_priorities,
     task_queue=AGENTS_QUEUE,
+    summary="Customer Agent — get order priorities",
     start_to_close_timeout=timedelta(seconds=10),
     retry_policy=_TOOL_RETRY,
 )
 _publish_event_tool = activity_tool(
     tool_publish_agent_event,
     task_queue=AGENTS_QUEUE,
+    summary="Agent — publish event",
     start_to_close_timeout=timedelta(seconds=10),
     retry_policy=_TOOL_RETRY,
 )
 _route_info_tool = activity_tool(
     tool_get_route_info,
     task_queue=AGENTS_QUEUE,
-    start_to_close_timeout=timedelta(seconds=15),
-    retry_policy=_TOOL_RETRY,
-)
-_hotel_search_tool = activity_tool(
-    tool_search_hotel_context,
-    task_queue=AGENTS_QUEUE,
+    summary="Fleet Agent — get route info",
     start_to_close_timeout=timedelta(seconds=15),
     retry_policy=_TOOL_RETRY,
 )
@@ -107,7 +105,10 @@ def create_assignment_fleet_agent() -> Agent:
         name="assignment_fleet_agent",
         model=TemporalModel(
             DEFAULT_MODEL,
-            activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),
+            activity_config=ActivityConfig(
+                task_queue=AGENTS_QUEUE,
+                summary="Fleet Agent — LLM reasoning",
+            ),
         ),
         description=(
             "Operational fleet specialist for order assignment. Assesses AI-Driver "
@@ -142,7 +143,10 @@ def create_assignment_customer_agent() -> Agent:
         name="assignment_customer_agent",
         model=TemporalModel(
             DEFAULT_MODEL,
-            activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),
+            activity_config=ActivityConfig(
+                task_queue=AGENTS_QUEUE,
+                summary="Customer Agent — LLM reasoning",
+            ),
         ),
         description=(
             "Customer priority specialist for order assignment. Evaluates order "
@@ -152,7 +156,7 @@ def create_assignment_customer_agent() -> Agent:
             "You are the Customer Relations AI for Meltdown Ice Cream Delivery. "
             "A new order has arrived and you need to assess its priority and urgency.\n\n"
             "Call tool_get_order_priorities to check order details. "
-            "Call tool_search_hotel_context to get context about the delivery hotel.\n\n"
+            "Use Google Search to find current events at the delivery hotel.\n\n"
             "Assess:\n"
             "- Is this a VIP or standard order?\n"
             "- How tight is the deadline?\n"
@@ -162,7 +166,11 @@ def create_assignment_customer_agent() -> Agent:
             "event_type='assessment' to share your priority assessment.\n\n"
             "Be concise — state the priority level and any urgency factors."
         ),
-        tools=[_order_priorities_tool, _hotel_search_tool, _publish_event_tool],
+        tools=[
+            _order_priorities_tool,
+            GoogleSearchTool(bypass_multi_tools_limit=True),
+            _publish_event_tool,
+        ],
         output_key="customer_assessment",
     )
 
@@ -176,7 +184,10 @@ def create_assignment_resolver() -> Agent:
         name="assignment_resolver",
         model=TemporalModel(
             DEFAULT_MODEL,
-            activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),
+            activity_config=ActivityConfig(
+                task_queue=AGENTS_QUEUE,
+                summary="Resolver — LLM reasoning",
+            ),
         ),
         description=(
             "Assignment coordinator. Synthesizes fleet and customer assessments "
@@ -204,7 +215,8 @@ def create_assignment_resolver() -> Agent:
 
 def create_order_assignment_agent() -> SequentialAgent:
     """
-    Compose the full order assignment pipeline:
+    Compose the full order assignment pipeline (workflow context).
+    Uses TemporalModel + activity_tool — each LLM and tool call is a Temporal activity.
     1. ParallelAgent: Fleet Agent + Customer Agent assess simultaneously
     2. Assignment Resolver: synthesizes and submits driver assignment
     """

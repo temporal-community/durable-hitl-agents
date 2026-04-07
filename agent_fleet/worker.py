@@ -1,18 +1,13 @@
 """
 Temporal worker entry point for the Meltdown demo.
 
-Runs in the same process as the FastAPI server (started from server.py).
+Runs as a separate process from the FastAPI server.
 Three workers on three task queues:
   - meltdown-workflows: workflows only (no activities, dedicated to replay)
   - meltdown-delivery: navigation, pickup, delivery, customer changes
   - meltdown-agents: LLM/ADK tool calls (rate-limited, max 5 concurrent)
 
-Mock mode: when API keys are not set, mock activity implementations are
-registered instead of real ones. Same activity names, deterministic data.
-The worker startup is the single place that decides real vs mock — no
-runtime fallbacks inside activities.
-
-Can also be run standalone:
+Run with:
     python -m agent_fleet.worker
 """
 
@@ -20,8 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 
 from temporalio.client import Client
+from temporalio.contrib.google_adk_agents import GoogleAdkPlugin
+from temporalio.contrib.pydantic import PydanticPayloadConverter
+from temporalio.converter import DataConverter
 from temporalio.worker import Worker
 
 from agent_fleet.activities import (
@@ -30,26 +29,19 @@ from agent_fleet.activities import (
     generate_order,
     get_fleet_status,
     get_order_priorities,
+    get_route_polyline,
     navigate_to,
     pickup_orders,
     publish_agent_event,
-    reason_about_assignment,
     register_assignment,
-    sync_driver_disconnect,
-    sync_driver_recovery_complete,
     tool_get_fleet_status,
     tool_get_order_priorities,
+    tool_get_route_info,
     tool_publish_agent_event,
 )
-from agent_fleet.config import (
-    GOOGLE_API_KEY,
-    GOOGLE_CSE_ID,
-    GOOGLE_MAPS_API_KEY,
-    MOCK_MODE,
-    TEMPORAL_ADDRESS,
-)
+from agent_fleet.config import TEMPORAL_ADDRESS
 from agent_fleet.queues import AGENTS_QUEUE, DELIVERY_QUEUE, WORKFLOWS_QUEUE
-from agent_fleet.workflows import DriverRouteWorkflow, MeltdownDemoWorkflow
+from agent_fleet.workflows import DriverRouteWorkflow, MeltdownDemoWorkflow, OrderGenerationWorkflow
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,62 +52,22 @@ logging.getLogger("temporalio.activity").setLevel(logging.WARNING)
 logging.getLogger("temporalio.workflow").setLevel(logging.WARNING)
 
 
-def _get_api_activities() -> dict:
-    """Return real or mock implementations for API-backed activities.
-
-    Each API activity uses its own key check — partial env setups get
-    mock fallbacks for missing services instead of sending wrong credentials.
-    """
-    result = {}
-
-    # Maps activities: need GOOGLE_MAPS_API_KEY explicitly set
-    if GOOGLE_MAPS_API_KEY:
-        from agent_fleet.activities import get_route_polyline, tool_get_route_info
-
-        result["get_route_polyline"] = get_route_polyline
-        result["tool_get_route_info"] = tool_get_route_info
-    else:
-        from agent_fleet.mock_activities import (
-            mock_get_route_polyline,
-            mock_tool_get_route_info,
-        )
-
-        result["get_route_polyline"] = mock_get_route_polyline
-        result["tool_get_route_info"] = mock_tool_get_route_info
-
-    # Search activity: needs both GOOGLE_API_KEY and GOOGLE_CSE_ID
-    if GOOGLE_API_KEY and GOOGLE_CSE_ID:
-        from agent_fleet.activities import tool_search_hotel_context
-
-        result["tool_search_hotel_context"] = tool_search_hotel_context
-    else:
-        from agent_fleet.mock_activities import mock_tool_search_hotel_context
-
-        result["tool_search_hotel_context"] = mock_tool_search_hotel_context
-
-    return result
-
-
 def create_workflow_worker(client: Client) -> Worker:
     """Workflow-only worker — no activities, dedicated to replay.
 
     GoogleAdkPlugin is needed here for sandbox passthroughs (google.adk,
     google.genai) and deterministic runtime (uuid, time) during replay.
     """
-    kwargs: dict = dict(
+    return Worker(
+        client,
         task_queue=WORKFLOWS_QUEUE,
-        workflows=[MeltdownDemoWorkflow, DriverRouteWorkflow],
+        workflows=[MeltdownDemoWorkflow, DriverRouteWorkflow, OrderGenerationWorkflow],
+        plugins=[GoogleAdkPlugin()],
     )
-    if not MOCK_MODE:
-        from temporalio.contrib.google_adk_agents import GoogleAdkPlugin
-
-        kwargs["plugins"] = [GoogleAdkPlugin()]
-    return Worker(client, **kwargs)
 
 
 def create_delivery_worker(client: Client) -> Worker:
     """Navigation, pickup, delivery, order generation, and customer change activities."""
-    api_acts = _get_api_activities()
     return Worker(
         client,
         task_queue=DELIVERY_QUEUE,
@@ -125,47 +77,39 @@ def create_delivery_worker(client: Client) -> Worker:
             pickup_orders,
             deliver_order,
             execute_customer_change,
-            api_acts["get_route_polyline"],
+            get_route_polyline,
             get_fleet_status,
             get_order_priorities,
             publish_agent_event,
-            sync_driver_disconnect,
-            sync_driver_recovery_complete,
         ],
         max_concurrent_activities=20,
     )
 
 
 def create_agents_worker(client: Client) -> Worker:
-    """ADK/LLM activities — rate-limited, plugin only registered here."""
-    api_acts = _get_api_activities()
-    activities = [
-        reason_about_assignment,
-        register_assignment,
-        tool_get_fleet_status,
-        tool_get_order_priorities,
-        tool_publish_agent_event,
-        api_acts["tool_get_route_info"],
-        api_acts["tool_search_hotel_context"],
-    ]
-    kwargs: dict = dict(
-        task_queue=AGENTS_QUEUE,
-        activities=activities,
-        max_concurrent_activities=5,
-    )
-    if not MOCK_MODE:
-        from temporalio.contrib.google_adk_agents import GoogleAdkPlugin
+    """ADK/LLM activities — rate-limited.
 
-        kwargs["plugins"] = [GoogleAdkPlugin()]
-    return Worker(client, **kwargs)
+    GoogleAdkPlugin registers the invoke_model activity that TemporalModel
+    routes LLM calls to.
+    """
+    return Worker(
+        client,
+        task_queue=AGENTS_QUEUE,
+        activities=[
+            register_assignment,
+            tool_get_fleet_status,
+            tool_get_order_priorities,
+            tool_publish_agent_event,
+            tool_get_route_info,
+        ],
+        max_concurrent_activities=5,
+        plugins=[GoogleAdkPlugin()],
+    )
 
 
 async def create_worker(client: Client) -> list[Worker]:
     """Create all three workers. Returns list for server.py to manage."""
-    mode = "MOCK" if MOCK_MODE else "LIVE"
-    maps = "LIVE" if GOOGLE_MAPS_API_KEY else "MOCK"
-    search = "LIVE" if (GOOGLE_API_KEY and GOOGLE_CSE_ID) else "MOCK"
-    logger.info(f"Starting workers (ADK={mode}, Maps={maps}, Search={search})")
+    logger.info("Starting workers (LIVE MODE)")
     return [
         create_workflow_worker(client),
         create_delivery_worker(client),
@@ -174,12 +118,49 @@ async def create_worker(client: Client) -> list[Worker]:
 
 
 async def run_worker() -> None:
-    """Connect to Temporal and run all three workers until interrupted."""
+    """Connect to Temporal and run all workers until interrupted."""
+    from agent_fleet.config import GOOGLE_API_KEY, GOOGLE_MAPS_API_KEY
+
+    if GOOGLE_API_KEY:
+        _create = create_worker  # live workers from this module
+        mode = "LIVE"
+    else:
+        from agent_fleet.mock.worker import create_worker as _create
+
+        mode = "MOCK"
+
+    maps_key = "SET" if GOOGLE_MAPS_API_KEY else "NOT SET"
+    gemini_key = "SET" if GOOGLE_API_KEY else "NOT SET"
+    logger.info(
+        f"Worker mode: {mode} (GOOGLE_MAPS_API_KEY={maps_key}, GOOGLE_API_KEY={gemini_key})"
+    )
+
     logger.info(f"Connecting to Temporal at {TEMPORAL_ADDRESS}...")
-    client = await Client.connect(TEMPORAL_ADDRESS)
-    workers = await create_worker(client)
+    client = await Client.connect(
+        TEMPORAL_ADDRESS,
+        data_converter=DataConverter(
+            payload_converter_class=PydanticPayloadConverter,
+        ),
+    )
+    workers = await _create(client)
     logger.info(f"Workers started on queues: {WORKFLOWS_QUEUE}, {DELIVERY_QUEUE}, {AGENTS_QUEUE}")
-    await asyncio.gather(*[w.run() for w in workers])
+
+    # Graceful shutdown on SIGINT/SIGTERM
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, shutdown_event.set)
+
+    # Run all workers; cancel on shutdown signal
+    tasks = [asyncio.create_task(w.run()) for w in workers]
+    shutdown_task = asyncio.create_task(shutdown_event.wait())
+    done, _ = await asyncio.wait([*tasks, shutdown_task], return_when=asyncio.FIRST_COMPLETED)
+    if shutdown_event.is_set():
+        logger.info("Shutdown signal received, stopping workers...")
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("Workers stopped.")
 
 
 if __name__ == "__main__":

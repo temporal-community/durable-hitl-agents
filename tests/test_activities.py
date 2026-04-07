@@ -8,7 +8,6 @@ from agent_fleet.activities import (
     generate_order,
     navigate_to,
     pickup_orders,
-    sync_driver_disconnect,
 )
 from agent_fleet.models import (
     DeliverInput,
@@ -18,7 +17,6 @@ from agent_fleet.models import (
     NavigateOutput,
     OrderStatus,
     PickupInput,
-    SyncDriverDisconnectInput,
 )
 from agent_fleet.simulation import fleet
 
@@ -102,19 +100,3 @@ async def test_deliver_order_sets_status(env: ActivityEnvironment):
 
     c = await fleet.get_driver("ai-driver-1")
     assert "order-1" not in c.current_orders
-
-
-async def test_sync_driver_disconnect(env: ActivityEnvironment):
-    # Disconnect a driver via the sync activity
-    await env.run(
-        sync_driver_disconnect,
-        SyncDriverDisconnectInput(driver_id="ai-driver-1", disconnected=True),
-    )
-    assert await fleet.is_driver_disconnected("ai-driver-1") is True
-
-    # Reconnect
-    await env.run(
-        sync_driver_disconnect,
-        SyncDriverDisconnectInput(driver_id="ai-driver-1", disconnected=False),
-    )
-    assert await fleet.is_driver_disconnected("ai-driver-1") is False
