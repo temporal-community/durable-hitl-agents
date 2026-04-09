@@ -173,7 +173,6 @@ class NavigateInput:
     leg: str  # LegType value — "pickup" or "delivery"
     steps: int = 8
     waypoints: list[dict] | None = None  # [{"lat": float, "lng": float}, ...]
-    is_driver_disconnected: bool = False
     start_lat: float | None = None
     start_lng: float | None = None
 
@@ -190,7 +189,6 @@ class NavigateOutput:
 class PickupInput:
     driver_id: str
     order_ids: list[str]
-    is_driver_disconnected: bool = False
 
 
 @dataclass
@@ -203,7 +201,6 @@ class PickupOutput:
 class DeliverInput:
     driver_id: str
     order_id: str
-    is_driver_disconnected: bool = False
 
 
 @dataclass

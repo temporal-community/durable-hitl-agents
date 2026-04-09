@@ -122,7 +122,12 @@ async def get_route_polyline(
 
 @activity.defn
 async def tool_get_fleet_status() -> str:
-    """Check current fleet state: AI-Driver positions, cooler conditions, orders."""
+    """Check current fleet state: AI-Driver positions, cooler conditions, orders.
+
+    Fails when Fleet Agent is disconnected — Temporal retries until reconnected.
+    """
+    if await fleet.is_agent_disconnected("fleet_agent"):
+        raise RuntimeError("Fleet Agent is disconnected — tool unavailable")
     return await fleet.get_fleet_summary()
 
 
@@ -130,15 +135,6 @@ async def tool_get_fleet_status() -> str:
 async def tool_get_order_priorities() -> str:
     """Check order priority details: VIP vs standard, deadlines, servings."""
     return await fleet.get_order_priorities_summary()
-
-
-@activity.defn
-async def tool_publish_agent_event(
-    agent_name: str, event_type: str, content: str, summary: str = ""
-) -> str:
-    """Publish a reasoning event to the operator UI panel."""
-    await fleet.publish_agent_event(agent_name, event_type, content, summary=summary)
-    return "Event published."
 
 
 @activity.defn
@@ -151,6 +147,7 @@ async def tool_get_route_info(
 ) -> str:
     """Get driving route info between two points using Google Maps Directions API.
 
+    Fails when Fleet Agent is disconnected — Temporal retries until reconnected.
     Returns distance, duration, and step-by-step directions.
     Use this to assess reroute feasibility and ETAs for AI-Driver dispatching.
     Failures propagate to Temporal's retry mechanism.
@@ -162,6 +159,9 @@ async def tool_get_route_info(
         destination_lng: Destination longitude
         destination_name: Human-readable name of the destination (e.g. "MGM Grand")
     """
+    if await fleet.is_agent_disconnected("fleet_agent"):
+        raise RuntimeError("Fleet Agent is disconnected — tool unavailable")
+
     import re
 
     origin = f"{origin_lat},{origin_lng}"
@@ -249,16 +249,14 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
     """
     Simulate AI-Driver navigation by interpolating position over N steps.
 
-    Heartbeats on each step. Disconnect handling is two-layer:
-    - inp.is_driver_disconnected: pre-flight check (set by workflow)
-    - Cancellation scope: mid-flight disconnect delivers CancelledError
-      on the next heartbeat() call (driven by workflow signal handler)
+    The driver always completes navigation (truck keeps moving on the road).
+    Disconnect is checked at start (fail-fast on retry while still disconnected)
+    and at end (simulates "arrived but can't report back"). Temporal retries
+    until reconnected.
     """
-    # Pre-flight disconnect check — workflow passes current state as input
-    if inp.is_driver_disconnected:
-        raise RuntimeError(
-            f"AI-Driver {inp.driver_id} is disconnected — activity will retry on reconnect"
-        )
+    # Fail-fast on retry if still disconnected — don't re-drive the whole route
+    if await fleet.is_driver_disconnected(inp.driver_id):
+        raise RuntimeError(f"AI-Driver {inp.driver_id} still disconnected — waiting for reconnect")
 
     leg = inp.leg if isinstance(inp.leg, str) else str(inp.leg)
     status = (
@@ -267,22 +265,38 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
         else DriverStatus.EN_ROUTE_DELIVERY
     )
     await fleet.set_driver_status(inp.driver_id, status)
-    await fleet.update_order_status(
-        inp.order_id,
-        OrderStatus.IN_TRANSIT,
-        f"En route to {leg}",
-    )
+    # Skip order status update for return-to-base trips (no real order)
+    if inp.order_id and inp.order_id != "return":
+        await fleet.update_order_status(
+            inp.order_id,
+            OrderStatus.IN_TRANSIT,
+            f"En route to {leg}",
+        )
 
-    # Start position from workflow state (not FleetState)
-    start_lat = inp.start_lat if inp.start_lat is not None else inp.target_lat
-    start_lng = inp.start_lng if inp.start_lng is not None else inp.target_lng
+    # Read actual position from FleetState — handles retry after disconnect where
+    # the driver may have moved (completed navigation) but the workflow didn't get
+    # the result. On first attempt this matches the workflow's position. On retry
+    # after disconnect it picks up from where the truck actually is on the map.
+    start_lat, start_lng = await fleet.get_driver_position(inp.driver_id)
+
+    # If already at destination (e.g., retry after completing navigation but failing
+    # the end check), skip driving — just report arrival.
+    dist_to_target = math.sqrt(
+        (start_lat - inp.target_lat) ** 2 + (start_lng - inp.target_lng) ** 2
+    )
+    if dist_to_target < 0.001:
+        activity.logger.info(f"{inp.driver_id} already at {leg} destination — skipping navigation")
+        return NavigateOutput(
+            driver_id=inp.driver_id,
+            arrived=True,
+            final_lat=inp.target_lat,
+            final_lng=inp.target_lng,
+        )
 
     # Build the path to interpolate along
     if inp.waypoints and len(inp.waypoints) >= 2:
-        # Follow waypoint path from Google Maps polyline
         path = [(wp["lat"], wp["lng"]) for wp in inp.waypoints]
     else:
-        # Straight line fallback
         path = [(start_lat, start_lng), (inp.target_lat, inp.target_lng)]
 
     # Calculate cumulative distances along the path for proportional interpolation
@@ -292,21 +306,17 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
         segment_dists.append(d)
     total_dist = sum(segment_dists) or 1e-9
 
+    # Driver always completes the drive — truck doesn't stop mid-road
     for step in range(1, inp.steps + 1):
-        # Heartbeat — if workflow cancelled this activity's scope (disconnect signal),
-        # this call raises CancelledError, which propagates up to the workflow.
         activity.heartbeat(f"step {step}/{inp.steps}")
 
-        # Find position along the polyline path at this fraction
         fraction = step / inp.steps
         target_dist = fraction * total_dist
 
-        # Walk along segments to find the interpolation point
         accumulated = 0.0
-        new_lat, new_lng = path[-1]  # default to end
+        new_lat, new_lng = path[-1]
         for i, seg_d in enumerate(segment_dists):
             if accumulated + seg_d >= target_dist:
-                # Interpolate within this segment
                 remaining = target_dist - accumulated
                 seg_frac = remaining / seg_d if seg_d > 0 else 1.0
                 new_lat = path[i][0] + (path[i + 1][0] - path[i][0]) * seg_frac
@@ -314,11 +324,19 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
                 break
             accumulated += seg_d
 
-        # UI projection write — position update for frontend WebSocket
         await fleet.update_driver_position(inp.driver_id, new_lat, new_lng)
-
-        # Simulate drive time per step
         await asyncio.sleep(0.4)
+
+    # Driver arrived — but if disconnected, can't report back.
+    # This simulates "delivery complete but comms lost."
+    # Temporal sees the failure and retries until reconnected.
+    if await fleet.is_driver_disconnected(inp.driver_id):
+        activity.logger.warning(
+            f"{inp.driver_id} arrived at {leg} but is disconnected — cannot report"
+        )
+        raise RuntimeError(
+            f"AI-Driver {inp.driver_id} arrived but is disconnected — cannot check in"
+        )
 
     activity.logger.info(
         f"{inp.driver_id} arrived at {leg} ({inp.target_lat:.4f}, {inp.target_lng:.4f})"
@@ -333,14 +351,20 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
 
 @activity.defn
 async def pickup_orders(inp: PickupInput) -> PickupOutput:
-    """Simulate picking up ice cream orders at the kitchen."""
-    if inp.is_driver_disconnected:
-        raise RuntimeError(f"AI-Driver {inp.driver_id} is disconnected")
+    """Simulate picking up ice cream orders at the kitchen.
+
+    Driver physically picks up, then checks connection to report.
+    If disconnected, Temporal retries until reconnected.
+    """
     await fleet.set_driver_status(inp.driver_id, DriverStatus.PICKING_UP)
     for oid in inp.order_ids:
         await fleet.update_order_status(oid, OrderStatus.PICKED_UP, "Picked up")
 
     await asyncio.sleep(1.5)
+
+    # Pickup done — but can't report if disconnected
+    if await fleet.is_driver_disconnected(inp.driver_id):
+        raise RuntimeError(f"AI-Driver {inp.driver_id} picked up but cannot report — disconnected")
 
     activity.logger.info(f"{inp.driver_id} picked up orders {inp.order_ids}")
     return PickupOutput(driver_id=inp.driver_id, success=True)
@@ -348,9 +372,11 @@ async def pickup_orders(inp: PickupInput) -> PickupOutput:
 
 @activity.defn
 async def deliver_order(inp: DeliverInput) -> DeliverOutput:
-    """Simulate delivering an ice cream order at a hotel."""
-    if inp.is_driver_disconnected:
-        raise RuntimeError(f"AI-Driver {inp.driver_id} is disconnected")
+    """Simulate delivering an ice cream order at a hotel.
+
+    Driver physically delivers, then checks connection to report.
+    If disconnected, Temporal retries until reconnected.
+    """
     await fleet.set_driver_status(inp.driver_id, DriverStatus.DELIVERING)
     await fleet.update_order_status(inp.order_id, OrderStatus.IN_TRANSIT, "Delivering")
 
@@ -360,6 +386,10 @@ async def deliver_order(inp: DeliverInput) -> DeliverOutput:
     remaining_count = await fleet.complete_order_delivery(inp.driver_id, inp.order_id)
     if remaining_count == 0:
         await fleet.set_driver_status(inp.driver_id, DriverStatus.IDLE)
+
+    # Delivery done — but can't report if disconnected
+    if await fleet.is_driver_disconnected(inp.driver_id):
+        raise RuntimeError(f"AI-Driver {inp.driver_id} delivered but cannot report — disconnected")
 
     activity.logger.info(f"{inp.driver_id} delivered {inp.order_id}")
     return DeliverOutput(driver_id=inp.driver_id, order_id=inp.order_id, success=True)

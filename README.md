@@ -12,8 +12,8 @@ Orders auto-generate on a timer from Las Vegas Strip venues. AI agents reason ab
 
 | Scenario | What Happens | What It Shows |
 |----------|-------------|---------------|
-| **Agent Disconnect** | Take an agent offline mid-reasoning | ADK degrades gracefully — Resolver compensates with available data. Temporal records every step that completed. Two resilience layers. |
-| **Driver Disconnect** | Take a single AI-Driver offline mid-delivery | Workflow cancels the running activity via cancellation scope, waits for reconnect signal, resumes. Everything flows through Temporal — API just sends signals. |
+| **Agent Disconnect** | Take Fleet Agent offline | Fleet Agent's tools fail fast (2 retries), error returned to LLM — Resolver assigns with Customer Agent data only. Reconnect → tools succeed → full assessment resumes. Temporal shows retry attempts in the UI. |
+| **Driver Disconnect** | Take a single AI-Driver offline mid-delivery | Driver completes current delivery but can't report back. Temporal retries with backoff until reconnected. Driver stays at hotel on the map — no teleporting. Reconnect → next retry succeeds → driver navigates home for next order. |
 | **Customer Change** | Submit an address change or cancellation | Human-in-the-loop: workflow pauses on `wait_condition`, resumes immediately on signal — no polling, no timeout |
 
 ## Architecture
@@ -41,8 +41,8 @@ Orders auto-generate on a timer from Las Vegas Strip venues. AI agents reason ab
 │  │    └─ DriverRouteWorkflow x3      │ │  customer change, start      │
 │  │        child workflows            │ │                              │
 │  └─ DriverRouteWorkflow              │ │  No workers, no FleetState   │
-│       ├─ owns disconnect state +     │ └──────────────────────────────┘
-│       │   cancellation scopes        │
+│       ├─ owns disconnect state       │ └──────────────────────────────┘
+│       │   (Temporal retry pattern)   │
 │       ├─ tracks status, path_history,│
 │       │   is_disconnected,           │
 │       │   is_recovering,             │
@@ -93,11 +93,13 @@ Fleet Agent, Customer Agent, and Resolver are LLM Agents. The outer `order_assig
 |-------|-----------|-------|
 | **Fleet Agent** (operational) | Driver positions, capacity (free slots), ETAs to destination, disconnect status — excludes unavailable drivers | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps) |
 | **Customer Agent** (priority) | VIP vs standard tier, deadline pressure, hotel events (conferences, galas), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
-| **Resolver** (synthesis) | Weighs Fleet + Customer assessments, compensates if either agent is offline, picks final driver | `tool_submit_assignment`, `tool_publish_agent_event` |
+| **Resolver** (synthesis) | Weighs Fleet + Customer assessments, compensates if either agent is offline, picks final driver | `tool_submit_assignment` |
 
 Fleet and Customer run **in parallel** (`ParallelAgent`), then the Resolver runs **sequentially** after both complete (`SequentialAgent`). All tools are wrapped with `activity_tool()` — each call is a Temporal activity, recorded in the event log. If the worker restarts mid-call, results replay from the log.
 
-> **Note:** Gemini's built-in `google_search` grounding normally can't be combined with custom function tools in the same request. ADK's `GoogleSearchTool(bypass_multi_tools_limit=True)` enables this — the Customer Agent uses Google Search alongside `tool_get_order_priorities` and `tool_publish_agent_event` in a single agent, no sub-agent needed.
+> **Note:** Gemini's built-in `google_search` grounding normally can't be combined with custom function tools in the same request. ADK's `GoogleSearchTool(bypass_multi_tools_limit=True)` enables this — the Customer Agent uses Google Search alongside `tool_get_order_priorities` in a single agent, no sub-agent needed.
+
+> **Agent disconnect resilience:** When Fleet Agent is disconnected, its tool activities (`tool_get_fleet_status`, `tool_get_route_info`) check FleetState and raise `RuntimeError`. Temporal retries (2 attempts, fast backoff via `_FLEET_TOOL_RETRY`). The `_activity_tool.py` wrapper catches the exhausted retry and returns an error string to the LLM — the agent reasons about the failure, and the Resolver assigns based on Customer Agent data alone. No pipeline crash.
 
 ### Mock mode
 
@@ -138,8 +140,8 @@ echo 'export GOOGLE_MAPS_API_KEY="your-maps-key"' >> .env  # optional, must be M
 ## Demo Flow
 
 1. **Start Deliveries** — Orders auto-generate every 15s. AI agents reason per-order (Fleet Agent checks positions/capacity, Customer Agent evaluates priority) and assign to the best driver. Drivers continuously pick up from Frosty's Ice Cream and deliver.
-2. **Driver Disconnect** — Select an AI-Driver → disconnect signal → workflow cancels activity → reconnect signal → seamless resume. Everything flows through Temporal.
-3. **Agent Disconnect** — Take an agent offline → Resolver compensates with available data → reconnect → full reasoning resumes
+2. **Driver Disconnect** — Select a driver → disconnect → driver finishes delivery, stays at hotel, can't report → Temporal retries → reconnect → next retry succeeds → driver navigates home
+3. **Agent Disconnect** — Take Fleet Agent offline → tools fail fast → Resolver assigns with Customer Agent data → reconnect → full reasoning resumes
 4. **Customer Change** — Submit a change → workflow pauses waiting for approval → approve/reject → order updated or discarded
 
 ## Key Files
@@ -149,7 +151,7 @@ echo 'export GOOGLE_MAPS_API_KEY="your-maps-key"' >> .env  # optional, must be M
 | `agent_fleet/models.py` | Dataclass models for all Temporal payloads (incl. `DriverSnapshot`) |
 | `agent_fleet/simulation.py` | FleetState — SQLite WAL-backed write-only UI projection (`fleet_state.db`, cross-process; used by mock activities only) |
 | `agent_fleet/activities.py` | Temporal activities — navigation, delivery, Maps API, agent tools |
-| `agent_fleet/workflows.py` | Temporal workflows — owns driver state, cancellation scopes, signals, queries. Includes `OrderGenerationWorkflow` |
+| `agent_fleet/workflows.py` | Temporal workflows — owns driver state, signals, queries, Temporal-native retry for disconnect. Includes `OrderGenerationWorkflow` |
 | `agent_fleet/agents.py` | ADK agent composition — Fleet, Customer, Assignment Resolver |
 | `agent_fleet/config.py` | Centralized env config — `GOOGLE_API_KEY`, `GOOGLE_MAPS_API_KEY`, `DEFAULT_MODEL`, `TEMPORAL_ADDRESS` |
 | `agent_fleet/queues.py` | Task queue name constants (workflows / delivery / agents) |

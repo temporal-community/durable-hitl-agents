@@ -50,7 +50,7 @@ Use this framing at the start of the talk before any demo:
 |-------|-------------------|----------------|
 | **Fleet Agent** | Driver positions, free capacity slots, driving ETAs to destination, driver disconnect status | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps Directions) |
 | **Customer Agent** | VIP vs standard priority, deadline tightness, hotel events (conferences, galas, pool parties), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
-| **Resolver** | Synthesizes both assessments, compensates if either agent is offline, picks final driver and submits structured assignment | `tool_submit_assignment`, `tool_publish_agent_event` |
+| **Resolver** | Synthesizes both assessments, compensates if either agent is offline, picks final driver and submits structured assignment | `tool_submit_assignment` |
 
 ---
 
@@ -101,9 +101,9 @@ If you break determinism, Temporal raises a non-determinism error on replay. Thi
 
 **`MeltdownDemoWorkflow`** is the brain. It owns the fleet state — driver positions, order assignments, disconnect/reconnect status. It runs assignment agents (ADK inline via `_run_adk_assignment()` in live mode), builds `DriverSnapshot`s from its own state and passes them to activities as inputs, and handles customer changes. It never does delivery work directly — it delegates to child workflows.
 
-**`DriverRouteWorkflow`** is the legs. One instance per driver, it executes the physical route: navigate to kitchen → pick up → navigate to hotel → deliver → signal parent → loop. It owns its own disconnect state (status, is_disconnected, is_recovering, path_history, current_orders) and uses **cancellation scopes** for mid-flight disconnect handling. When the driver disconnects, the workflow cancels the running activity, waits for a reconnect signal, then resumes. The server queries `DriverRouteWorkflow.get_status` for WebSocket state — disconnect state comes from here, not from a separate sync activity.
+**`DriverRouteWorkflow`** is the legs. One instance per driver, it executes the physical route: navigate to kitchen → pick up → navigate to hotel → deliver → signal parent → return to base → loop. It owns its own disconnect state (status, is_disconnected, is_recovering, path_history, current_orders). Disconnect uses **Temporal-native retry**: activities check FleetState for disconnect status and fail if disconnected. Temporal retries with backoff (`NAV_RETRY`, unlimited attempts). The driver finishes its current delivery, stays at the hotel (can't report back), and resumes when reconnected. No workflow-side cancellation needed.
 
-**`OrderGenerationWorkflow`** is a child workflow that generates orders on a timer and signals the parent with each new order. The parent handles assignment. This separates the order generation timer from the assignment logic.
+**`OrderGenerationWorkflow`** is a child workflow that generates orders on a randomized timer (±30% jitter around 15s base) and signals the parent with each new order. The parent handles assignment.
 
 The workflows connect through signals in both directions:
 - **Parent → child:** `add_order` (new delivery), `driver_disconnected` / `driver_reconnected`, `update_order` (address change), `cancel_order` (cancellation)
@@ -122,7 +122,7 @@ OrderGenerationWorkflow fires on timer
 The key design principles:
 - **Child workflows give you fault isolation.** Each driver runs independently. If AI-Driver 1 hits an error, 2 and 3 keep running.
 - **Workflows own state, activities are pure.** Activities receive everything they need as inputs — they never read shared state for decision-making. The server queries workflows directly for the frontend.
-- **Disconnect flows through Temporal.** API endpoints send signals only. The workflow handles cancellation and waiting. Disconnect state is exposed via `DriverRouteWorkflow.get_status` query — no separate sync activity needed.
+- **Disconnect uses Temporal retry.** Activities check FleetState for disconnect (simulates network unreachability), fail, and Temporal retries with backoff. The driver finishes its delivery but can't report back. No workflow-side cancellation or polling — just the standard Temporal retry mechanism.
 
 ### Where the ADK agents fit
 
@@ -158,7 +158,7 @@ Fleet Agent and Customer Agent run in parallel (ADK handles that). Then the Reso
 A common question from engineers: "where are the Temporal activities defined for each agent's LLM call and tool call?" The answer is they aren't — they're injected automatically by two wrappers:
 
 - **`TemporalModel(DEFAULT_MODEL, activity_config=...)`** — when you set this as an agent's model, every LLM call that agent makes is automatically executed as a Temporal `invoke_model` activity routed to the agents queue. You don't write the activity. The wrapper does it. ADK supports other models too — swap `DEFAULT_MODEL` for any supported provider.
-- **`activity_tool(tool_get_fleet_status, ...)`** — when you wrap a tool function this way, every time an agent calls that tool it executes as a Temporal activity. Again, no explicit activity definition needed.
+- **`activity_tool(tool_get_fleet_status, ...)`** — when you wrap a tool function this way, every time an agent calls that tool it executes as a Temporal activity. Again, no explicit activity definition needed. Our local [`_activity_tool.py`](agent_fleet/_activity_tool.py) adds two fixes over the upstream version: correct multi-arg handling, and **graceful failure** — when an activity exhausts its retry policy, the error is returned as a string to the LLM instead of crashing the pipeline. This is how Fleet Agent disconnect works: tools fail fast (2 retries), the LLM sees the error, and the Resolver assigns without fleet data.
 
 So when Fleet Agent calls Gemini and then calls `tool_get_fleet_status`, both of those are Temporal activities — durable, retryable, and recorded in the event log — purely by inheritance from the wrappers. This is the `temporalio[google-adk]` integration doing its job.
 
@@ -172,7 +172,7 @@ fleet_agent = Agent(
         DEFAULT_MODEL,
         activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),  # route to agents worker
     ),
-    tools=[_fleet_status_tool, _route_info_tool, _publish_event_tool],
+    tools=[_fleet_status_tool, _route_info_tool],
     ...
 )
 
@@ -203,7 +203,7 @@ The demo runs three Temporal workers in a **separate worker process** (`python -
 |---|---|---|
 | `meltdown-workflows` | Workflows only | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow` — no activities, dedicated to replay |
 | `meltdown-delivery` | Delivery | `navigate_to`, `pickup_orders`, `deliver_order`, `generate_order`, `execute_customer_change`, `get_route_polyline`, `get_fleet_status`, `get_order_priorities`, `publish_agent_event` |
-| `meltdown-agents` | Agents | `register_assignment`, all `tool_*` activities (`tool_get_fleet_status`, `tool_get_order_priorities`, `tool_publish_agent_event`, `tool_get_route_info`) + `google_search` (Gemini grounding) |
+| `meltdown-agents` | Agents | `register_assignment`, `tool_get_fleet_status`, `tool_get_order_priorities`, `tool_get_route_info` + `google_search` (Gemini grounding) |
 
 **Why a workflows-only worker?** Workflows must be deterministic and replayable. Keeping them on a dedicated worker with no activities makes it physically impossible for workflow code to touch `FleetState` (SQLite WAL-backed, `fleet_state.db`) or do I/O. This is the Temporal-idiomatic pattern for production deployments.
 
@@ -225,8 +225,7 @@ def create_agents_worker(client: Client) -> Worker:
     """ADK/LLM activities — rate-limited."""
     return Worker(client, task_queue=AGENTS_QUEUE,
                   activities=[register_assignment, tool_get_fleet_status,
-                              tool_get_order_priorities, tool_publish_agent_event,
-                              tool_get_route_info],
+                              tool_get_order_priorities, tool_get_route_info],
                   max_concurrent_activities=5,
                   plugins=[GoogleAdkPlugin()])  # invoke_model activity registration
 ```
@@ -305,8 +304,9 @@ This traces a single order from button click to delivery — every function and 
   - `deliver_order` activity → marks delivered
 - [`activities.py`](agent_fleet/activities.py) — all activities on `DELIVERY_QUEUE`
 
-**11. Driver signals parent, loops**
-- [`workflows.py`](agent_fleet/workflows.py) → signals parent with `order_delivered` → parent updates `_driver_orders` and `_driver_last_position` → driver returns to idle, waits for next order
+**11. Driver signals parent, returns to base**
+- [`workflows.py`](agent_fleet/workflows.py) → signals parent with `order_delivered` → parent updates `_driver_orders` and `_driver_last_position`
+- After all pending orders delivered, driver navigates back to Frosty's (visible on map) → idle, waits for next order
 
 **Key difference in live vs mock:** In live mode, ADK runs inline in the workflow — every LLM call and tool call is a separate Temporal activity visible in the event log. In mock mode, the entire reasoning is a single `reason_about_assignment` activity.
 
@@ -336,54 +336,56 @@ This traces a single order from button click to delivery — every function and 
 ---
 
 ### Demo 2: Driver Disconnect & Auto-Recovery
-**Time: 2–3 min | Best for: showing workflow-driven cancellation and signals**
+**Time: 2–3 min | Best for: showing Temporal activity retry and durable state**
 
-**Setup:** Start deliveries. Wait until at least one driver is en route.
+**Setup:** Start deliveries. Wait until at least one driver is en route to a hotel.
 
 **Steps:**
 1. In the Failure Modes panel, select a driver and click **Service Lost**
-2. That driver's status changes to `DISCONNECTED`, its truck stops moving
-3. The other two drivers keep delivering normally
-4. Wait 10–15 seconds, then click **Reconnect Driver**
-5. The driver's status shows a brief "recovering" state, then resumes
+2. The driver **finishes its current delivery** (truck keeps moving — it's already on the road)
+3. After arriving at the hotel, the driver can't report back — status shows `DISCONNECTED`
+4. The driver stays at the hotel on the map. The other two drivers keep delivering normally.
+5. Wait 10–15 seconds, then click **Reconnect Driver**
+6. The next Temporal retry succeeds — driver reports delivery, then navigates back to Frosty's for the next order
 
 **What to say:**
-> "When we disconnect the driver, the API sends a signal — nothing else. The driver's child workflow receives the signal, cancels the running navigation activity via a cancellation scope, and waits. No polling, no shared state flags. When we reconnect, another signal arrives, the workflow resumes, and the activity restarts. Everything flows through Temporal — the API is just a signal relay."
+> "The driver finished the delivery — the truck doesn't stop mid-road. But it can't report back because the connection is lost. Watch the Temporal UI — you'll see retry attempts with backoff. Each one fails because the driver is still disconnected. When we reconnect, the next retry succeeds, the workflow gets the delivery result, and the driver heads back for the next order. Temporal held the state the entire time."
 
 **What you'll see in Temporal UI** (`route-ai-driver-X` workflow → History tab):
 - Open the child workflow for the disconnected driver (search `route-ai-driver-1`, `route-ai-driver-2`, or `route-ai-driver-3`)
-- A `WorkflowExecutionSignaled` event with signal name `driver_disconnected` — the workflow received the signal
-- The `navigate_to` activity shows `ActivityTaskCancelled` — the workflow's cancellation scope cancelled it
-- The event history **pauses** — the workflow is waiting on `wait_condition` for reconnect. The server sees the disconnect state via `DriverRouteWorkflow.get_status` query (is_disconnected, is_recovering)
-- On reconnect: another `WorkflowExecutionSignaled` (`driver_reconnected`), then `navigate_to` restarts cleanly
+- The `navigate_to` activity may complete (driver arrived) but `deliver_order` shows repeated `ActivityTaskFailed` → `ActivityTaskScheduled` cycles — that's Temporal retrying with exponential backoff
+- Each failed attempt shows the error: "delivered but cannot report — disconnected"
+- On reconnect: `ActivityTaskCompleted` — the retry succeeded, the workflow continues
 - Open the other two driver workflows side by side — clean stream of completed activities, completely unaffected. That's child workflow isolation.
 
-**Temporal concept to highlight:** Cancellation scopes, signals, workflow-driven state management, child workflow isolation
+**Temporal concept to highlight:** Activity retry policies with backoff, child workflow isolation, durable state across failures
 
 ---
 
-### Demo 3: Agent Disconnect — ADK + Temporal Working Together
-**Time: 2–3 min | Best for: showing why the integration matters**
+### Demo 3: Agent Disconnect — Tool Retry + LLM Adaptation
+**Time: 2–3 min | Best for: showing Temporal retry at the tool-call level**
 
 **Setup:** Start deliveries. Let a few orders get assigned.
 
 **Steps:**
 1. Click **Disconnect Agent** (Fleet Agent)
-2. Watch the Agent Reasoning panel — Fleet Agent shows "OFFLINE"
-3. New orders still get assigned — the Resolver notes "Fleet Agent OFFLINE — assignment based on last known positions"
-4. Customer Agent continues evaluating priority normally
-5. Click **Reconnect Agent** — Fleet Agent comes back online, next order shows full fleet assessment again
+2. Next order triggers the ADK pipeline — Fleet Agent's tools (`tool_get_fleet_status`, `tool_get_route_info`) fail fast (2 retry attempts)
+3. The error is returned to the LLM as a tool response — Fleet Agent reasons about the failure
+4. Resolver sees Fleet Agent's degraded output + Customer Agent's successful assessment → assigns based on available data
+5. Orders keep getting assigned — the Resolver adapts each time
+6. Click **Reconnect Agent** — next order's Fleet Agent tools succeed → full assessment resumes
 
 **What to say:**
-> "This is where ADK and Temporal each pull their weight. ADK handles the agent layer — when Fleet Agent goes offline, the Resolver adapts. It doesn't crash, it degrades gracefully, using the last known fleet data. Temporal handles the infrastructure layer — every reasoning step that did complete is recorded. Two different resilience mechanisms, working at two different layers."
+> "Fleet Agent's tools are backed by Temporal activities. When the agent is disconnected, those activities fail — Temporal retries twice, then the error is returned to the LLM. The agent doesn't crash, it reasons about the failure. The Resolver sees the error and assigns based on Customer Agent data alone. When we reconnect, the next order's tools work normally. Two layers working together: Temporal retries the tool call, the LLM adapts to the failure."
 
 **What you'll see in Temporal UI** (`meltdown-demo` workflow → History tab):
-- Each order assignment shows a cluster of activities: `invoke_model` (the Gemini call), `tool_get_fleet_status`, `tool_publish_agent_event`, etc. — these are the ADK agents' LLM and tool calls, recorded individually as durable Temporal activities
-- When Fleet Agent is offline, the assignment still completes cleanly — no retry, no error. ADK handled the degradation in the application layer; Temporal just recorded the results of each individual activity
-- On reconnect, the next assignment shows more `invoke_model` calls — Fleet Agent is reasoning again
-- Point to this and say: *"If this worker crashed right now mid-reasoning, Temporal would replay these results from the log. The agent would resume without re-calling Gemini."*
+- `tool_get_fleet_status` shows `ActivityTaskFailed` → retry → `ActivityTaskFailed` (2 attempts exhausted)
+- The pipeline continues — `invoke_model` for the Resolver runs with the error context
+- `tool_submit_assignment` succeeds — assignment completed despite Fleet Agent failure
+- On reconnect: next order's `tool_get_fleet_status` shows `ActivityTaskCompleted` — tools work again
+- Point to this and say: *"Temporal tried the tool twice, it failed, but the agent adapted. If this worker crashed right now, Temporal would replay these results from the log — including the failures."*
 
-**Concepts to highlight:** ADK graceful degradation (agent layer) vs. Temporal durable execution (infrastructure layer)
+**Concepts to highlight:** Per-tool-call retry (Temporal), LLM reasoning about tool failure (ADK), graceful degradation without pipeline crash
 
 ---
 

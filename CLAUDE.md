@@ -19,10 +19,12 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
   (`worker.py`) with live/mock mode selection at startup (`GOOGLE_API_KEY` set → live, not set → mock).
 - **Workflows own state** (`workflows.py`): `MeltdownDemoWorkflow` owns driver positions, order
   assignments, and disconnect status. Builds `DriverSnapshot`s and passes to activities as inputs.
-  `DriverRouteWorkflow` is a per-driver child workflow with cancellation scopes for disconnect
-  handling — tracks status, is_disconnected, is_recovering, path_history, and current_orders.
-  `OrderGenerationWorkflow` is a child workflow that generates orders on a timer and signals the
-  parent. Parent handles assignment.
+  `DriverRouteWorkflow` is a per-driver child workflow — tracks status, is_disconnected,
+  is_recovering, path_history, and current_orders. Disconnect uses Temporal-native retry: activities
+  check FleetState for disconnect, fail if disconnected, Temporal retries with backoff until
+  reconnected. Driver completes delivery, stays at hotel, can't report back until reconnected.
+  `OrderGenerationWorkflow` is a child workflow that generates orders on a randomized timer and
+  signals the parent. Parent handles assignment.
 - **Server reads FleetState** (`server.py`): WebSocket data comes from `fleet.snapshot()` (SQLite).
   Server also writes disconnect/reconnect state directly. Temporal queries used for structural
   state during development — FleetState is the display authority.
@@ -37,9 +39,10 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
   `ActivityConfig(task_queue=AGENTS_QUEUE)` to route LLM calls to the agents worker.
 - **ADK agents** (`agents.py`): Fleet Agent + Customer Agent (parallel) → Resolver (sequential).
   Live path runs ADK inline in the workflow via `_run_adk_assignment()`. No fallback to mock —
-  if an activity fails, Temporal retries with unlimited attempts and exponential backoff.
-  Agent summaries appear in the Temporal UI — each `invoke_model` and tool call shows which
-  agent is acting (Fleet Agent, Customer Agent, Resolver).
+  if an activity fails, Temporal retries. Fleet Agent tools fail fast when disconnected (2 attempts),
+  error returned to LLM via `_activity_tool.py` catch — Resolver assigns with available data.
+  Agents don't call `tool_publish_agent_event` — workflow publishes short summary events to
+  FleetState after ADK completes (summary from `output_key` fields).
 - **Mock mode** (`agent_fleet/mock/`): completely separate folder with its own `activities.py` and
   `worker.py`. Live code has zero mock awareness. Decision at startup: `GOOGLE_API_KEY` set → live
   workers, not set → mock workers. Mock activities use `name=` overrides to match live activity names.

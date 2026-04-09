@@ -30,7 +30,6 @@ from agent_fleet.activities import (
     tool_get_fleet_status,
     tool_get_order_priorities,
     tool_get_route_info,
-    tool_publish_agent_event,
 )
 from agent_fleet.config import DEFAULT_MODEL
 from agent_fleet.queues import AGENTS_QUEUE
@@ -42,6 +41,16 @@ _TOOL_RETRY = RetryPolicy(
     maximum_attempts=5,
 )
 
+# Fleet Agent tools fail fast when disconnected — 2 attempts so the Resolver
+# gets an error quickly and can assign based on Customer Agent data alone.
+# Temporal UI still shows the retry attempt.
+_FLEET_TOOL_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=1.5,
+    maximum_interval=timedelta(seconds=5),
+    maximum_attempts=2,
+)
+
 
 # --- Activity-backed tools (each tool call becomes a Temporal activity) ---
 
@@ -50,7 +59,7 @@ _fleet_status_tool = activity_tool(
     task_queue=AGENTS_QUEUE,
     summary="Fleet Agent — get fleet status",
     start_to_close_timeout=timedelta(seconds=10),
-    retry_policy=_TOOL_RETRY,
+    retry_policy=_FLEET_TOOL_RETRY,
 )
 _order_priorities_tool = activity_tool(
     tool_get_order_priorities,
@@ -59,19 +68,12 @@ _order_priorities_tool = activity_tool(
     start_to_close_timeout=timedelta(seconds=10),
     retry_policy=_TOOL_RETRY,
 )
-_publish_event_tool = activity_tool(
-    tool_publish_agent_event,
-    task_queue=AGENTS_QUEUE,
-    summary="Agent — publish event",
-    start_to_close_timeout=timedelta(seconds=10),
-    retry_policy=_TOOL_RETRY,
-)
 _route_info_tool = activity_tool(
     tool_get_route_info,
     task_queue=AGENTS_QUEUE,
     summary="Fleet Agent — get route info",
     start_to_close_timeout=timedelta(seconds=15),
-    retry_policy=_TOOL_RETRY,
+    retry_policy=_FLEET_TOOL_RETRY,
 )
 
 
@@ -116,20 +118,18 @@ def create_assignment_fleet_agent() -> Agent:
         ),
         instruction=(
             "You are the Fleet Operations AI for Meltdown Ice Cream Delivery. "
-            "A new order has arrived and you need to assess which AI-Driver is best "
-            "positioned to handle it.\n\n"
-            "Call tool_get_fleet_status to check current fleet state, then "
-            "tool_get_route_info to compare ETAs from available drivers to the "
-            "delivery destination.\n\n"
+            "A new order has arrived — assess which AI-Driver should handle it.\n\n"
+            "Call tool_get_fleet_status for fleet state, then tool_get_route_info "
+            "to compare ETAs to the delivery destination.\n\n"
             "Rules:\n"
             "- NEVER recommend a DISCONNECTED driver\n"
             "- Skip drivers at capacity (no free slots)\n"
             "- Prefer the closest driver with capacity\n\n"
-            "Call tool_publish_agent_event with agent_name='fleet_agent' and "
-            "event_type='assessment' to share your fleet scan results.\n\n"
-            "Be concise and decisive — state which driver you recommend and why."
+            "Respond with ONLY: the recommended driver ID and ETA. "
+            "Example: 'ai-driver-2 — 4min ETA, closest with capacity.' "
+            "No preamble, no comparisons of other drivers."
         ),
-        tools=[_fleet_status_tool, _route_info_tool, _publish_event_tool],
+        tools=[_fleet_status_tool, _route_info_tool],
         output_key="fleet_assessment",
     )
 
@@ -154,22 +154,18 @@ def create_assignment_customer_agent() -> Agent:
         ),
         instruction=(
             "You are the Customer Relations AI for Meltdown Ice Cream Delivery. "
-            "A new order has arrived and you need to assess its priority and urgency.\n\n"
-            "Call tool_get_order_priorities to check order details. "
+            "A new order has arrived — assess its priority and urgency.\n\n"
+            "Call tool_get_order_priorities for order details. "
             "Use Google Search to find current events at the delivery hotel.\n\n"
-            "Assess:\n"
-            "- Is this a VIP or standard order?\n"
-            "- How tight is the deadline?\n"
-            "- Are there events at the hotel that increase urgency?\n"
-            "- How many servings/guests are affected?\n\n"
-            "Call tool_publish_agent_event with agent_name='customer_agent' and "
-            "event_type='assessment' to share your priority assessment.\n\n"
-            "Be concise — state the priority level and any urgency factors."
+            "Assess: VIP or standard? Deadline tight? Hotel events increasing urgency? "
+            "How many servings?\n\n"
+            "Respond with ONLY: priority level and key urgency factor. "
+            "Example: 'VIP, tight deadline (25min), Caesars gala tonight.' "
+            "No preamble, no full analysis."
         ),
         tools=[
             _order_priorities_tool,
             GoogleSearchTool(bypass_multi_tools_limit=True),
-            _publish_event_tool,
         ],
         output_key="customer_assessment",
     )
@@ -195,21 +191,16 @@ def create_assignment_resolver() -> Agent:
         ),
         instruction=(
             "You are the Assignment Coordinator for Meltdown Ice Cream Delivery. "
-            "You have received assessments from the Fleet Agent (operational) and "
-            "Customer Agent (customer priority) about a new order.\n\n"
-            "Synthesize both perspectives:\n"
-            "- Fleet Agent recommends which driver is best positioned\n"
-            "- Customer Agent flags urgency and priority level\n"
-            "- If an agent is offline, compensate with available data\n"
-            "- NEVER assign to a DISCONNECTED driver\n\n"
+            "Fleet Agent and Customer Agent have assessed a new order.\n\n"
+            "Rules:\n"
+            "- NEVER assign to a DISCONNECTED driver\n"
+            "- If an agent is offline, compensate with available data\n\n"
             "You MUST call tool_submit_assignment with:\n"
             "- driver_id: the AI-Driver that should get this order\n"
-            "- reasoning_summary: brief explanation of the decision\n\n"
-            "Also call tool_publish_agent_event with agent_name='resolver' and "
-            "event_type='plan' to announce the assignment.\n\n"
-            "Be decisive. Pick the driver and explain why in one sentence."
+            "- reasoning_summary: one sentence explaining the decision\n\n"
+            "Keep reasoning_summary under 20 words."
         ),
-        tools=[_publish_event_tool, tool_submit_assignment],
+        tools=[tool_submit_assignment],
     )
 
 

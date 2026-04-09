@@ -27,7 +27,6 @@ from agent_fleet.activities import (
     register_assignment,
     tool_get_fleet_status,
     tool_get_order_priorities,
-    tool_publish_agent_event,
 )
 from agent_fleet.mock.activities import (
     mock_get_route_polyline,
@@ -91,7 +90,6 @@ def create_agents_worker(client: Client) -> Worker:
             register_assignment,
             tool_get_fleet_status,
             tool_get_order_priorities,
-            tool_publish_agent_event,
             mock_tool_get_route_info,
             mock_reason_about_assignment,
         ],
