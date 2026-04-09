@@ -14,7 +14,7 @@ Orders auto-generate on a timer from Las Vegas Strip venues. AI agents reason ab
 |----------|-------------|---------------|
 | **Agent Disconnect** | Take Fleet Agent offline | Fleet Agent's tools fail fast (2 retries), error returned to LLM — Resolver assigns with Customer Agent data only. Reconnect → tools succeed → full assessment resumes. Temporal shows retry attempts in the UI. |
 | **Driver Disconnect** | Take a single AI-Driver offline mid-delivery | Driver completes current delivery but can't report back. Temporal retries with backoff until reconnected. Driver stays at hotel on the map — no teleporting. Reconnect → next retry succeeds → driver navigates home for next order. |
-| **Customer Change** | Submit an address change or cancellation | Human-in-the-loop: workflow pauses on `wait_condition`, resumes immediately on signal — no polling, no timeout |
+| **Customer Change** | Submit an address change or cancellation mid-delivery | Human-in-the-loop: workflow pauses on `wait_condition`, approves, signals driver — driver reroutes mid-delivery to new destination. Cross-workflow coordination via signals. |
 
 ## Architecture
 
@@ -142,7 +142,7 @@ echo 'export GOOGLE_MAPS_API_KEY="your-maps-key"' >> .env  # optional, must be M
 1. **Start Deliveries** — Orders auto-generate every 15s. AI agents reason per-order (Fleet Agent checks positions/capacity, Customer Agent evaluates priority) and assign to the best driver. Drivers continuously pick up from Frosty's Ice Cream and deliver.
 2. **Driver Disconnect** — Select a driver → disconnect → driver finishes delivery, stays at hotel, can't report → Temporal retries → reconnect → next retry succeeds → driver navigates home
 3. **Agent Disconnect** — Take Fleet Agent offline → tools fail fast → Resolver assigns with Customer Agent data → reconnect → full reasoning resumes
-4. **Customer Change** — Submit a change → workflow pauses waiting for approval → approve/reject → order updated or discarded
+4. **Customer Change** — Pick an active order from dropdown → submit address change → workflow pauses for approval → approve → driver reroutes mid-delivery to new destination
 
 ## Key Files
 

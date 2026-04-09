@@ -966,9 +966,7 @@
   <div class="tab-panel" id="panel-customer">
     <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
     <select id="change-order" style="background:#1e2130;color:#e0e0e0;border:1px solid #2a2d3a;border-radius:6px;padding:7px 10px;font-size:16px;">
-      <option value="order-1">order-1 (MGM Grand)</option>
-      <option value="order-2" selected>order-2 (Caesars Palace)</option>
-      <option value="order-3">order-3 (Mandalay Bay)</option>
+      <option value="">— no active orders —</option>
     </select>
     <select id="change-type" style="background:#1e2130;color:#e0e0e0;border:1px solid #2a2d3a;border-radius:6px;padding:7px 10px;font-size:16px;">
       <option value="address_change">Address Change</option>
@@ -1246,6 +1244,7 @@ function connectWS() {
     const state = JSON.parse(e.data);
     updateCrews(state.drivers);
     updateOrders(state.orders);
+    updateChangeOrderDropdown(state.orders);
     updateAgentEvents(state.agent_events, state.agent_health);
     updateEventLog(state.event_log);
     updateCrewDisconnectBanner(state.drivers);
@@ -1321,6 +1320,25 @@ function updateOrders(orders) {
       </div>
     `;
   }).join('');
+}
+
+// --- Update customer change order dropdown ---
+function updateChangeOrderDropdown(orders) {
+  const select = document.getElementById('change-order');
+  const currentVal = select.value;
+  // Only include orders that are not yet delivered
+  const active = Object.values(orders).filter(o => o.status !== 'delivered' && o.status !== 'cancelled');
+  if (active.length === 0) {
+    select.innerHTML = '<option value="">— no active orders —</option>';
+    return;
+  }
+  select.innerHTML = active.map(o =>
+    `<option value="${o.order_id}">${o.order_id} — ${o.hotel} (${o.assigned_driver_id || 'unassigned'})</option>`
+  ).join('');
+  // Preserve selection if still valid
+  if (active.some(o => o.order_id === currentVal)) {
+    select.value = currentVal;
+  }
 }
 
 // --- Update agent events ---
@@ -1495,11 +1513,21 @@ async function submitCustomerChange() {
 
   let body = { order_id: orderId, change_type: changeType };
   if (changeType === 'address_change') {
-    // Demo: move delivery to Cosmopolitan
-    body.new_details = `${orderId} rerouted to The Cosmopolitan`;
-    body.new_lat = 36.1098;
-    body.new_lng = -115.1743;
-    _pendingChangeDetails = 'rerouted to The Cosmopolitan';
+    // Reroute to a different hotel than the current destination
+    const venues = [
+      { name: 'MGM Grand', lat: 36.1024, lng: -115.1725 },
+      { name: 'Caesars Palace', lat: 36.1162, lng: -115.1745 },
+      { name: 'Mandalay Bay', lat: 36.0919, lng: -115.1761 },
+    ];
+    // Pick a random venue that isn't the current order's hotel
+    const orderSelect = document.getElementById('change-order');
+    const orderText = orderSelect.options[orderSelect.selectedIndex]?.text || '';
+    const otherVenues = venues.filter(v => !orderText.includes(v.name));
+    const dest = otherVenues[Math.floor(Math.random() * otherVenues.length)] || venues[0];
+    body.new_details = `${orderId} rerouted to ${dest.name}`;
+    body.new_lat = dest.lat;
+    body.new_lng = dest.lng;
+    _pendingChangeDetails = `rerouted to ${dest.name}`;
   } else {
     body.new_details = `${orderId} cancelled by customer`;
     _pendingChangeDetails = 'order cancelled';

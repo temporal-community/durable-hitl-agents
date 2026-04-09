@@ -301,7 +301,8 @@ This traces a single order from button click to delivery — every function and 
   - `pickup_orders` activity → marks picked up
   - `get_route_polyline` activity → Google Maps polyline to hotel
   - `navigate_to` activity → drives to hotel
-  - `deliver_order` activity → marks delivered
+  - (if `_reroute_pending` flag set by `update_order` signal → re-navigates to new destination)
+  - `deliver_order` activity → marks delivered (skipped if `_cancel_pending`)
 - [`activities.py`](agent_fleet/activities.py) — all activities on `DELIVERY_QUEUE`
 
 **11. Driver signals parent, returns to base**
@@ -389,29 +390,29 @@ This traces a single order from button click to delivery — every function and 
 
 ---
 
-### Demo 4: Customer Change — Human-in-the-Loop
-**Time: 2 min | Best for: showing signals and workflow waiting**
+### Demo 4: Customer Change — Human-in-the-Loop with Mid-Delivery Reroute
+**Time: 2–3 min | Best for: showing signals, workflow waiting, and cross-workflow coordination**
 
-**Setup:** Start deliveries. Wait for a few orders to be assigned.
+**Setup:** Start deliveries. Wait for a driver to be en route to a hotel (actively delivering).
 
 **Steps:**
-1. In the Customer Changes panel, select an order and click **Submit Change Request**
-2. The Agent Reasoning panel shows a `customer_request` event — the workflow is now paused, waiting
-3. Open Temporal UI — show the workflow is "Running" but blocked on `wait_condition`
-4. Click **Approve** (or **Reject**) — the workflow immediately unblocks and executes (or discards) the change
+1. In the Customer Changes panel, the dropdown shows **active orders with their assigned driver** — pick one that's currently being delivered
+2. Select "Address Change" and click **Submit Change Request**
+3. The workflow is now paused, waiting for approval — show this in Temporal UI
+4. Click **Approve** — the parent signals the driver's child workflow with `update_order`
+5. Watch the map: the driver **finishes its current navigation leg**, then **reroutes to the new destination** — you'll see it recalculate and drive to a different hotel
+6. For cancellation: select "Cancel Order" → Approve → the driver skips delivery and returns to base
 
 **What to say:**
-> "The workflow is literally paused here — waiting for a human signal. There's no polling, no timeout hack, no database flag. Temporal persists the workflow state indefinitely. If I closed the server right now and restarted it, the workflow would still be waiting for this approval. That's what durable execution means."
+> "The workflow is paused here — waiting for a human signal. No polling, no timeout. When we approve, two things happen: the parent workflow executes the change, then signals the driver's child workflow. If the driver is mid-delivery, it finishes the current leg then reroutes — you can see it calculating a new path to the updated destination. If we cancel, the driver skips delivery entirely. All of this is cross-workflow coordination via signals — durable and recoverable."
 
-**What you'll see in Temporal UI** (`meltdown-demo` workflow → History tab):
-- Immediately after submitting the change: a `WorkflowExecutionSignaled` event appears with signal name `customer_change` — Temporal received the signal and recorded it
-- The event history then **stops growing** — no new activities are scheduled. The workflow is suspended, waiting
-- The workflow status shows "Running" even though nothing is executing — it's parked on `wait_condition`, alive and durable
-- When you approve: a second `WorkflowExecutionSignaled` event appears (`change_approved`), then immediately `execute_customer_change` and `publish_agent_event` activities complete
-- The parent also signals the child workflow — check `route-ai-driver-X` for an `update_order` signal (address change) or `cancel_order` signal (cancellation). The child workflow updates its pending delivery coordinates in real time.
-- Point to the gap in the event log: *"This silence is the workflow waiting. No polling. No timer. Temporal is just holding state until the signal arrives — which could be seconds or days."*
+**What you'll see in Temporal UI:**
+- `meltdown-demo` workflow: `WorkflowExecutionSignaled` (`customer_change`) → history pauses → `WorkflowExecutionSignaled` (`change_approved`) → `execute_customer_change` activity → signal sent to child
+- `route-ai-driver-X` workflow: `WorkflowExecutionSignaled` (`update_order`) → new `get_route_polyline` and `navigate_to` activities as the driver reroutes
+- Point to the gap in the parent event log: *"This silence is the workflow waiting. No polling. No timer. Temporal holds state until the signal arrives — seconds or days."*
+- Point to the child workflow: *"The driver got the update and rerouted mid-delivery. Two workflows coordinating via signals — all durable."*
 
-**Temporal concept to highlight:** Signals, `wait_condition`, indefinite workflow suspension
+**Temporal concept to highlight:** Signals, `wait_condition`, cross-workflow signaling, mid-delivery reroute
 
 ---
 

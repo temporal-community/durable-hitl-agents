@@ -109,6 +109,10 @@ class DriverRouteWorkflow:
         self._current_orders: list[str] = []
         self._path_history: list[dict] = []
         self._is_recovering: bool = False
+        # Mid-delivery reroute/cancel tracking
+        self._active_order_id: str | None = None
+        self._reroute_pending: dict | None = None  # {"lat": float, "lng": float}
+        self._cancel_pending: bool = False
 
     # --- Signals ---
 
@@ -136,21 +140,40 @@ class DriverRouteWorkflow:
 
     @workflow.signal
     async def update_order(self, inp: OrderUpdateInput) -> None:
-        """Update delivery coordinates for a pending order."""
+        """Update delivery coordinates — works for both pending and active orders."""
+        # Check pending orders first
         for order in self._pending_orders:
             if order.order_id == inp.order_id:
                 if inp.new_lat is not None and inp.new_lng is not None:
                     order.delivery_lat = inp.new_lat
                     order.delivery_lng = inp.new_lng
-                workflow.logger.info(f"Order {inp.order_id} updated — new destination")
+                workflow.logger.info(f"Order {inp.order_id} updated (pending) — new destination")
                 return
-        workflow.logger.info(f"Order {inp.order_id} not in pending — may already be in delivery")
+        # If order is currently being delivered, flag for reroute
+        if self._active_order_id == inp.order_id:
+            if inp.new_lat is not None and inp.new_lng is not None:
+                self._reroute_pending = {"lat": inp.new_lat, "lng": inp.new_lng}
+                workflow.logger.info(
+                    f"Order {inp.order_id} reroute queued — driver will reroute after current leg"
+                )
+            return
+        workflow.logger.info(f"Order {inp.order_id} not found — may already be delivered")
 
     @workflow.signal
     async def cancel_order(self, inp: OrderUpdateInput) -> None:
-        """Remove an order from the pending queue."""
+        """Cancel an order — works for both pending and active orders."""
+        # Check pending orders
+        before = len(self._pending_orders)
         self._pending_orders = [o for o in self._pending_orders if o.order_id != inp.order_id]
-        workflow.logger.info(f"Order {inp.order_id} cancelled — removed from queue")
+        if len(self._pending_orders) < before:
+            workflow.logger.info(f"Order {inp.order_id} cancelled — removed from pending queue")
+            return
+        # If order is currently being delivered, flag for cancel
+        if self._active_order_id == inp.order_id:
+            self._cancel_pending = True
+            workflow.logger.info(f"Order {inp.order_id} cancel queued — will skip delivery")
+            return
+        workflow.logger.info(f"Order {inp.order_id} not found — may already be delivered")
 
     # --- Queries ---
 
@@ -169,6 +192,7 @@ class DriverRouteWorkflow:
             "is_disconnected": self._is_disconnected,
             "is_recovering": self._is_recovering,
             "current_orders": list(self._current_orders),
+            "active_order_id": self._active_order_id,
             "path_history": list(self._path_history),
             "pending_orders": len(self._pending_orders),
         }
@@ -218,6 +242,9 @@ class DriverRouteWorkflow:
             # Process all pending orders
             while self._pending_orders:
                 order = self._pending_orders.pop(0)
+                self._active_order_id = order.order_id
+                self._reroute_pending = None
+                self._cancel_pending = False
 
                 # Navigate to shop for pickup
                 self._status = "en_route_pickup"
@@ -251,6 +278,15 @@ class DriverRouteWorkflow:
                     {"lat": nav_result.final_lat, "lng": nav_result.final_lng}
                 )
 
+                # Check for cancel before pickup
+                if self._cancel_pending:
+                    workflow.logger.info(
+                        f"Order {order.order_id} cancelled before pickup — skipping"
+                    )
+                    self._active_order_id = None
+                    self._cancel_pending = False
+                    continue
+
                 # Pick up — activity checks disconnect, Temporal retries
                 self._status = "picking_up"
                 await workflow.execute_activity(
@@ -268,58 +304,87 @@ class DriverRouteWorkflow:
 
                 self._current_lat, self._current_lng = WAREHOUSE.lat, WAREHOUSE.lng
 
-                # Navigate to hotel
-                self._status = "en_route_delivery"
-                delivery_waypoints = await workflow.execute_activity(
-                    get_route_polyline,
-                    args=[
-                        self._current_lat,
-                        self._current_lng,
-                        order.delivery_lat,
-                        order.delivery_lng,
-                    ],
-                    task_queue=DELIVERY_QUEUE,
-                    summary=f"{driver_id} — route to {order.hotel} for {order.order_id}",
-                    schedule_to_close_timeout=timedelta(minutes=5),
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=FAST_RETRY,
-                )
+                # Navigate to hotel — with reroute loop
+                # If a customer change arrives during delivery navigation, the
+                # reroute_pending flag gets set by the update_order signal handler.
+                # After navigation completes, we check the flag and re-navigate
+                # to the new destination.
+                while True:
+                    # Check for cancel before navigating
+                    if self._cancel_pending:
+                        workflow.logger.info(
+                            f"Order {order.order_id} cancelled — skipping delivery"
+                        )
+                        break
 
-                nav_result = await self._execute_navigate(
-                    driver_id,
-                    NavigateInput(
-                        driver_id=driver_id,
-                        order_id=order.order_id,
-                        target_lat=order.delivery_lat,
-                        target_lng=order.delivery_lng,
-                        leg="delivery",
-                        steps=30,
-                        waypoints=delivery_waypoints,
-                        start_lat=self._current_lat,
-                        start_lng=self._current_lng,
-                    ),
-                )
-                self._current_lat = nav_result.final_lat
-                self._current_lng = nav_result.final_lng
-                self._path_history.append(
-                    {"lat": nav_result.final_lat, "lng": nav_result.final_lng}
-                )
+                    self._status = "en_route_delivery"
+                    delivery_waypoints = await workflow.execute_activity(
+                        get_route_polyline,
+                        args=[
+                            self._current_lat,
+                            self._current_lng,
+                            order.delivery_lat,
+                            order.delivery_lng,
+                        ],
+                        task_queue=DELIVERY_QUEUE,
+                        summary=f"{driver_id} — route to {order.hotel} for {order.order_id}",
+                        schedule_to_close_timeout=timedelta(minutes=5),
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=FAST_RETRY,
+                    )
 
-                # Deliver — activity checks disconnect, Temporal retries
-                self._status = "delivering"
-                await workflow.execute_activity(
-                    deliver_order,
-                    DeliverInput(
-                        driver_id=driver_id,
-                        order_id=order.order_id,
-                    ),
-                    task_queue=DELIVERY_QUEUE,
-                    summary=f"{driver_id} — delivered {order.order_id} to {order.hotel}",
-                    schedule_to_close_timeout=timedelta(minutes=5),
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=NAV_RETRY,
-                )
-                delivered.append(order.order_id)
+                    nav_result = await self._execute_navigate(
+                        driver_id,
+                        NavigateInput(
+                            driver_id=driver_id,
+                            order_id=order.order_id,
+                            target_lat=order.delivery_lat,
+                            target_lng=order.delivery_lng,
+                            leg="delivery",
+                            steps=30,
+                            waypoints=delivery_waypoints,
+                            start_lat=self._current_lat,
+                            start_lng=self._current_lng,
+                        ),
+                    )
+                    self._current_lat = nav_result.final_lat
+                    self._current_lng = nav_result.final_lng
+                    self._path_history.append(
+                        {"lat": nav_result.final_lat, "lng": nav_result.final_lng}
+                    )
+
+                    # Check if a reroute signal arrived during navigation
+                    if self._reroute_pending:
+                        new_dest = self._reroute_pending
+                        self._reroute_pending = None
+                        order.delivery_lat = new_dest["lat"]
+                        order.delivery_lng = new_dest["lng"]
+                        workflow.logger.info(
+                            f"Order {order.order_id} rerouted — navigating to new destination"
+                        )
+                        continue  # Re-navigate to new destination
+
+                    break  # No reroute — proceed to deliver
+
+                # Deliver (skip if cancelled)
+                if not self._cancel_pending:
+                    self._status = "delivering"
+                    await workflow.execute_activity(
+                        deliver_order,
+                        DeliverInput(
+                            driver_id=driver_id,
+                            order_id=order.order_id,
+                        ),
+                        task_queue=DELIVERY_QUEUE,
+                        summary=f"{driver_id} — delivered {order.order_id} to {order.hotel}",
+                        schedule_to_close_timeout=timedelta(minutes=5),
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=NAV_RETRY,
+                    )
+                    delivered.append(order.order_id)
+
+                self._active_order_id = None
+                self._cancel_pending = False
 
                 # Remove from current_orders tracking
                 try:

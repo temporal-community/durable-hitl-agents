@@ -23,6 +23,8 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
   is_recovering, path_history, and current_orders. Disconnect uses Temporal-native retry: activities
   check FleetState for disconnect, fail if disconnected, Temporal retries with backoff until
   reconnected. Driver completes delivery, stays at hotel, can't report back until reconnected.
+  Supports mid-delivery reroute: `update_order` signal sets `_reroute_pending` flag — driver
+  finishes current navigation leg then re-navigates to new destination. Cancel via `cancel_order`.
   `OrderGenerationWorkflow` is a child workflow that generates orders on a randomized timer and
   signals the parent. Parent handles assignment.
 - **Server reads FleetState** (`server.py`): WebSocket data comes from `fleet.snapshot()` (SQLite).
