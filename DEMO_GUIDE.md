@@ -13,9 +13,15 @@ This guide is for anyone presenting the Meltdown demo. It covers setup, the one-
 - `./run.sh` (or `make run`) started — this starts the Temporal dev server, worker process, and server process automatically. Browser open at http://localhost:8080
 - Temporal UI open at http://localhost:8233 (optional but great for showing workflow history)
 
+**Terminology note:** This demo has two distinct actor types:
+- **AI Agents** (Fleet Agent, Customer Agent, Resolver) — these **reason**. They call LLMs, use tools, and make decisions about order assignment. Each runs inline in the workflow via ADK.
+- **Delivery actors** (AI-Driver 1, 2, 3) — these **execute**. They receive orders via signals and follow a fixed route: pickup → navigate → deliver → return. Each runs in its own child workflow (`DriverRouteWorkflow`). They don't reason — they carry out the agents' decisions.
+
+In Temporal terms, the delivery actors are **child workflows**. They are not Temporal workers (infrastructure) and not AI agents (reasoning).
+
 **Pre-flight check:**
 - Map shows 3 hotels (MGM Grand, Caesars, Mandalay Bay) and Frosty's Ice Cream shop
-- All 3 drivers are at the ice cream shop, status idle
+- All 3 delivery actors are at the ice cream shop, status idle
 - "Start Deliveries" button is active
 - If you see a stale state from a prior run, click **Reset** first
 
@@ -35,7 +41,7 @@ Use this framing at the start of the talk before any demo:
 
 **The 30-second version:**
 
-> "Google ADK is an open-source framework for building multi-agent AI systems. You compose agents — each with their own tools and model — into pipelines: run them sequentially, in parallel, or nested. In this demo, a Fleet Agent assesses driver positions and capacity, a Customer Agent evaluates order priority and hotel context, and a Resolver Agent synthesizes their output into a driver assignment."
+> "Google ADK is an open-source framework for building multi-agent AI systems. You compose agents — each with their own tools and model — into pipelines: run them sequentially, in parallel, or nested. In this demo, a Fleet Agent assesses delivery actor positions and capacity, a Customer Agent evaluates order priority and hotel context, and a Resolver Agent synthesizes their output into a delivery assignment."
 
 **Key points to land:**
 - ADK has two agent types: **LLM Agents** (`Agent` with a model) call Gemini to reason and use tools; **Orchestrator Agents** (`SequentialAgent`, `ParallelAgent`) coordinate sub-agents without calling an LLM themselves
@@ -48,9 +54,9 @@ Use this framing at the start of the talk before any demo:
 
 | Agent | What it evaluates | Tools it calls |
 |-------|-------------------|----------------|
-| **Fleet Agent** | Driver positions, free capacity slots, driving ETAs to destination, driver disconnect status | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps Directions) |
+| **Fleet Agent** | Delivery actor positions, free capacity slots, driving ETAs to destination, disconnect status | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps Directions) |
 | **Customer Agent** | VIP vs standard priority, deadline tightness, hotel events (conferences, galas, pool parties), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
-| **Resolver** | Synthesizes both assessments, compensates if either agent is offline, picks final driver and submits structured assignment | `tool_submit_assignment` |
+| **Resolver** | Synthesizes both assessments, compensates if either agent is offline, picks final delivery actor and submits structured assignment | `tool_submit_assignment` |
 
 ---
 
@@ -120,9 +126,9 @@ OrderGenerationWorkflow fires on timer
 ```
 
 The key design principles:
-- **Child workflows give you fault isolation.** Each driver runs independently. If AI-Driver 1 hits an error, 2 and 3 keep running.
+- **Child workflows give you fault isolation.** Each delivery actor runs independently. If AI-Driver 1 hits an error, 2 and 3 keep running.
 - **Workflows own state, activities are pure.** Activities receive everything they need as inputs — they never read shared state for decision-making. The server queries workflows directly for the frontend.
-- **Disconnect uses Temporal retry.** Activities check FleetState for disconnect (simulates network unreachability), fail, and Temporal retries with backoff. The driver finishes its delivery but can't report back. No workflow-side cancellation or polling — just the standard Temporal retry mechanism.
+- **Disconnect uses Temporal retry.** Activities check FleetState for disconnect (simulates network unreachability), fail, and Temporal retries with backoff. The delivery actor finishes its delivery but can't report back. No workflow-side cancellation or polling — just the standard Temporal retry mechanism.
 
 ### Where the ADK agents fit
 
@@ -291,10 +297,10 @@ This traces a single order from button click to delivery — every function and 
 **8. Result flows back**
 - [`workflows.py`](agent_fleet/workflows.py) `_run_adk_assignment()` → reads `session.state["assignment"]` → returns `ReasonAboutAssignmentOutput`
 
-**9. Assignment registered, driver signaled**
+**9. Assignment registered, delivery actor signaled**
 - [`workflows.py`](agent_fleet/workflows.py) `_assign_order()` → calls `register_assignment` activity (FleetState write) → signals chosen `DriverRouteWorkflow` with `add_order`
 
-**10. Driver delivers**
+**10. Delivery actor executes**
 - [`workflows.py`](agent_fleet/workflows.py) `DriverRouteWorkflow.run()` → for each order:
   - `get_route_polyline` activity → Google Maps polyline to warehouse
   - `navigate_to` activity → interpolates position with heartbeats (0.4s/step)
@@ -305,9 +311,9 @@ This traces a single order from button click to delivery — every function and 
   - `deliver_order` activity → marks delivered (skipped if `_cancel_pending`)
 - [`activities.py`](agent_fleet/activities.py) — all activities on `DELIVERY_QUEUE`
 
-**11. Driver signals parent, returns to base**
+**11. Delivery actor signals parent, returns to base**
 - [`workflows.py`](agent_fleet/workflows.py) → signals parent with `order_delivered` → parent updates `_driver_orders` and `_driver_last_position`
-- After all pending orders delivered, driver navigates back to Frosty's (visible on map) → idle, waits for next order
+- After all pending orders delivered, delivery actor navigates back to Frosty's (visible on map) → idle, waits for next order
 
 **Key difference in live vs mock:** In live mode, ADK runs inline in the workflow — every LLM call and tool call is a separate Temporal activity visible in the event log. In mock mode, the entire reasoning is a single `reason_about_assignment` activity.
 
@@ -317,80 +323,89 @@ This traces a single order from button click to delivery — every function and 
 
 ---
 
-### Demo 1: Continuous Order Flow — Agents Reasoning in Real Time
-**Time: 1–2 min | Best for: opening with the "living system" feel**
+### Opening: Continuous Order Flow — Agents Reasoning in Real Time
+**Time: 1–2 min | Best for: opening with the "living system" feel before the 3 demos**
 
 **Setup:** Click **Start Deliveries**. Orders auto-generate every 15 seconds from 3 Las Vegas hotels (MGM Grand, Caesars Palace, Mandalay Bay).
 
 **What happens automatically:**
 1. Each order triggers multi-agent reasoning — watch the Agent Reasoning panel
-2. Fleet Agent calls `tool_get_fleet_status` and `tool_get_route_info` — scans driver positions, free capacity slots, and driving ETAs. Recommends the closest available driver.
+2. Fleet Agent calls `tool_get_fleet_status` and `tool_get_route_info` — scans delivery actor positions, free capacity slots, and driving ETAs. Recommends the closest available delivery actor.
 3. Customer Agent calls `tool_get_order_priorities` and uses `google_search` (Gemini grounding) — evaluates VIP tier, deadline pressure, hotel events (conferences, galas), and guest count. Mandalay Bay orders are always VIP.
-4. Resolver synthesizes both assessments and calls `tool_submit_assignment` — picks the best driver and explains why
-5. Drivers continuously pick up from Frosty's and deliver to hotels, looping back for more
+4. Resolver synthesizes both assessments and calls `tool_submit_assignment` — picks the best delivery actor and explains why
+5. Delivery actors continuously pick up from Frosty's and deliver to hotels, looping back for more
 
 **What to say:**
-> "This is a continuous fleet — orders keep coming in, agents keep reasoning. Every assignment is a multi-agent decision. Fleet Agent checks who's closest and has capacity. Customer Agent evaluates priority — that Mandalay Bay order is VIP. The Resolver weighs both and assigns. Each driver runs in its own child workflow, picking up and delivering in a continuous loop."
+> "This is a continuous fleet — orders keep coming in, agents keep reasoning. Every assignment is a multi-agent decision. Fleet Agent checks who's closest and has capacity. Customer Agent evaluates priority — that Mandalay Bay order is VIP. The Resolver weighs both and assigns. Each delivery actor runs in its own child workflow, picking up and delivering in a continuous loop."
 
-**Temporal concept to highlight:** Child workflow isolation, continuous workflows with signals
+**Before you demo, set up the Temporal UI:**
+- Open http://localhost:8233 in a separate browser tab
+- Search for `meltdown-demo` — this is the parent workflow
+- Also open `route-ai-driver-1` in another tab — this shows a delivery actor's child workflow
+- After starting deliveries, you'll see activities streaming in: `generate_order`, `invoke_model` (LLM calls), `tool_get_fleet_status`, `tool_submit_assignment`, etc.
+- Point out how each agent's LLM call and tool call shows up as a separate activity with a summary label — *"Every reasoning step is individually durable and visible"*
+
+**Temporal concept to highlight:** Child workflow isolation, continuous workflows with signals, per-call visibility in the event log
 
 ---
 
-### Demo 2: Driver Disconnect & Auto-Recovery
-**Time: 2–3 min | Best for: showing Temporal activity retry and durable state**
+### Demo 1: Tool Degradation — Agent Tools Fail, System Adapts
+**Time: 2–3 min | Best for: showing Temporal retry at the tool-call level and LLM adaptation**
 
-**Setup:** Start deliveries. Wait until at least one driver is en route to a hotel.
+**Setup:** Start deliveries. Let a few orders get assigned so the audience sees the normal flow first.
+
+**Before disconnecting, set up the Temporal UI:**
+- Open the `meltdown-demo` workflow in the Temporal UI → History tab
+- Scroll to the latest activities — you should see clusters of `invoke_model` and `tool_get_fleet_status` for recent assignments
+- This is where the retry attempts will appear after you disconnect
 
 **Steps:**
-1. In the Failure Modes panel, select a driver and click **Service Lost**
-2. The driver **finishes its current delivery** (truck keeps moving — it's already on the road)
-3. After arriving at the hotel, the driver can't report back — status shows `DISCONNECTED`
-4. The driver stays at the hotel on the map. The other two drivers keep delivering normally.
-5. Wait 10–15 seconds, then click **Reconnect Driver**
-6. The next Temporal retry succeeds — driver reports delivery, then navigates back to Frosty's for the next order
+1. Click **Disconnect Agent** (Fleet Agent)
+2. Wait for the next order to trigger the ADK pipeline
+3. **Show the Temporal UI**: `tool_get_fleet_status` shows `ActivityTaskFailed` → retry → `ActivityTaskFailed` (2 attempts exhausted). Point out: *"Temporal tried the tool twice — you can see both attempts here"*
+4. The pipeline continues — `invoke_model` for the Resolver runs with the error context
+5. `tool_submit_assignment` succeeds — assignment completed despite Fleet Agent failure
+6. Orders keep getting assigned — the Resolver adapts each time
+7. Click **Reconnect Agent**
+8. **Show the Temporal UI**: next order's `tool_get_fleet_status` shows `ActivityTaskCompleted` — tools work again. *"Full assessment restored — the workflow picked up exactly where it left off"*
 
 **What to say:**
-> "The driver finished the delivery — the truck doesn't stop mid-road. But it can't report back because the connection is lost. Watch the Temporal UI — you'll see retry attempts with backoff. Each one fails because the driver is still disconnected. When we reconnect, the next retry succeeds, the workflow gets the delivery result, and the driver heads back for the next order. Temporal held the state the entire time."
+> "Fleet Agent's tools are backed by Temporal activities. When the agent is disconnected, those activities fail — Temporal retries twice, then the error is returned to the LLM. The agent doesn't crash, it reasons about the failure. The Resolver sees the error and assigns based on Customer Agent data alone. When we reconnect, the next order's tools work normally. Two layers working together: Temporal retries the tool call, the LLM adapts to the failure."
 
-**What you'll see in Temporal UI** (`route-ai-driver-X` workflow → History tab):
-- Open the child workflow for the disconnected driver (search `route-ai-driver-1`, `route-ai-driver-2`, or `route-ai-driver-3`)
-- The `navigate_to` activity may complete (driver arrived) but `deliver_order` shows repeated `ActivityTaskFailed` → `ActivityTaskScheduled` cycles — that's Temporal retrying with exponential backoff
-- Each failed attempt shows the error: "delivered but cannot report — disconnected"
-- On reconnect: `ActivityTaskCompleted` — the retry succeeded, the workflow continues
-- Open the other two driver workflows side by side — clean stream of completed activities, completely unaffected. That's child workflow isolation.
+**Temporal concept to highlight:** Per-tool-call retry (Temporal), LLM reasoning about tool failure (ADK), graceful degradation without pipeline crash
+
+---
+
+### Demo 2: Service Disruption & Recovery — Delivery Actor Loses Connection
+**Time: 2–3 min | Best for: showing Temporal activity retry and durable state**
+
+**Setup:** Start deliveries. Wait until at least one delivery actor is en route to a hotel.
+
+**Before disconnecting, set up the Temporal UI:**
+- Open the child workflow for the delivery actor you'll disconnect (e.g., `route-ai-driver-1`) in a Temporal UI tab
+- Position it side by side with the demo dashboard so the audience can see both
+- Also open another delivery actor's workflow (e.g., `route-ai-driver-2`) to show it's unaffected
+
+**Steps:**
+1. In the Failure Modes panel, select a delivery actor and click **Service Lost**
+2. The delivery actor **finishes its current delivery** (truck keeps moving — it's already on the road)
+3. After arriving at the hotel, it can't report back — status shows `DISCONNECTED`
+4. The delivery actor stays at the hotel on the map. The other two keep delivering normally.
+5. **Show the Temporal UI**: point to the `ActivityTaskFailed` → `ActivityTaskScheduled` retry cycles in the child workflow. Each failed attempt shows the error: "delivered but cannot report — disconnected." The backoff intervals grow between retries.
+6. Wait 10–15 seconds, then click **Reconnect**
+7. **Show the Temporal UI**: the next retry shows `ActivityTaskCompleted` — the workflow continues
+8. On the map, the delivery actor navigates back to Frosty's for the next order
+
+**What to say:**
+> "The delivery actor finished the delivery — the truck doesn't stop mid-road. But it can't report back because the connection is lost. Look at the Temporal UI — you can see each retry attempt with growing backoff intervals. Every failure is recorded. When we reconnect, the next retry succeeds, the child workflow gets the delivery result, and the delivery actor heads back for the next order. Temporal held the state the entire time — nothing was lost."
+>
+> Point to the other delivery actor's workflow: *"Meanwhile, this one has a clean stream of completed activities — completely unaffected. That's child workflow isolation."*
 
 **Temporal concept to highlight:** Activity retry policies with backoff, child workflow isolation, durable state across failures
 
 ---
 
-### Demo 3: Agent Disconnect — Tool Retry + LLM Adaptation
-**Time: 2–3 min | Best for: showing Temporal retry at the tool-call level**
-
-**Setup:** Start deliveries. Let a few orders get assigned.
-
-**Steps:**
-1. Click **Disconnect Agent** (Fleet Agent)
-2. Next order triggers the ADK pipeline — Fleet Agent's tools (`tool_get_fleet_status`, `tool_get_route_info`) fail fast (2 retry attempts)
-3. The error is returned to the LLM as a tool response — Fleet Agent reasons about the failure
-4. Resolver sees Fleet Agent's degraded output + Customer Agent's successful assessment → assigns based on available data
-5. Orders keep getting assigned — the Resolver adapts each time
-6. Click **Reconnect Agent** — next order's Fleet Agent tools succeed → full assessment resumes
-
-**What to say:**
-> "Fleet Agent's tools are backed by Temporal activities. When the agent is disconnected, those activities fail — Temporal retries twice, then the error is returned to the LLM. The agent doesn't crash, it reasons about the failure. The Resolver sees the error and assigns based on Customer Agent data alone. When we reconnect, the next order's tools work normally. Two layers working together: Temporal retries the tool call, the LLM adapts to the failure."
-
-**What you'll see in Temporal UI** (`meltdown-demo` workflow → History tab):
-- `tool_get_fleet_status` shows `ActivityTaskFailed` → retry → `ActivityTaskFailed` (2 attempts exhausted)
-- The pipeline continues — `invoke_model` for the Resolver runs with the error context
-- `tool_submit_assignment` succeeds — assignment completed despite Fleet Agent failure
-- On reconnect: next order's `tool_get_fleet_status` shows `ActivityTaskCompleted` — tools work again
-- Point to this and say: *"Temporal tried the tool twice, it failed, but the agent adapted. If this worker crashed right now, Temporal would replay these results from the log — including the failures."*
-
-**Concepts to highlight:** Per-tool-call retry (Temporal), LLM reasoning about tool failure (ADK), graceful degradation without pipeline crash
-
----
-
-### Demo 4: Customer Change — Human-in-the-Loop with Mid-Delivery Reroute
+### Demo 3: Human-in-the-Loop (HITL) — Customer Change with Mid-Delivery Reroute
 **Time: 2–3 min | Best for: showing signals, workflow waiting, and cross-workflow coordination**
 
 **Setup:** Start deliveries. Wait for a driver to be en route to a hotel (actively delivering).
@@ -432,6 +447,6 @@ This traces a single order from button click to delivery — every function and 
 ## Reset Between Demos
 
 1. Click **Reset** on the dashboard
-2. Verify all drivers return to idle at Frosty's Ice Cream
+2. Verify all delivery actors return to idle at Frosty's Ice Cream
 3. If any workflows are stuck, run: `temporal workflow list` and cancel manually
 4. Refresh the browser before the next run

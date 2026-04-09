@@ -6,15 +6,17 @@ A conference demo showing **Google ADK** multi-agent reasoning with **Temporal**
   <img src=".github/assets/meltdown-snapshot.png" alt="Meltdown demo dashboard" width="900">
 </p>
 
-Orders auto-generate on a timer from Las Vegas Strip venues. AI agents reason about each order — evaluating driver positions, capacity, and priority — then assign it to the best driver. When things go wrong — driver disconnects, agent failures, customer changes — Temporal ensures nothing is lost.
+Orders auto-generate on a timer from Las Vegas Strip venues. **AI agents** (Fleet, Customer, Resolver) reason about each order — evaluating positions, capacity, and priority — then assign it to the best **delivery actor**. When things go wrong — delivery actor disconnects, agent failures, customer changes — Temporal ensures nothing is lost.
+
+> **Terminology:** AI agents **reason** (LLM + tools, run inline via ADK). Delivery actors **execute** (child workflows that carry out routes). They are not Temporal workers.
 
 ## What It Demonstrates
 
 | Scenario | What Happens | What It Shows |
 |----------|-------------|---------------|
-| **Agent Disconnect** | Take Fleet Agent offline | Fleet Agent's tools fail fast (2 retries), error returned to LLM — Resolver assigns with Customer Agent data only. Reconnect → tools succeed → full assessment resumes. Temporal shows retry attempts in the UI. |
-| **Driver Disconnect** | Take a single AI-Driver offline mid-delivery | Driver completes current delivery but can't report back. Temporal retries with backoff until reconnected. Driver stays at hotel on the map — no teleporting. Reconnect → next retry succeeds → driver navigates home for next order. |
-| **Customer Change** | Submit an address change or cancellation mid-delivery | Human-in-the-loop: workflow pauses on `wait_condition`, approves, signals driver — driver reroutes mid-delivery to new destination. Cross-workflow coordination via signals. |
+| **Tool Degradation** | Take Fleet Agent offline | Fleet Agent's tools fail fast (2 retries), error returned to LLM — Resolver assigns with Customer Agent data only. Reconnect → tools succeed → full assessment resumes. Temporal shows retry attempts in the UI. |
+| **Service Disruption & Recovery** | Take a delivery actor offline mid-delivery | Delivery actor completes current delivery but can't report back. Temporal retries with backoff until reconnected. Stays at hotel on the map — no teleporting. Reconnect → next retry succeeds → navigates home for next order. |
+| **Human-in-the-Loop (HITL)** | Submit an address change or cancellation mid-delivery | Workflow pauses on `wait_condition`, approves, signals delivery actor — reroutes mid-delivery to new destination. Cross-workflow coordination via signals. |
 
 ## Architecture
 
@@ -91,9 +93,9 @@ Fleet Agent, Customer Agent, and Resolver are LLM Agents. The outer `order_assig
 
 | Agent | Reasoning | Tools |
 |-------|-----------|-------|
-| **Fleet Agent** (operational) | Driver positions, capacity (free slots), ETAs to destination, disconnect status — excludes unavailable drivers | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps) |
+| **Fleet Agent** (operational) | Delivery actor positions, capacity (free slots), ETAs to destination, disconnect status — excludes unavailable actors | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps) |
 | **Customer Agent** (priority) | VIP vs standard tier, deadline pressure, hotel events (conferences, galas), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
-| **Resolver** (synthesis) | Weighs Fleet + Customer assessments, compensates if either agent is offline, picks final driver | `tool_submit_assignment` |
+| **Resolver** (synthesis) | Weighs Fleet + Customer assessments, compensates if either agent is offline, picks final delivery actor | `tool_submit_assignment` |
 
 Fleet and Customer run **in parallel** (`ParallelAgent`), then the Resolver runs **sequentially** after both complete (`SequentialAgent`). All tools are wrapped with `activity_tool()` — each call is a Temporal activity, recorded in the event log. If the worker restarts mid-call, results replay from the log.
 
@@ -139,10 +141,10 @@ echo 'export GOOGLE_MAPS_API_KEY="your-maps-key"' >> .env  # optional, must be M
 
 ## Demo Flow
 
-1. **Start Deliveries** — Orders auto-generate every 15s. AI agents reason per-order (Fleet Agent checks positions/capacity, Customer Agent evaluates priority) and assign to the best driver. Drivers continuously pick up from Frosty's Ice Cream and deliver.
-2. **Driver Disconnect** — Select a driver → disconnect → driver finishes delivery, stays at hotel, can't report → Temporal retries → reconnect → next retry succeeds → driver navigates home
-3. **Agent Disconnect** — Take Fleet Agent offline → tools fail fast → Resolver assigns with Customer Agent data → reconnect → full reasoning resumes
-4. **Customer Change** — Pick an active order from dropdown → submit address change → workflow pauses for approval → approve → driver reroutes mid-delivery to new destination
+1. **Start Deliveries** — Orders auto-generate every 15s. AI agents reason per-order and assign to the best delivery actor. Delivery actors continuously pick up from Frosty's Ice Cream and deliver.
+2. **Demo 1: Tool Degradation** — Take Fleet Agent offline → tools fail fast (2 retries) → error returned to LLM → Resolver assigns with Customer Agent data → reconnect → full reasoning resumes
+3. **Demo 2: Service Disruption & Recovery** — Select a delivery actor → disconnect → finishes delivery, stays at hotel, can't report → Temporal retries with backoff → reconnect → next retry succeeds → navigates home
+4. **Demo 3: Human-in-the-Loop (HITL)** — Pick an active order → submit address change → workflow pauses for approval → approve → delivery actor reroutes mid-delivery to new destination
 
 ## Key Files
 
