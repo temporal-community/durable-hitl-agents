@@ -4,7 +4,7 @@ ADK agent definitions for the Meltdown ice cream delivery demo.
 Order assignment pipeline:
 - Fleet Agent: assesses driver positions, capacity, and ETAs for new orders
 - Customer Agent: evaluates order priority, urgency, and hotel context
-- Assignment Resolver: synthesizes both and submits a structured driver assignment
+- Dispatch Agent: synthesizes both and submits a structured driver assignment
 
 Architecture:
 - Agent execution happens inline in the workflow via TemporalModel + activity_tool.
@@ -171,22 +171,22 @@ def create_assignment_customer_agent() -> Agent:
     )
 
 
-def create_assignment_resolver() -> Agent:
+def create_assignment_dispatch_agent() -> Agent:
     """
-    Resolver for order assignment — synthesizes fleet and customer assessments,
+    Dispatch Agent for order assignment — synthesizes fleet and customer assessments,
     picks the best driver, and submits the structured assignment.
     """
     return Agent(
-        name="assignment_resolver",
+        name="assignment_dispatch_agent",
         model=TemporalModel(
             DEFAULT_MODEL,
             activity_config=ActivityConfig(
                 task_queue=AGENTS_QUEUE,
-                summary="Resolver — LLM reasoning",
+                summary="Dispatch Agent — LLM reasoning",
             ),
         ),
         description=(
-            "Assignment coordinator. Synthesizes fleet and customer assessments "
+            "Dispatch Agent. Synthesizes fleet and customer assessments "
             "to pick the best driver for a new order."
         ),
         instruction=(
@@ -209,7 +209,7 @@ def create_order_assignment_agent() -> SequentialAgent:
     Compose the full order assignment pipeline (workflow context).
     Uses TemporalModel + activity_tool — each LLM and tool call is a Temporal activity.
     1. ParallelAgent: Fleet Agent + Customer Agent assess simultaneously
-    2. Assignment Resolver: synthesizes and submits driver assignment
+    2. Dispatch Agent: synthesizes and submits driver assignment
     """
     parallel_assessment = ParallelAgent(
         name="assignment_parallel",
@@ -219,9 +219,9 @@ def create_order_assignment_agent() -> SequentialAgent:
         ],
     )
 
-    resolver = create_assignment_resolver()
+    assignment_dispatch_agent = create_assignment_dispatch_agent()
 
     return SequentialAgent(
         name="order_assignment",
-        sub_agents=[parallel_assessment, resolver],
+        sub_agents=[parallel_assessment, assignment_dispatch_agent],
     )

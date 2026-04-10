@@ -237,7 +237,7 @@ async def mock_reason_about_assignment(
     Uses deterministic distance math instead of LLM calls.
     Fleet Agent assesses driver positions and capacity.
     Customer Agent evaluates order priority and urgency.
-    Resolver synthesizes and picks the best driver.
+    Dispatch Agent synthesizes and picks the best driver.
 
     All decision inputs come from inp (workflow state) — not from FleetState.
     FleetState writes are UI projection only.
@@ -290,13 +290,13 @@ async def mock_reason_about_assignment(
         _collect_event(
             "fleet_agent",
             "offline",
-            "Fleet Agent offline — resolver using last-known data.",
+            "Fleet Agent offline — Dispatch Agent using last-known data.",
             summary="Fleet Agent offline",
         )
         await fleet.publish_agent_event(
             "fleet_agent",
             "offline",
-            "Fleet Agent offline — resolver using last-known data.",
+            "Fleet Agent offline — Dispatch Agent using last-known data.",
             summary="Fleet Agent offline",
         )
         await asyncio.sleep(0.2)
@@ -374,7 +374,7 @@ async def mock_reason_about_assignment(
         )
         await asyncio.sleep(0.3)
 
-    # --- Resolver: synthesize and assign ---
+    # --- Dispatch Agent: synthesize and assign ---
     offline_agents = []
     if fleet_agent_offline:
         offline_agents.append("Fleet Agent")

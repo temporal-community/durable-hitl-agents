@@ -125,7 +125,7 @@ class FleetState:
 
     async def _seed_initial_state(self) -> None:
         conn = self._conn
-        for i in range(1, 4):
+        for i in range(1, 6):
             did = f"driver-{i}"
             await conn.execute(
                 "INSERT OR IGNORE INTO drivers (driver_id, lat, lng) VALUES (?, ?, ?)",

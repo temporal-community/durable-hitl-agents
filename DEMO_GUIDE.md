@@ -14,14 +14,14 @@ This guide is for anyone presenting the Meltdown demo. It covers setup, the one-
 - Temporal UI open at http://localhost:8233 (optional but great for showing workflow history)
 
 **Terminology note:** This demo has two distinct actor types:
-- **AI Agents** (Fleet Agent, Customer Agent, Resolver) — these **reason**. They call LLMs, use tools, and make decisions about order assignment. Each runs inline in the workflow via ADK.
-- **Delivery actors** (Driver 1, 2, 3) — these **execute**. They receive orders via signals and follow a fixed route: pickup → navigate → deliver → return. Each runs in its own child workflow (`DriverRouteWorkflow`). They don't reason — they carry out the agents' decisions.
+- **AI Agents** (Fleet Agent, Customer Agent, Dispatch Agent) — these **reason**. They call LLMs, use tools, and make decisions about order assignment. Each runs inline in the workflow via ADK.
+- **Delivery actors** (Driver 1, 2, 3, 4, 5) — these **execute**. They receive orders via signals and follow a fixed route: pickup → navigate → deliver → return. Each runs in its own child workflow (`DriverRouteWorkflow`). They don't reason — they carry out the agents' decisions.
 
 In Temporal terms, the delivery actors are **child workflows**. They are not Temporal workers (infrastructure) and not AI agents (reasoning).
 
 **Pre-flight check:**
 - Map shows 3 hotels (MGM Grand, Caesars, Mandalay Bay) and Frosty's Ice Cream shop
-- All 3 delivery actors are at the ice cream shop, status idle
+- All 5 delivery actors are at the ice cream shop, status idle
 - "Start Deliveries" button is active
 - If you see a stale state from a prior run, click **Reset** first
 
@@ -41,11 +41,11 @@ Use this framing at the start of the talk before any demo:
 
 **The 30-second version:**
 
-> "Google ADK is an open-source framework for building multi-agent AI systems. You compose agents — each with their own tools and model — into pipelines: run them sequentially, in parallel, or nested. In this demo, a Fleet Agent assesses delivery actor positions and capacity, a Customer Agent evaluates order priority and hotel context, and a Resolver Agent synthesizes their output into a delivery assignment."
+> "Google ADK is an open-source framework for building multi-agent AI systems. You compose agents — each with their own tools and model — into pipelines: run them sequentially, in parallel, or nested. In this demo, a Fleet Agent assesses delivery actor positions and capacity, a Customer Agent evaluates order priority and hotel context, and a Dispatch Agent synthesizes their output into a delivery assignment."
 
 **Key points to land:**
 - ADK has two agent types: **LLM Agents** (`Agent` with a model) call Gemini to reason and use tools; **Orchestrator Agents** (`SequentialAgent`, `ParallelAgent`) coordinate sub-agents without calling an LLM themselves
-- In this demo: Fleet Agent, Customer Agent, and Resolver are all LLM Agents — each calls Gemini. The outer pipeline (`create_order_assignment_agent`) is an Orchestrator Agent — it sequences them with no LLM of its own
+- In this demo: Fleet Agent, Customer Agent, and Dispatch Agent are all LLM Agents — each calls Gemini. The outer pipeline (`create_order_assignment_agent`) is an Orchestrator Agent — it sequences them with no LLM of its own
 - Each agent can use tools (Maps, Search, custom functions)
 - ADK supports multiple model providers — this demo uses Gemini, but you can swap to other models by changing the config
 - ADK manages the multi-turn reasoning loop — the developer just defines the agents and wires them together
@@ -56,7 +56,7 @@ Use this framing at the start of the talk before any demo:
 |-------|-------------------|----------------|
 | **Fleet Agent** | Delivery actor positions, free capacity slots, driving ETAs to destination, disconnect status | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps Directions) |
 | **Customer Agent** | VIP vs standard priority, deadline tightness, hotel events (conferences, galas, pool parties), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
-| **Resolver** | Synthesizes both assessments, compensates if either agent is offline, picks final delivery actor and submits structured assignment | `tool_submit_assignment` |
+| **Dispatch Agent** | Synthesizes both assessments, compensates if either agent is offline, picks final delivery actor and submits structured assignment | `tool_submit_assignment` |
 
 ---
 
@@ -109,7 +109,7 @@ If you break determinism, Temporal raises a non-determinism error on replay. Thi
 
 **`DriverRouteWorkflow`** is the legs. One instance per driver, it executes the physical route: navigate to kitchen → pick up → navigate to hotel → deliver → signal parent → return to base → loop. It owns its own disconnect state (status, is_disconnected, is_recovering, path_history, current_orders). Disconnect uses **Temporal-native retry**: activities check FleetState for disconnect status and fail if disconnected. Temporal retries with backoff (`NAV_RETRY`, unlimited attempts). The driver finishes its current delivery, stays at the hotel (can't report back), and resumes when reconnected. No workflow-side cancellation needed.
 
-**`OrderGenerationWorkflow`** is a child workflow that generates orders on a randomized timer (±30% jitter around 15s base) and signals the parent with each new order. The parent handles assignment.
+**`OrderGenerationWorkflow`** is a child workflow that generates orders on a timer and signals the parent with each new order. The first 3 orders fire in a quick burst (2s apart) to get multiple drivers on the road immediately, then settles into a normal cadence (±30% jitter around 10s base). The parent handles assignment.
 
 The workflows connect through signals in both directions:
 - **Parent → child:** `add_order` (new delivery), `driver_disconnected` / `driver_reconnected`, `update_order` (address change), `cancel_order` (cancellation)
@@ -126,7 +126,7 @@ OrderGenerationWorkflow fires on timer
 ```
 
 The key design principles:
-- **Child workflows give you fault isolation.** Each delivery actor runs independently. If Driver 1 hits an error, 2 and 3 keep running.
+- **Child workflows give you fault isolation.** Each delivery actor runs independently. If Driver 1 hits an error, the other 4 keep running.
 - **Workflows own state, activities are pure.** Activities receive everything they need as inputs — they never read shared state for decision-making. The server queries workflows directly for the frontend.
 - **Disconnect uses Temporal retry.** Activities check FleetState for disconnect (simulates network unreachability), fail, and Temporal retries with backoff. The delivery actor finishes its delivery but can't report back. No workflow-side cancellation or polling — just the standard Temporal retry mechanism.
 
@@ -136,7 +136,7 @@ In **live mode**, the agents run **inline in the workflow** via `_run_adk_assign
 
 In **mock mode**, `mock_reason_about_assignment` in `agent_fleet/mock/activities.py` is registered as a single activity with `@activity.defn(name="reason_about_assignment")`. The workflow calls this activity instead of running ADK inline. The live workflow code has zero awareness of this — the mock worker registers the activity with the same name.
 
-Fleet Agent, Customer Agent, and Resolver are all **LLM Agents** — each is an `Agent` with `model=TemporalModel(DEFAULT_MODEL, activity_config=ActivityConfig(task_queue=AGENTS_QUEUE))`, meaning every Gemini call they make becomes an `invoke_model` Temporal activity routed to the agents worker. The `create_order_assignment_agent()` function returns an **Orchestrator Agent** (`SequentialAgent`) — it has no model, makes no LLM calls, and has no corresponding Temporal activity. It purely sequences the sub-agents.
+Fleet Agent, Customer Agent, and Dispatch Agent are all **LLM Agents** — each is an `Agent` with `model=TemporalModel(DEFAULT_MODEL, activity_config=ActivityConfig(task_queue=AGENTS_QUEUE))`, meaning every Gemini call they make becomes an `invoke_model` Temporal activity routed to the agents worker. The `create_order_assignment_agent()` function returns an **Orchestrator Agent** (`SequentialAgent`) — it has no model, makes no LLM calls, and has no corresponding Temporal activity. It purely sequences the sub-agents.
 
 The full agent pipeline is composed in [`agent_fleet/agents.py`](agent_fleet/agents.py) using ADK's `ParallelAgent` and `SequentialAgent`:
 
@@ -149,22 +149,22 @@ def create_order_assignment_agent() -> SequentialAgent:
             create_assignment_customer_agent(), # checks priority, deadline, hotel context
         ],
     )
-    resolver = create_assignment_resolver()     # synthesizes → calls tool_submit_assignment
+    dispatch_agent = create_assignment_dispatch_agent()  # synthesizes → calls tool_submit_assignment
 
     return SequentialAgent(
         name="order_assignment",
-        sub_agents=[parallel_assessment, resolver],
+        sub_agents=[parallel_assessment, dispatch_agent],
     )
 ```
 
-Fleet Agent and Customer Agent run in parallel (ADK handles that). Then the Resolver runs sequentially after both complete. In live mode, the workflow runs ADK inline via `_run_adk_assignment()`. In mock mode, the workflow calls the `reason_about_assignment` activity (which the mock worker registers).
+Fleet Agent and Customer Agent run in parallel (ADK handles that). Then the Dispatch Agent runs sequentially after both complete. In live mode, the workflow runs ADK inline via `_run_adk_assignment()`. In mock mode, the workflow calls the `reason_about_assignment` activity (which the mock worker registers).
 
 ### How `TemporalModel` and `activity_tool` work — and why you don't define agent activities explicitly
 
 A common question from engineers: "where are the Temporal activities defined for each agent's LLM call and tool call?" The answer is they aren't — they're injected automatically by two wrappers:
 
 - **`TemporalModel(DEFAULT_MODEL, activity_config=...)`** — when you set this as an agent's model, every LLM call that agent makes is automatically executed as a Temporal `invoke_model` activity routed to the agents queue. You don't write the activity. The wrapper does it. ADK supports other models too — swap `DEFAULT_MODEL` for any supported provider.
-- **`activity_tool(tool_get_fleet_status, ...)`** — when you wrap a tool function this way, every time an agent calls that tool it executes as a Temporal activity. Again, no explicit activity definition needed. Our local [`_activity_tool.py`](agent_fleet/_activity_tool.py) adds two fixes over the upstream version: correct multi-arg handling, and **graceful failure** — when an activity exhausts its retry policy, the error is returned as a string to the LLM instead of crashing the pipeline. This is how Fleet Agent disconnect works: tools fail fast (2 retries), the LLM sees the error, and the Resolver assigns without fleet data.
+- **`activity_tool(tool_get_fleet_status, ...)`** — when you wrap a tool function this way, every time an agent calls that tool it executes as a Temporal activity. Again, no explicit activity definition needed. Our local [`_activity_tool.py`](agent_fleet/_activity_tool.py) adds two fixes over the upstream version: correct multi-arg handling, and **graceful failure** — when an activity exhausts its retry policy, the error is returned as a string to the LLM instead of crashing the pipeline. This is how Fleet Agent disconnect works: tools fail fast (2 retries), the LLM sees the error, and the Dispatch Agent assigns without fleet data.
 
 So when Fleet Agent calls Gemini and then calls `tool_get_fleet_status`, both of those are Temporal activities — durable, retryable, and recorded in the event log — purely by inheritance from the wrappers. This is the `temporalio[google-adk]` integration doing its job.
 
@@ -195,9 +195,9 @@ No activity `@activity.defn` decorator, no explicit registration — the wrapper
 
 **The division of responsibility:**
 
-ADK owns the agent orchestration — the sequencing of Fleet → Customer → Resolver via `SequentialAgent` and `ParallelAgent`, the multi-turn reasoning loop, passing context between agents. Temporal owns the durability of every external call those agents make.
+ADK owns the agent orchestration — the sequencing of Fleet → Customer → Dispatch Agent via `SequentialAgent` and `ParallelAgent`, the multi-turn reasoning loop, passing context between agents. Temporal owns the durability of every external call those agents make.
 
-An alternative "more Temporal-native" design would be to put the Fleet → Customer → Resolver sequencing directly in the workflow and only push the raw LLM calls into activities. That gives you more explicit visibility in the Temporal UI — each agent step shows up as a named workflow step. The tradeoff is you'd be rewriting ADK's orchestration in Temporal workflow code, giving up ADK's agent composition primitives.
+An alternative "more Temporal-native" design would be to put the Fleet → Customer → Dispatch Agent sequencing directly in the workflow and only push the raw LLM calls into activities. That gives you more explicit visibility in the Temporal UI — each agent step shows up as a named workflow step. The tradeoff is you'd be rewriting ADK's orchestration in Temporal workflow code, giving up ADK's agent composition primitives.
 
 The current design keeps both frameworks doing what they're best at: **ADK composes and sequences agents, Temporal makes every external call durable.** This is the recommended pattern for the `temporalio[google-adk]` integration — `TemporalModel` and `activity_tool` exist specifically to enable ADK agents running inline in workflows with per-call durability.
 
@@ -269,10 +269,10 @@ This traces a single order from button click to delivery — every function and 
 - [`server.py`](agent_fleet/server.py) `start_demo()` → starts `MeltdownDemoWorkflow` on `WORKFLOWS_QUEUE`
 
 **2. Main workflow initializes**
-- [`workflows.py`](agent_fleet/workflows.py) `MeltdownDemoWorkflow.run()` → starts 3 `DriverRouteWorkflow` children + `OrderGenerationWorkflow` child
+- [`workflows.py`](agent_fleet/workflows.py) `MeltdownDemoWorkflow.run()` → starts 5 `DriverRouteWorkflow` children + `OrderGenerationWorkflow` child
 
 **3. Order generates on timer**
-- [`workflows.py`](agent_fleet/workflows.py) `OrderGenerationWorkflow.run()` → calls `generate_order` activity every 15s → signals parent with `new_order`
+- [`workflows.py`](agent_fleet/workflows.py) `OrderGenerationWorkflow.run()` → calls `generate_order` activity every 10s → signals parent with `new_order`
 - [`activities.py`](agent_fleet/activities.py) `generate_order()` → picks random venue, registers in FleetState
 
 **4. Parent runs ADK agents inline**
@@ -282,7 +282,7 @@ This traces a single order from button click to delivery — every function and 
 **5. ADK agent pipeline**
 - [`agents.py`](agent_fleet/agents.py) `create_order_assignment_agent()` → `SequentialAgent`:
   - `ParallelAgent` runs **Fleet Agent** + **Customer Agent** simultaneously
-  - Then **Resolver** runs sequentially
+  - Then **Dispatch Agent** runs sequentially
 - Each agent uses `TemporalModel` → every Gemini call becomes an `invoke_model` activity on `AGENTS_QUEUE`
 
 **6. Tool calls → Temporal activities**
@@ -291,7 +291,7 @@ This traces a single order from button click to delivery — every function and 
 - Customer Agent calls: `tool_get_order_priorities`, `google_search` (Gemini grounding)
 - Each tool call → `workflow.execute_activity()` → recorded in Temporal event log
 
-**7. Resolver decides**
+**7. Dispatch Agent decides**
 - [`agents.py`](agent_fleet/agents.py) `tool_submit_assignment()` → writes `{driver_id, reasoning_summary}` to ADK session state (in-memory, not a Temporal activity)
 
 **8. Result flows back**
@@ -326,17 +326,17 @@ This traces a single order from button click to delivery — every function and 
 ### Opening: Continuous Order Flow — Agents Reasoning in Real Time
 **Time: 1–2 min | Best for: opening with the "living system" feel before the 3 demos**
 
-**Setup:** Click **Start Deliveries**. Orders auto-generate every 15 seconds from 3 Las Vegas hotels (MGM Grand, Caesars Palace, Mandalay Bay).
+**Setup:** Click **Start Deliveries**. Orders auto-generate every 10 seconds from 3 Las Vegas hotels (MGM Grand, Caesars Palace, Mandalay Bay).
 
 **What happens automatically:**
 1. Each order triggers multi-agent reasoning — watch the Agent Reasoning panel
 2. Fleet Agent calls `tool_get_fleet_status` and `tool_get_route_info` — scans delivery actor positions, free capacity slots, and driving ETAs. Recommends the closest available delivery actor.
 3. Customer Agent calls `tool_get_order_priorities` and uses `google_search` (Gemini grounding) — evaluates VIP tier, deadline pressure, hotel events (conferences, galas), and guest count. Mandalay Bay orders are always VIP.
-4. Resolver synthesizes both assessments and calls `tool_submit_assignment` — picks the best delivery actor and explains why
+4. Dispatch Agent synthesizes both assessments and calls `tool_submit_assignment` — picks the best delivery actor and explains why
 5. Delivery actors continuously pick up from Frosty's and deliver to hotels, looping back for more
 
 **What to say:**
-> "This is a continuous fleet — orders keep coming in, agents keep reasoning. Every assignment is a multi-agent decision. Fleet Agent checks who's closest and has capacity. Customer Agent evaluates priority — that Mandalay Bay order is VIP. The Resolver weighs both and assigns. Each delivery actor runs in its own child workflow, picking up and delivering in a continuous loop."
+> "This is a continuous fleet — orders keep coming in, agents keep reasoning. Every assignment is a multi-agent decision. Fleet Agent checks who's closest and has capacity. Customer Agent evaluates priority — that Mandalay Bay order is VIP. The Dispatch Agent weighs both and assigns. Each delivery actor runs in its own child workflow, picking up and delivering in a continuous loop."
 
 **Before you demo, set up the Temporal UI:**
 - Open http://localhost:8233 in a separate browser tab
@@ -363,14 +363,14 @@ This traces a single order from button click to delivery — every function and 
 1. Click **Disconnect Agent** (Fleet Agent)
 2. Wait for the next order to trigger the ADK pipeline
 3. **Show the Temporal UI**: `tool_get_fleet_status` shows `ActivityTaskFailed` → retry → `ActivityTaskFailed` (2 attempts exhausted). Point out: *"Temporal tried the tool twice — you can see both attempts here"*
-4. The pipeline continues — `invoke_model` for the Resolver runs with the error context
+4. The pipeline continues — `invoke_model` for the Dispatch Agent runs with the error context
 5. `tool_submit_assignment` succeeds — assignment completed despite Fleet Agent failure
-6. Orders keep getting assigned — the Resolver adapts each time
+6. Orders keep getting assigned — the Dispatch Agent adapts each time
 7. Click **Reconnect Agent**
 8. **Show the Temporal UI**: next order's `tool_get_fleet_status` shows `ActivityTaskCompleted` — tools work again. *"Full assessment restored — the workflow picked up exactly where it left off"*
 
 **What to say:**
-> "Fleet Agent's tools are backed by Temporal activities. When the agent is disconnected, those activities fail — Temporal retries twice, then the error is returned to the LLM. The agent doesn't crash, it reasons about the failure. The Resolver sees the error and assigns based on Customer Agent data alone. When we reconnect, the next order's tools work normally. Two layers working together: Temporal retries the tool call, the LLM adapts to the failure."
+> "Fleet Agent's tools are backed by Temporal activities. When the agent is disconnected, those activities fail — Temporal retries twice, then the error is returned to the LLM. The agent doesn't crash, it reasons about the failure. The Dispatch Agent sees the error and assigns based on Customer Agent data alone. When we reconnect, the next order's tools work normally. Two layers working together: Temporal retries the tool call, the LLM adapts to the failure."
 
 **Temporal concept to highlight:** Per-tool-call retry (Temporal), LLM reasoning about tool failure (ADK), graceful degradation without pipeline crash
 

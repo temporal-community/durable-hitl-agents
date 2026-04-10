@@ -39,10 +39,10 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
   `GoogleAdkPlugin` is on both workflow and agents workers (sandbox + determinism on
   workflow side, `invoke_model` activity on agents side). `TemporalModel` uses
   `ActivityConfig(task_queue=AGENTS_QUEUE)` to route LLM calls to the agents worker.
-- **ADK agents** (`agents.py`): Fleet Agent + Customer Agent (parallel) → Resolver (sequential).
+- **ADK agents** (`agents.py`): Fleet Agent + Customer Agent (parallel) → Dispatch Agent (sequential).
   Live path runs ADK inline in the workflow via `_run_adk_assignment()`. No fallback to mock —
   if an activity fails, Temporal retries. Fleet Agent tools fail fast when disconnected (2 attempts),
-  error returned to LLM via `_activity_tool.py` catch — Resolver assigns with available data.
+  error returned to LLM via `_activity_tool.py` catch — Dispatch Agent assigns with available data.
   Agents don't call `tool_publish_agent_event` — workflow publishes short summary events to
   FleetState after ADK completes (summary from `output_key` fields).
 - **Mock mode** (`agent_fleet/mock/`): completely separate folder with its own `activities.py` and

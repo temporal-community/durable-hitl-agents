@@ -74,7 +74,7 @@ NAV_RETRY = RetryPolicy(
 )
 
 MAX_ORDERS = 20
-ORDER_INTERVAL_SECONDS = 15
+ORDER_INTERVAL_SECONDS = 10
 
 PARENT_WORKFLOW_ID = "meltdown-demo"
 DRIVER_CAPACITY = 3
@@ -507,12 +507,16 @@ class OrderGenerationWorkflow:
                 f"Order {order_num}/{inp.max_orders}: {order.order_id} signaled to parent"
             )
 
-            # Wait a randomized interval before next order (deterministic on replay)
+            # Wait before next order — first 3 orders come fast, then normal cadence
             if order_num < inp.max_orders:
-                base = inp.order_interval_seconds
-                jitter = int(workflow.random().random() * base * 0.6)  # 0–60% jitter
-                interval = base + jitter - int(base * 0.3)  # center around base
-                await workflow.sleep(timedelta(seconds=max(5, interval)))
+                if order_num <= 3:
+                    # Initial burst: 2s between first 3 orders to get multiple drivers moving
+                    await workflow.sleep(timedelta(seconds=2))
+                else:
+                    base = inp.order_interval_seconds
+                    jitter = int(workflow.random().random() * base * 0.6)  # 0–60% jitter
+                    interval = base + jitter - int(base * 0.3)  # center around base
+                    await workflow.sleep(timedelta(seconds=max(5, interval)))
 
         return f"Order generation complete — {inp.max_orders} orders generated"
 
@@ -628,7 +632,7 @@ class MeltdownDemoWorkflow:
     def _build_driver_snapshots(self) -> list[DriverSnapshot]:
         """Build driver snapshots from workflow state for activity inputs."""
         snapshots = []
-        for driver_id in ["driver-1", "driver-2", "driver-3"]:
+        for driver_id in ["driver-1", "driver-2", "driver-3", "driver-4", "driver-5"]:
             pos = self._driver_last_position.get(driver_id, (WAREHOUSE.lat, WAREHOUSE.lng))
             order_count = len(self._driver_orders.get(driver_id, []))
             snapshots.append(
@@ -651,14 +655,14 @@ class MeltdownDemoWorkflow:
         workflow.logger.info(f"Meltdown demo starting (escalation={inp.escalation_enabled})")
 
         # Initialize driver state
-        for i in range(1, 4):
+        for i in range(1, 6):
             driver_id = f"driver-{i}"
             self._driver_orders[driver_id] = []
             self._driver_last_position[driver_id] = (WAREHOUSE.lat, WAREHOUSE.lng)
 
-        # Start 3 driver child workflows
+        # Start 5 driver child workflows
         self._route_handles = {}
-        for i in range(1, 4):
+        for i in range(1, 6):
             driver_id = f"driver-{i}"
             handle = await workflow.start_child_workflow(
                 DriverRouteWorkflow.run,
@@ -814,14 +818,29 @@ class MeltdownDemoWorkflow:
                     "summary": _first_sentence(customer_output),
                 }
             )
+        # Extract order number from order_id (e.g. "order-3" → "3")
+        order_number = inp.order_id.split("-", 1)[-1] if "-" in inp.order_id else inp.order_id
+        hotel = inp.hotel
+
         events.append(
             {
                 "agent_name": "resolver",
                 "event_type": "plan",
-                "content": f"{driver_id} — {reasoning}",
-                "summary": f"Assigned {driver_id}",
+                "content": f"Order #{order_number} → {driver_id} — {hotel} — {reasoning}",
+                "summary": f"Order #{order_number} → {driver_id} — {hotel}",
             }
         )
+
+        # If Fleet Agent was disconnected, publish a Dispatch Agent note about the gap
+        if "fleet_agent" in inp.disconnected_agents:
+            events.append(
+                {
+                    "agent_name": "resolver",
+                    "event_type": "assessment",
+                    "content": "Fleet Agent offline — assigned with customer data only",
+                    "summary": "Fleet Agent offline — customer data only",
+                }
+            )
 
         workflow.logger.info(f"ADK assignment complete: {events_count} events, driver={driver_id}")
         return ReasonAboutAssignmentOutput(

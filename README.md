@@ -6,7 +6,7 @@ A conference demo showing **Google ADK** multi-agent reasoning with **Temporal**
   <img src=".github/assets/meltdown-snapshot.png" alt="Meltdown demo dashboard" width="900">
 </p>
 
-Orders auto-generate on a timer from Las Vegas Strip venues. **AI agents** (Fleet, Customer, Resolver) reason about each order — evaluating positions, capacity, and priority — then assign it to the best **delivery actor**. When things go wrong — delivery actor disconnects, agent failures, customer changes — Temporal ensures nothing is lost.
+Orders auto-generate on a timer from Las Vegas Strip venues. **AI agents** (Fleet, Customer, Dispatch Agent) reason about each order — evaluating positions, capacity, and priority — then assign it to the best **delivery actor**. When things go wrong — delivery actor disconnects, agent failures, customer changes — Temporal ensures nothing is lost.
 
 > **Terminology:** AI agents **reason** (LLM + tools, run inline via ADK). Delivery actors **execute** (child workflows that carry out routes). They are not Temporal workers.
 
@@ -14,7 +14,7 @@ Orders auto-generate on a timer from Las Vegas Strip venues. **AI agents** (Flee
 
 | Scenario | What Happens | What It Shows |
 |----------|-------------|---------------|
-| **Tool Degradation** | Take Fleet Agent offline | Fleet Agent's tools fail fast (2 retries), error returned to LLM — Resolver assigns with Customer Agent data only. Reconnect → tools succeed → full assessment resumes. Temporal shows retry attempts in the UI. |
+| **Tool Degradation** | Take Fleet Agent offline | Fleet Agent's tools fail fast (2 retries), error returned to LLM — Dispatch Agent assigns with Customer Agent data only. Reconnect → tools succeed → full assessment resumes. Temporal shows retry attempts in the UI. |
 | **Service Disruption & Recovery** | Take a delivery actor offline mid-delivery | Delivery actor completes current delivery but can't report back. Temporal retries with backoff until reconnected. Stays at hotel on the map — no teleporting. Reconnect → next retry succeeds → navigates home for next order. |
 | **Human-in-the-Loop (HITL)** | Submit an address change or cancellation mid-delivery | Workflow pauses on `wait_condition`, approves, signals delivery actor — reroutes mid-delivery to new destination. Cross-workflow coordination via signals. |
 
@@ -40,7 +40,7 @@ Orders auto-generate on a timer from Las Vegas Strip venues. **AI agents** (Flee
 │  │    │   inline (live mode)         │ │                              │
 │  │    ├─ OrderGenerationWorkflow     │ │  Sends signals only:         │
 │  │    │   child (timer + orders)     │ │  disconnect, reconnect,      │
-│  │    └─ DriverRouteWorkflow x3      │ │  customer change, start      │
+│  │    └─ DriverRouteWorkflow x5      │ │  customer change, start      │
 │  │        child workflows            │ │                              │
 │  └─ DriverRouteWorkflow              │ │  No workers, no FleetState   │
 │       ├─ owns disconnect state       │ └──────────────────────────────┘
@@ -68,7 +68,7 @@ Orders auto-generate on a timer from Las Vegas Strip venues. **AI agents** (Flee
 │       └─ Customer Agent              │
 │           tool_get_order_priorities  │
 │           google_search (grounding)  │
-│       Resolver →                     │
+│       Dispatch Agent →               │
 │         tool_submit_assignment       │
 │       TemporalModel(→AGENTS_QUEUE)   │
 └──────────────────────────────────────┘
@@ -83,7 +83,7 @@ Orders auto-generate on a timer from Las Vegas Strip venues. **AI agents** (Flee
 | **Tool call** (via `activity_tool`) | Each tool invocation → named Temporal activity, retryable + replayable |
 | **Entire agent pipeline** | Runs inline in the workflow via `_run_adk_assignment()` (live); as a single activity `reason_about_assignment` (mock) |
 
-Fleet Agent, Customer Agent, and Resolver are LLM Agents. The outer `order_assignment` pipeline is an Orchestrator Agent — it sequences them with no model of its own. Temporal never sees the orchestration logic; it only sees individual LLM calls and tool calls as discrete activities.
+Fleet Agent, Customer Agent, and Dispatch Agent are LLM Agents. The outer `order_assignment` pipeline is an Orchestrator Agent — it sequences them with no model of its own. Temporal never sees the orchestration logic; it only sees individual LLM calls and tool calls as discrete activities.
 
 ### Core mechanism — how ADK becomes durable
 
@@ -101,7 +101,7 @@ async for event in runner.run_async(
     events_count += 1
 ```
 
-A full multi-agent ADK pipeline (Fleet + Customer in parallel → Resolver) runs **inline inside a Temporal workflow**. Not as an external call — inside the workflow's execution context.
+A full multi-agent ADK pipeline (Fleet + Customer in parallel → Dispatch Agent) runs **inline inside a Temporal workflow**. Not as an external call — inside the workflow's execution context.
 
 **2. `GoogleAdkPlugin` intercepts every LLM and tool call** (`worker.py` → agents worker):
 
@@ -125,13 +125,13 @@ The plugin turns each Gemini inference and each tool invocation into a **separat
 |-------|-----------|-------|
 | **Fleet Agent** (operational) | Delivery actor positions, capacity (free slots), ETAs to destination, disconnect status — excludes unavailable actors | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps) |
 | **Customer Agent** (priority) | VIP vs standard tier, deadline pressure, hotel events (conferences, galas), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
-| **Resolver** (synthesis) | Weighs Fleet + Customer assessments, compensates if either agent is offline, picks final delivery actor | `tool_submit_assignment` |
+| **Dispatch Agent** (synthesis) | Weighs Fleet + Customer assessments, compensates if either agent is offline, picks final delivery actor | `tool_submit_assignment` |
 
-Fleet and Customer run **in parallel** (`ParallelAgent`), then the Resolver runs **sequentially** after both complete (`SequentialAgent`). All tools are wrapped with `activity_tool()` — each call is a Temporal activity, recorded in the event log. If the worker restarts mid-call, results replay from the log.
+Fleet and Customer run **in parallel** (`ParallelAgent`), then the Dispatch Agent runs **sequentially** after both complete (`SequentialAgent`). All tools are wrapped with `activity_tool()` — each call is a Temporal activity, recorded in the event log. If the worker restarts mid-call, results replay from the log.
 
 > **Note:** Gemini's built-in `google_search` grounding normally can't be combined with custom function tools in the same request. ADK's `GoogleSearchTool(bypass_multi_tools_limit=True)` enables this — the Customer Agent uses Google Search alongside `tool_get_order_priorities` in a single agent, no sub-agent needed.
 
-> **Agent disconnect resilience:** When Fleet Agent is disconnected, its tool activities (`tool_get_fleet_status`, `tool_get_route_info`) check FleetState and raise `RuntimeError`. Temporal retries (2 attempts, fast backoff via `_FLEET_TOOL_RETRY`). The `_activity_tool.py` wrapper catches the exhausted retry and returns an error string to the LLM — the agent reasons about the failure, and the Resolver assigns based on Customer Agent data alone. No pipeline crash.
+> **Agent disconnect resilience:** When Fleet Agent is disconnected, its tool activities (`tool_get_fleet_status`, `tool_get_route_info`) check FleetState and raise `RuntimeError`. Temporal retries (2 attempts, fast backoff via `_FLEET_TOOL_RETRY`). The `_activity_tool.py` wrapper catches the exhausted retry and returns an error string to the LLM — the agent reasons about the failure, and the Dispatch Agent assigns based on Customer Agent data alone. No pipeline crash.
 
 ### Mock mode
 
@@ -171,8 +171,8 @@ echo 'export GOOGLE_MAPS_API_KEY="your-maps-key"' >> .env  # optional, must be M
 
 ## Demo Flow
 
-1. **Start Deliveries** — Orders auto-generate every 15s. AI agents reason per-order and assign to the best delivery actor. Delivery actors continuously pick up from Frosty's Ice Cream and deliver.
-2. **Demo 1: Tool Degradation** — Take Fleet Agent offline → tools fail fast (2 retries) → error returned to LLM → Resolver assigns with Customer Agent data → reconnect → full reasoning resumes
+1. **Start Deliveries** — Orders auto-generate every 10s. AI agents reason per-order and assign to the best delivery actor. Delivery actors continuously pick up from Frosty's Ice Cream and deliver.
+2. **Demo 1: Tool Degradation** — Take Fleet Agent offline → tools fail fast (2 retries) → error returned to LLM → Dispatch Agent assigns with Customer Agent data → reconnect → full reasoning resumes
 3. **Demo 2: Service Disruption & Recovery** — Select a delivery actor → disconnect → finishes delivery, stays at hotel, can't report → Temporal retries with backoff → reconnect → next retry succeeds → navigates home
 4. **Demo 3: Human-in-the-Loop (HITL)** — Pick an active order → submit address change → workflow pauses for approval → approve → delivery actor reroutes mid-delivery to new destination
 
@@ -184,7 +184,7 @@ echo 'export GOOGLE_MAPS_API_KEY="your-maps-key"' >> .env  # optional, must be M
 | `agent_fleet/simulation.py` | FleetState — SQLite WAL-backed write-only UI projection (`fleet_state.db`, cross-process; used by mock activities only) |
 | `agent_fleet/activities.py` | Temporal activities — navigation, delivery, Maps API, agent tools |
 | `agent_fleet/workflows.py` | Temporal workflows — owns driver state, signals, queries, Temporal-native retry for disconnect. Includes `OrderGenerationWorkflow` |
-| `agent_fleet/agents.py` | ADK agent composition — Fleet, Customer, Assignment Resolver |
+| `agent_fleet/agents.py` | ADK agent composition — Fleet, Customer, Dispatch Agent |
 | `agent_fleet/config.py` | Centralized env config — `GOOGLE_API_KEY`, `GOOGLE_MAPS_API_KEY`, `DEFAULT_MODEL`, `TEMPORAL_ADDRESS` |
 | `agent_fleet/queues.py` | Task queue name constants (workflows / delivery / agents) |
 | `agent_fleet/worker.py` | Three Temporal workers — workflow-only, delivery, agents. Live/mock decision at startup |

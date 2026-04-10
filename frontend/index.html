@@ -125,6 +125,20 @@
     border-bottom-color: var(--temporal-uv);
     background: var(--surface-1);
   }
+  .tab-scenario {
+    display: block;
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+    color: #4b5563;
+    opacity: 0.7;
+    margin-top: 2px;
+  }
+  .tab-bar .tab.active .tab-scenario {
+    color: var(--temporal-uv);
+    opacity: 0.6;
+  }
   .tab-bar .status-area {
     margin-left: auto;
     display: flex;
@@ -385,6 +399,30 @@
   .agent-box.customer_agent { --agent-color: var(--adk-accent); }
   .agent-box.resolver { --agent-color: var(--google-green); }
 
+  /* Tool badges */
+  .agent-tool-badges {
+    display: flex;
+    gap: 5px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+  }
+  .tool-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 8px;
+    background: #1e2130;
+    color: #9ca3af;
+    border: 1px solid #2a2d3a;
+    letter-spacing: 0.3px;
+    transition: all 0.3s ease;
+  }
+  .agent-box.agent-offline .tool-badge {
+    background: #450a0a;
+    color: #f87171;
+    border-color: #7f1d1d;
+  }
+
   /* Phase separator in agent boxes */
   .phase-separator {
     text-align: center;
@@ -418,6 +456,12 @@
     font-style: italic;
     padding: 16px;
     text-align: center;
+  }
+
+  /* --- Driver cards scroll --- */
+  #crew-cards {
+    max-height: 210px;
+    overflow-y: auto;
   }
 
   /* --- Order & courier cards --- */
@@ -930,9 +974,9 @@
 </header>
 
 <div class="tab-bar">
-  <button class="tab active" data-tab="agent" onclick="switchTab('agent')">Agent Disconnect</button>
-  <button class="tab" data-tab="crew" onclick="switchTab('crew')">Crew Disconnect</button>
-  <button class="tab" data-tab="customer" onclick="switchTab('customer')">Customer Change</button>
+  <button class="tab active" data-tab="agent" onclick="switchTab('agent')">Agent Disconnect <span class="tab-scenario">Tool Degradation</span></button>
+  <button class="tab" data-tab="crew" onclick="switchTab('crew')">Crew Disconnect <span class="tab-scenario">Retries</span></button>
+  <button class="tab" data-tab="customer" onclick="switchTab('customer')">Customer Change <span class="tab-scenario">HITL</span></button>
   <div class="status-area">
     <div id="worker-status" class="worker-indicator online">
       <div class="worker-dot"></div>
@@ -946,9 +990,9 @@
     <select id="agent-disconnect-select" class="agent-select">
       <option value="fleet_agent">Fleet Agent</option>
       <option value="customer_agent">Customer Agent</option>
-      <option value="resolver">Resolver</option>
+      <option value="resolver">Dispatch Agent</option>
     </select>
-    <button class="btn" onclick="disconnectAgent()">Service Disconnect</button>
+    <button class="btn" onclick="disconnectAgent()">Agent Disconnect</button>
     <button class="btn btn-restart" onclick="reconnectAgent()">Reconnect</button>
     <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
   </div>
@@ -958,6 +1002,8 @@
       <option value="driver-1">Driver 1</option>
       <option value="driver-2">Driver 2</option>
       <option value="driver-3">Driver 3</option>
+      <option value="driver-4">Driver 4</option>
+      <option value="driver-5">Driver 5</option>
     </select>
     <button class="btn" onclick="disconnectCrew()">Service Lost</button>
     <button class="btn btn-restart" onclick="reconnectCrew()">Reconnect Crew</button>
@@ -983,7 +1029,7 @@
 <div class="left-panel">
   <!-- Agent Reasoning Panel -->
   <div class="panel-section agent-panel" id="section-agents">
-    <div class="section-label" onclick="toggleSection('section-agents')">Driver Fleet Intelligence</div>
+    <div class="section-label" onclick="toggleSection('section-agents')">ADK Agent Team</div>
     <div class="section-body">
       <div id="agent-events" class="agent-boxes">
         <div class="agent-box fleet_agent" id="agent-box-fleet_agent">
@@ -991,7 +1037,11 @@
             <div class="agent-box-icon" style="background:#1e3a5f;">F</div>
             <div>
               <div class="agent-box-name">Fleet Agent</div>
-              <div class="agent-box-role">Operations &amp; logistics</div>
+              <div class="agent-box-role">Fleet status, route ETAs</div>
+              <div class="agent-tool-badges">
+                <span class="tool-badge">Fleet Status</span>
+                <span class="tool-badge">Route Info</span>
+              </div>
             </div>
             <div class="agent-box-status waiting">Waiting</div>
           </div>
@@ -1002,7 +1052,11 @@
             <div class="agent-box-icon" style="background:#3d1f5e;">C</div>
             <div>
               <div class="agent-box-name">Customer Agent</div>
-              <div class="agent-box-role">Priorities &amp; deadlines</div>
+              <div class="agent-box-role">Order priorities, hotel events</div>
+              <div class="agent-tool-badges">
+                <span class="tool-badge">Order Priorities</span>
+                <span class="tool-badge">Google Search</span>
+              </div>
             </div>
             <div class="agent-box-status waiting">Waiting</div>
           </div>
@@ -1010,10 +1064,13 @@
         </div>
         <div class="agent-box resolver" id="agent-box-resolver">
           <div class="agent-box-header">
-            <div class="agent-box-icon" style="background:#1a3a1a;">R</div>
+            <div class="agent-box-icon" style="background:#1a3a1a;">D</div>
             <div>
-              <div class="agent-box-name">Resolver</div>
-              <div class="agent-box-role">Synthesize &amp; recommend</div>
+              <div class="agent-box-name">Dispatch Agent</div>
+              <div class="agent-box-role">Weighs both, assigns driver</div>
+              <div class="agent-tool-badges">
+                <span class="tool-badge">Submit Assignment</span>
+              </div>
             </div>
             <div class="agent-box-status waiting">Waiting</div>
           </div>
@@ -1180,6 +1237,14 @@ const CREW_COLORS = {
   disconnected: '#ef4444',
 };
 
+const DRIVER_COLORS = {
+  'driver-1': '#3b82f6',
+  'driver-2': '#22c55e',
+  'driver-3': '#a855f7',
+  'driver-4': '#FF8C00',
+  'driver-5': '#00CED1',
+};
+
 // --- Sign tooltips ---
 function vegasSign(name, sub) {
   return `<div class="vegas-sign">
@@ -1285,23 +1350,24 @@ function updateCrews(crews) {
     prevPositions[c.driver_id] = { pos, bearing };
 
     const isDisconnected = c.disconnected || c.status === 'disconnected';
+    const driverColor = DRIVER_COLORS[c.driver_id] || color;
     if (!crewMarkers[c.driver_id]) {
-      crewMarkers[c.driver_id] = L.marker(pos, { icon: crewIcon(color, isDisconnected, bearing) }).addTo(map);
+      crewMarkers[c.driver_id] = L.marker(pos, { icon: crewIcon(driverColor, isDisconnected, bearing) }).addTo(map);
       crewMarkers[c.driver_id].bindTooltip(c.driver_id, { direction: 'top', offset: [0, -24] });
       crewTrails[c.driver_id] = L.polyline([], {
-        color, weight: 2, opacity: 0.4, dashArray: '4 6',
+        color: driverColor, weight: 2, opacity: 0.4, dashArray: '4 6',
       }).addTo(map);
     } else {
       crewMarkers[c.driver_id].setLatLng(pos);
-      crewMarkers[c.driver_id].setIcon(crewIcon(color, isDisconnected, bearing));
+      crewMarkers[c.driver_id].setIcon(crewIcon(driverColor, isDisconnected, bearing));
     }
 
-    if (c.status === 'idle') {
-      // Clear trail after delivery completes
-      crewTrails[c.driver_id].setLatLngs([]);
-    } else if (c.path_history && c.path_history.length > 0) {
+    const delivering = ['en_route_delivery', 'delivering'].includes(c.status);
+    if (delivering && c.path_history && c.path_history.length > 0) {
       crewTrails[c.driver_id].setLatLngs(c.path_history.map(p => [p.lat, p.lng]));
-      crewTrails[c.driver_id].setStyle({ color });
+      crewTrails[c.driver_id].setStyle({ color: driverColor });
+    } else {
+      crewTrails[c.driver_id].setLatLngs([]);
     }
   });
 
@@ -1324,9 +1390,11 @@ function updateOrders(orders) {
   container.innerHTML = Object.values(orders).map(o => {
     const priorityClass = o.priority === 'vip' ? 'priority-vip' : 'priority-standard';
     const lastLog = o.status_log.length > 0 ? o.status_log[o.status_log.length - 1] : '';
+    const orderNum = o.order_id.replace(/^order-/, '#');
     return `
       <div class="card">
         <h3>
+          <span style="font-size:17px;font-weight:800;color:#e0e0e0;margin-right:2px;">${orderNum}</span>
           <span class="${priorityClass}">${o.priority.toUpperCase()}</span>
           ${o.hotel}
           <span class="status-pill status-${o.status}">${o.status.replace(/_/g, ' ')}</span>
