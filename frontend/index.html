@@ -955,9 +955,9 @@
   <div class="tab-panel" id="panel-crew">
     <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
     <select id="crew-disconnect-select" class="crew-select">
-      <option value="ai-driver-1">AI-Driver 1</option>
-      <option value="ai-driver-2">AI-Driver 2</option>
-      <option value="ai-driver-3">AI-Driver 3</option>
+      <option value="driver-1">Driver 1</option>
+      <option value="driver-2">Driver 2</option>
+      <option value="driver-3">Driver 3</option>
     </select>
     <button class="btn" onclick="disconnectCrew()">Service Lost</button>
     <button class="btn btn-restart" onclick="reconnectCrew()">Reconnect Crew</button>
@@ -983,7 +983,7 @@
 <div class="left-panel">
   <!-- Agent Reasoning Panel -->
   <div class="panel-section agent-panel" id="section-agents">
-    <div class="section-label" onclick="toggleSection('section-agents')">AI-Driver Fleet Intelligence</div>
+    <div class="section-label" onclick="toggleSection('section-agents')">Driver Fleet Intelligence</div>
     <div class="section-body">
       <div id="agent-events" class="agent-boxes">
         <div class="agent-box fleet_agent" id="agent-box-fleet_agent">
@@ -1026,7 +1026,7 @@
   <!-- Couriers + Orders (middle, compact) -->
   <div class="mid-sections">
     <div class="panel-section collapsed" id="section-couriers">
-      <div class="section-label" onclick="toggleSection('section-couriers')">AI-Drivers</div>
+      <div class="section-label" onclick="toggleSection('section-couriers')">Drivers</div>
       <div class="section-body">
         <div id="crew-cards"></div>
       </div>
@@ -1051,7 +1051,7 @@
 <div id="map"></div>
 
 <div id="crew-disconnect-banner" class="crew-disconnect-banner">
-  <div class="banner-text"><span id="crew-banner-text">AI-Driver Disconnected</span></div>
+  <div class="banner-text"><span id="crew-banner-text">Driver Disconnected</span></div>
   <div class="banner-sub"><span id="crew-banner-sub">Other drivers continue delivering. Temporal will retry when reconnected.</span></div>
 </div>
 
@@ -1207,6 +1207,8 @@ function retroSign(name) {
 
 // --- Load locations ---
 let DESTINATIONS = {};
+let _rerouteDestination = null;
+let _rerouteMarker = null;
 async function loadLocations() {
   const res = await fetch('/api/locations');
   const data = await res.json();
@@ -1227,8 +1229,23 @@ async function loadLocations() {
       permanent: true, direction: 'top', className: 'map-label', offset: [0, -10],
     });
   });
+
+  // Reroute destination (Cosmopolitan) — marker shown only during customer change
+  if (data.reroute_destination) {
+    _rerouteDestination = data.reroute_destination;
+  }
 }
 loadLocations();
+
+function showRerouteMarker() {
+  if (_rerouteMarker || !_rerouteDestination) return;
+  const d = _rerouteDestination;
+  _rerouteMarker = L.circleMarker([d.lat, d.lng], {
+    radius: 7, fillColor: '#a855f7', color: '#a855f7', fillOpacity: 0.3, weight: 2,
+  }).addTo(map).bindTooltip(vegasSign(d.label, 'Reroute'), {
+    permanent: true, direction: 'top', className: 'map-label', offset: [0, -10],
+  });
+}
 
 // --- State tracking ---
 const crewMarkers = {};
@@ -1315,7 +1332,7 @@ function updateOrders(orders) {
           <span class="status-pill status-${o.status}">${o.status.replace(/_/g, ' ')}</span>
         </h3>
         <div class="detail">${o.label} &middot; ${o.servings} servings</div>
-        <div class="detail">AI-Driver: ${o.assigned_driver_id || 'unassigned'} &middot; Deadline: ${o.deadline_minutes}min</div>
+        <div class="detail">Driver: ${o.assigned_driver_id || 'unassigned'} &middot; Deadline: ${o.deadline_minutes}min</div>
         ${lastLog ? `<div class="detail" style="color: #9ca3af;">${lastLog}</div>` : ''}
       </div>
     `;
@@ -1513,21 +1530,16 @@ async function submitCustomerChange() {
 
   let body = { order_id: orderId, change_type: changeType };
   if (changeType === 'address_change') {
-    // Reroute to a different hotel than the current destination
-    const venues = [
-      { name: 'MGM Grand', lat: 36.1024, lng: -115.1725 },
-      { name: 'Caesars Palace', lat: 36.1162, lng: -115.1745 },
-      { name: 'Mandalay Bay', lat: 36.0919, lng: -115.1761 },
-    ];
-    // Pick a random venue that isn't the current order's hotel
-    const orderSelect = document.getElementById('change-order');
-    const orderText = orderSelect.options[orderSelect.selectedIndex]?.text || '';
-    const otherVenues = venues.filter(v => !orderText.includes(v.name));
-    const dest = otherVenues[Math.floor(Math.random() * otherVenues.length)] || venues[0];
-    body.new_details = `${orderId} rerouted to ${dest.name}`;
+    // Always reroute to The Cosmopolitan (loaded from /api/locations)
+    const dest = _rerouteDestination;
+    if (!dest) { alert('Reroute destination not loaded'); return; }
+    body.new_details = `${orderId} rerouted to ${dest.hotel}`;
     body.new_lat = dest.lat;
     body.new_lng = dest.lng;
-    _pendingChangeDetails = `rerouted to ${dest.name}`;
+    body.new_hotel = dest.hotel;
+    _pendingChangeDetails = `rerouted to ${dest.hotel}`;
+    // Show Cosmopolitan marker on the map if not already visible
+    showRerouteMarker();
   } else {
     body.new_details = `${orderId} cancelled by customer`;
     _pendingChangeDetails = 'order cancelled';

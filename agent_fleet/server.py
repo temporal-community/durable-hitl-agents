@@ -32,7 +32,7 @@ from temporalio.service import RPCError
 load_dotenv()
 
 from agent_fleet.config import TEMPORAL_ADDRESS
-from agent_fleet.locations import VENUES, WAREHOUSE, WAREHOUSE_LABEL
+from agent_fleet.locations import COSMOPOLITAN, VENUES, WAREHOUSE, WAREHOUSE_LABEL
 from agent_fleet.models import (
     AgentDisconnectInput,
     CustomerChangeInput,
@@ -59,10 +59,10 @@ async def _cancel_running_workflows() -> None:
     """Best-effort terminate of known workflow IDs."""
     if _temporal_client is None:
         return
-    # Terminate main workflow and all AI-Driver routes
+    # Terminate main workflow and all Driver routes
     workflow_ids = ["meltdown-demo"]
     for i in range(1, 4):
-        workflow_ids.append(f"route-ai-driver-{i}")
+        workflow_ids.append(f"route-driver-{i}")
     for wf_id in workflow_ids:
         try:
             handle = _temporal_client.get_workflow_handle(wf_id)
@@ -136,7 +136,7 @@ async def reset_demo():
 
 
 class DriverDisconnectRequest(BaseModel):
-    driver_id: str = "ai-driver-1"
+    driver_id: str = "driver-1"
 
 
 @app.post("/api/disconnect-crew")
@@ -169,7 +169,7 @@ async def disconnect_driver(body: DriverDisconnectRequest):
     return {
         "status": "driver_disconnected",
         "driver_id": body.driver_id,
-        "message": f"AI-Driver {body.driver_id} disconnected. Other drivers continue delivering.",
+        "message": f"Driver {body.driver_id} disconnected. Other drivers continue delivering.",
     }
 
 
@@ -211,7 +211,7 @@ async def reconnect_driver(body: DriverDisconnectRequest):
         "status": "driver_reconnected",
         "driver_id": body.driver_id,
         "message": (
-            f"AI-Driver {body.driver_id} reconnecting. "
+            f"Driver {body.driver_id} reconnecting. "
             f"Temporal replaying — driver will resume delivery."
         ),
     }
@@ -277,6 +277,7 @@ class CustomerChangeRequest(BaseModel):
     new_details: str = ""
     new_lat: float | None = None
     new_lng: float | None = None
+    new_hotel: str | None = None
 
 
 @app.post("/api/customer-change")
@@ -291,6 +292,7 @@ async def submit_customer_change(body: CustomerChangeRequest):
         new_details=body.new_details,
         new_lat=body.new_lat,
         new_lng=body.new_lng,
+        new_hotel=body.new_hotel,
     )
 
     try:
@@ -377,6 +379,12 @@ async def get_locations():
                 "hotel": venue["hotel"],
             }
             for venue in VENUES
+        },
+        "reroute_destination": {
+            "hotel": COSMOPOLITAN["hotel"],
+            "lat": COSMOPOLITAN["coords"].lat,
+            "lng": COSMOPOLITAN["coords"].lng,
+            "label": COSMOPOLITAN["map_label"],
         },
     }
 

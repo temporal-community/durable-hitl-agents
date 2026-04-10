@@ -88,7 +88,7 @@ async def tool_submit_assignment(
     """Submit the final order assignment decision. You MUST call this tool with your recommendation.
 
     Args:
-        driver_id: The AI-Driver ID to assign the order to (e.g. "ai-driver-1")
+        driver_id: The Driver ID to assign the order to (e.g. "driver-1")
         reasoning_summary: Brief explanation of why this driver was chosen
     """
     tool_context.state["assignment"] = {
@@ -113,12 +113,12 @@ def create_assignment_fleet_agent() -> Agent:
             ),
         ),
         description=(
-            "Operational fleet specialist for order assignment. Assesses AI-Driver "
+            "Operational fleet specialist for order assignment. Assesses Driver "
             "positions, capacity, cooler status, and ETAs to recommend the best driver."
         ),
         instruction=(
             "You are the Fleet Operations AI for Meltdown Ice Cream Delivery. "
-            "A new order has arrived — assess which AI-Driver should handle it.\n\n"
+            "A new order has arrived — assess which Driver should handle it.\n\n"
             "Call tool_get_fleet_status for fleet state, then tool_get_route_info "
             "to compare ETAs to the delivery destination.\n\n"
             "Rules:\n"
@@ -126,7 +126,7 @@ def create_assignment_fleet_agent() -> Agent:
             "- Skip drivers at capacity (no free slots)\n"
             "- Prefer the closest driver with capacity\n\n"
             "Respond with ONLY: the recommended driver ID and ETA. "
-            "Example: 'ai-driver-2 — 4min ETA, closest with capacity.' "
+            "Example: 'driver-2 — 4min ETA, closest with capacity.' "
             "No preamble, no comparisons of other drivers."
         ),
         tools=[_fleet_status_tool, _route_info_tool],
@@ -196,7 +196,7 @@ def create_assignment_resolver() -> Agent:
             "- NEVER assign to a DISCONNECTED driver\n"
             "- If an agent is offline, compensate with available data\n\n"
             "You MUST call tool_submit_assignment with:\n"
-            "- driver_id: the AI-Driver that should get this order\n"
+            "- driver_id: the Driver that should get this order\n"
             "- reasoning_summary: one sentence explaining the decision\n\n"
             "Keep reasoning_summary under 20 words."
         ),

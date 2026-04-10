@@ -86,7 +86,7 @@ DRIVER_CAPACITY = 3
 @workflow.defn
 class DriverRouteWorkflow:
     """
-    Continuous delivery loop for a single AI-Driver.
+    Continuous delivery loop for a single Driver.
 
     Waits for orders via signal, picks up at the shop, delivers to hotel,
     then returns to waiting. Loops until told to stop.
@@ -444,7 +444,7 @@ class DriverRouteWorkflow:
             self._status = "idle"
             self._path_history.clear()
 
-        return f"AI-Driver {driver_id} completed {len(delivered)} deliveries: {delivered}"
+        return f"Driver {driver_id} completed {len(delivered)} deliveries: {delivered}"
 
 
 # --- Order generation child workflow ---
@@ -628,7 +628,7 @@ class MeltdownDemoWorkflow:
     def _build_driver_snapshots(self) -> list[DriverSnapshot]:
         """Build driver snapshots from workflow state for activity inputs."""
         snapshots = []
-        for driver_id in ["ai-driver-1", "ai-driver-2", "ai-driver-3"]:
+        for driver_id in ["driver-1", "driver-2", "driver-3"]:
             pos = self._driver_last_position.get(driver_id, (WAREHOUSE.lat, WAREHOUSE.lng))
             order_count = len(self._driver_orders.get(driver_id, []))
             snapshots.append(
@@ -652,14 +652,14 @@ class MeltdownDemoWorkflow:
 
         # Initialize driver state
         for i in range(1, 4):
-            driver_id = f"ai-driver-{i}"
+            driver_id = f"driver-{i}"
             self._driver_orders[driver_id] = []
             self._driver_last_position[driver_id] = (WAREHOUSE.lat, WAREHOUSE.lng)
 
         # Start 3 driver child workflows
         self._route_handles = {}
         for i in range(1, 4):
-            driver_id = f"ai-driver-{i}"
+            driver_id = f"driver-{i}"
             handle = await workflow.start_child_workflow(
                 DriverRouteWorkflow.run,
                 DriverRouteInput(driver_id=driver_id),
@@ -980,6 +980,7 @@ class MeltdownDemoWorkflow:
                     change_type=change.change_type,
                     new_lat=change.new_lat,
                     new_lng=change.new_lng,
+                    new_hotel=change.new_hotel,
                 ),
                 task_queue=DELIVERY_QUEUE,
                 summary=f"Resolver — execute change for {change.order_id}",

@@ -86,13 +86,13 @@ async def test_driver_route_completes_with_signal(env: WorkflowEnvironment):
         delivery_coords=venue["coords"],
         deadline_minutes=30,
     )
-    await fleet.assign_order_to_driver("ai-driver-1", "order-1")
+    await fleet.assign_order_to_driver("driver-1", "order-1")
 
     async with run_delivery_workers(env):
         handle = await env.client.start_workflow(
             DriverRouteWorkflow.run,
-            DriverRouteInput(driver_id="ai-driver-1"),
-            id="test-route-ai-driver-1",
+            DriverRouteInput(driver_id="driver-1"),
+            id="test-route-driver-1",
             task_queue=WORKFLOWS_QUEUE,
         )
 
@@ -110,7 +110,7 @@ async def test_driver_route_completes_with_signal(env: WorkflowEnvironment):
         await handle.signal(DriverRouteWorkflow.stop)
 
         result = await handle.result()
-        assert "ai-driver-1" in result
+        assert "driver-1" in result
         assert "1 deliveries" in result or "completed" in result.lower()
 
 
@@ -128,12 +128,12 @@ async def test_driver_route_handles_multiple_orders(env: WorkflowEnvironment):
             delivery_coords=venue["coords"],
             deadline_minutes=30,
         )
-        await fleet.assign_order_to_driver("ai-driver-1", f"order-{i}")
+        await fleet.assign_order_to_driver("driver-1", f"order-{i}")
 
     async with run_delivery_workers(env):
         handle = await env.client.start_workflow(
             DriverRouteWorkflow.run,
-            DriverRouteInput(driver_id="ai-driver-1"),
+            DriverRouteInput(driver_id="driver-1"),
             id="test-route-multi",
             task_queue=WORKFLOWS_QUEUE,
         )

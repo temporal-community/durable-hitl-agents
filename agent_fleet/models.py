@@ -256,6 +256,7 @@ class CustomerChangeInput:
     new_details: str
     new_lat: float | None = None
     new_lng: float | None = None
+    new_hotel: str | None = None
 
 
 @dataclass
@@ -264,6 +265,7 @@ class ExecuteCustomerChangeInput:
     change_type: str
     new_lat: float | None = None
     new_lng: float | None = None
+    new_hotel: str | None = None
 
 
 @dataclass

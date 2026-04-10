@@ -15,7 +15,7 @@ This guide is for anyone presenting the Meltdown demo. It covers setup, the one-
 
 **Terminology note:** This demo has two distinct actor types:
 - **AI Agents** (Fleet Agent, Customer Agent, Resolver) — these **reason**. They call LLMs, use tools, and make decisions about order assignment. Each runs inline in the workflow via ADK.
-- **Delivery actors** (AI-Driver 1, 2, 3) — these **execute**. They receive orders via signals and follow a fixed route: pickup → navigate → deliver → return. Each runs in its own child workflow (`DriverRouteWorkflow`). They don't reason — they carry out the agents' decisions.
+- **Delivery actors** (Driver 1, 2, 3) — these **execute**. They receive orders via signals and follow a fixed route: pickup → navigate → deliver → return. Each runs in its own child workflow (`DriverRouteWorkflow`). They don't reason — they carry out the agents' decisions.
 
 In Temporal terms, the delivery actors are **child workflows**. They are not Temporal workers (infrastructure) and not AI agents (reasoning).
 
@@ -119,14 +119,14 @@ The workflows connect through signals in both directions:
 OrderGenerationWorkflow fires on timer
   → signals parent MeltdownDemoWorkflow with new order
   → MeltdownDemoWorkflow builds DriverSnapshots from workflow state
-  → runs ADK inline (_run_adk_assignment) → "give this to AI-Driver 2"
+  → runs ADK inline (_run_adk_assignment) → "give this to Driver 2"
   → updates self._driver_orders, sends add_order signal to DriverRouteWorkflow
   → DriverRouteWorkflow executes the delivery
   → on completion, signals parent with order_delivered
 ```
 
 The key design principles:
-- **Child workflows give you fault isolation.** Each delivery actor runs independently. If AI-Driver 1 hits an error, 2 and 3 keep running.
+- **Child workflows give you fault isolation.** Each delivery actor runs independently. If Driver 1 hits an error, 2 and 3 keep running.
 - **Workflows own state, activities are pure.** Activities receive everything they need as inputs — they never read shared state for decision-making. The server queries workflows directly for the frontend.
 - **Disconnect uses Temporal retry.** Activities check FleetState for disconnect (simulates network unreachability), fail, and Temporal retries with backoff. The delivery actor finishes its delivery but can't report back. No workflow-side cancellation or polling — just the standard Temporal retry mechanism.
 
@@ -341,7 +341,7 @@ This traces a single order from button click to delivery — every function and 
 **Before you demo, set up the Temporal UI:**
 - Open http://localhost:8233 in a separate browser tab
 - Search for `meltdown-demo` — this is the parent workflow
-- Also open `route-ai-driver-1` in another tab — this shows a delivery actor's child workflow
+- Also open `route-driver-1` in another tab — this shows a delivery actor's child workflow
 - After starting deliveries, you'll see activities streaming in: `generate_order`, `invoke_model` (LLM calls), `tool_get_fleet_status`, `tool_submit_assignment`, etc.
 - Point out how each agent's LLM call and tool call shows up as a separate activity with a summary label — *"Every reasoning step is individually durable and visible"*
 
@@ -382,9 +382,9 @@ This traces a single order from button click to delivery — every function and 
 **Setup:** Start deliveries. Wait until at least one delivery actor is en route to a hotel.
 
 **Before disconnecting, set up the Temporal UI:**
-- Open the child workflow for the delivery actor you'll disconnect (e.g., `route-ai-driver-1`) in a Temporal UI tab
+- Open the child workflow for the delivery actor you'll disconnect (e.g., `route-driver-1`) in a Temporal UI tab
 - Position it side by side with the demo dashboard so the audience can see both
-- Also open another delivery actor's workflow (e.g., `route-ai-driver-2`) to show it's unaffected
+- Also open another delivery actor's workflow (e.g., `route-driver-2`) to show it's unaffected
 
 **Steps:**
 1. In the Failure Modes panel, select a delivery actor and click **Service Lost**
@@ -408,24 +408,24 @@ This traces a single order from button click to delivery — every function and 
 ### Demo 3: Human-in-the-Loop (HITL) — Customer Change with Mid-Delivery Reroute
 **Time: 2–3 min | Best for: showing signals, workflow waiting, and cross-workflow coordination**
 
-**Setup:** Start deliveries. Wait for a driver to be en route to a hotel (actively delivering).
+**Setup:** Start deliveries. Wait for a delivery actor to be en route to a hotel (actively delivering).
 
 **Steps:**
-1. In the Customer Changes panel, the dropdown shows **active orders with their assigned driver** — pick one that's currently being delivered
-2. Select "Address Change" and click **Submit Change Request**
-3. The workflow is now paused, waiting for approval — show this in Temporal UI
-4. Click **Approve** — the parent signals the driver's child workflow with `update_order`
-5. Watch the map: the driver **finishes its current navigation leg**, then **reroutes to the new destination** — you'll see it recalculate and drive to a different hotel
-6. For cancellation: select "Cancel Order" → Approve → the driver skips delivery and returns to base
+1. In the Customer Changes panel, the dropdown shows **active orders with their assigned delivery actor** — pick one that's currently being delivered
+2. Select "Address Change" and click **Submit Change Request** — this always reroutes to **The Cosmopolitan**, which appears as a new marker on the map
+3. The workflow received the request and is holding it — waiting for approval. Meanwhile, orders keep generating and deliveries continue.
+4. Click **Approve** — the parent signals the delivery actor's child workflow with `update_order`
+5. Watch the map: the delivery actor **finishes its current navigation leg**, then **reroutes to The Cosmopolitan** — a new marker appears and the order card updates to show the new hotel
+6. For cancellation: select "Cancel Order" → Approve → the delivery actor skips delivery and returns to base
 
 **What to say:**
-> "The workflow is paused here — waiting for a human signal. No polling, no timeout. When we approve, two things happen: the parent workflow executes the change, then signals the driver's child workflow. If the driver is mid-delivery, it finishes the current leg then reroutes — you can see it calculating a new path to the updated destination. If we cancel, the driver skips delivery entirely. All of this is cross-workflow coordination via signals — durable and recoverable."
+> "The workflow received the change request and is holding it in memory — waiting for the approval signal. Meanwhile, everything else keeps running: orders generate, agents reason, deliveries complete. When the approval arrives, the workflow picks up exactly where it left off and executes the change. No polling loop, no database check — just `wait_condition`. Two things happen: the parent workflow executes the change, then signals the delivery actor's child workflow. The delivery actor finishes the current leg then reroutes to The Cosmopolitan — you can see the new marker appear and the order card update. All of this is cross-workflow coordination via signals — durable and recoverable."
 
 **What you'll see in Temporal UI:**
-- `meltdown-demo` workflow: `WorkflowExecutionSignaled` (`customer_change`) → history pauses → `WorkflowExecutionSignaled` (`change_approved`) → `execute_customer_change` activity → signal sent to child
-- `route-ai-driver-X` workflow: `WorkflowExecutionSignaled` (`update_order`) → new `get_route_polyline` and `navigate_to` activities as the driver reroutes
-- Point to the gap in the parent event log: *"This silence is the workflow waiting. No polling. No timer. Temporal holds state until the signal arrives — seconds or days."*
-- Point to the child workflow: *"The driver got the update and rerouted mid-delivery. Two workflows coordinating via signals — all durable."*
+- `meltdown-demo` workflow: `WorkflowExecutionSignaled` (`customer_change`) → `WorkflowExecutionSignaled` (`change_approved`) → `execute_customer_change` activity → signal sent to child
+- `route-driver-X` workflow: `WorkflowExecutionSignaled` (`update_order`) → new `get_route_polyline` and `navigate_to` activities as the delivery actor reroutes to The Cosmopolitan
+- The parent workflow stays busy between those signals — orders keep generating, agents keep reasoning. The `wait_condition` pauses only the customer-change code path, not the whole workflow.
+- Point to the child workflow: *"The delivery actor got the update and rerouted mid-delivery. Two workflows coordinating via signals — all durable."*
 
 **Temporal concept to highlight:** Signals, `wait_condition`, cross-workflow signaling, mid-delivery reroute
 

@@ -126,7 +126,7 @@ class FleetState:
     async def _seed_initial_state(self) -> None:
         conn = self._conn
         for i in range(1, 4):
-            did = f"ai-driver-{i}"
+            did = f"driver-{i}"
             await conn.execute(
                 "INSERT OR IGNORE INTO drivers (driver_id, lat, lng) VALUES (?, ?, ?)",
                 (did, WAREHOUSE.lat, WAREHOUSE.lng),
@@ -170,7 +170,7 @@ class FleetState:
             "status='disconnected' WHERE driver_id=?",
             (driver_id,),
         )
-        await self._log_event(conn, f"[DISCONNECT] AI-Driver {driver_id} lost connection")
+        await self._log_event(conn, f"[DISCONNECT] Driver {driver_id} lost connection")
         await conn.commit()
 
     async def reconnect_driver(self, driver_id: str) -> None:
@@ -182,7 +182,7 @@ class FleetState:
             (driver_id,),
         )
         await self._log_event(
-            conn, f"[RECONNECT] AI-Driver {driver_id} reconnecting — replaying..."
+            conn, f"[RECONNECT] Driver {driver_id} reconnecting — replaying..."
         )
         await conn.commit()
 
@@ -193,7 +193,7 @@ class FleetState:
             "UPDATE drivers SET recovering=0 WHERE driver_id=?",
             (driver_id,),
         )
-        await self._log_event(conn, f"[RECONNECT] AI-Driver {driver_id} replay complete — resumed")
+        await self._log_event(conn, f"[RECONNECT] Driver {driver_id} replay complete — resumed")
         await conn.commit()
 
     async def is_driver_disconnected(self, driver_id: str) -> bool:
@@ -257,7 +257,7 @@ class FleetState:
         await conn.execute(
             "UPDATE drivers SET status=? WHERE driver_id=?", (status.value, driver_id)
         )
-        await self._log_event(conn, f"AI-Driver {driver_id} -> {status.value}")
+        await self._log_event(conn, f"Driver {driver_id} -> {status.value}")
         await conn.commit()
 
     async def get_driver_position(self, driver_id: str) -> tuple[float, float]:
@@ -447,16 +447,28 @@ class FleetState:
                 result.append(row["order_id"])
         return result
 
-    async def update_order_delivery(self, order_id: str, new_lat: float, new_lng: float) -> None:
-        """Update delivery coordinates for an order (customer change)."""
+    async def update_order_delivery(
+        self, order_id: str, new_lat: float, new_lng: float, new_hotel: str | None = None
+    ) -> None:
+        """Update delivery coordinates (and optionally hotel) for an order (customer change)."""
         conn = await self._get_conn()
-        await conn.execute(
-            "UPDATE orders SET delivery_lat=?, delivery_lng=? WHERE order_id=?",
-            (new_lat, new_lng, order_id),
-        )
+        if new_hotel:
+            # Update hotel, coordinates, and append reroute to label
+            await conn.execute(
+                "UPDATE orders SET delivery_lat=?, delivery_lng=?, hotel=?, "
+                "label=label || ' → ' || ? WHERE order_id=?",
+                (new_lat, new_lng, new_hotel, new_hotel, order_id),
+            )
+            note = f"Rerouted to {new_hotel}"
+        else:
+            await conn.execute(
+                "UPDATE orders SET delivery_lat=?, delivery_lng=? WHERE order_id=?",
+                (new_lat, new_lng, order_id),
+            )
+            note = f"Delivery address updated to ({new_lat:.4f}, {new_lng:.4f})"
         await conn.execute(
             "INSERT INTO order_status_log (order_id, message) VALUES (?, ?)",
-            (order_id, f"Delivery address updated to ({new_lat:.4f}, {new_lng:.4f})"),
+            (order_id, note),
         )
         await conn.commit()
 
@@ -640,7 +652,7 @@ class FleetState:
                 lines.append(
                     f"  {row['order_id']}: {row['hotel']} ({row['label']}), "
                     f"priority={row['priority']}, status={row['status']}, "
-                    f"AI-Driver={row['assigned_driver_id'] or 'unassigned'}, "
+                    f"Driver={row['assigned_driver_id'] or 'unassigned'}, "
                     f"deadline={row['deadline_minutes']}min"
                 )
 

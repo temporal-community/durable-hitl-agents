@@ -43,6 +43,13 @@ VENUES: list[dict] = [
 # Venues indexed by hotel name for quick lookup
 VENUES_BY_HOTEL: dict[str, dict] = {v["hotel"]: v for v in VENUES}
 
+# Reroute-only destination — only appears on the map during customer change demos
+COSMOPOLITAN = {
+    "hotel": "The Cosmopolitan",
+    "coords": Coords(lat=36.1098, lng=-115.1743),
+    "map_label": "Cosmopolitan",
+}
+
 
 def generate_random_order(order_number: int) -> dict:
     """Generate a random order from the venue pool.

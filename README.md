@@ -85,6 +85,36 @@ Orders auto-generate on a timer from Las Vegas Strip venues. **AI agents** (Flee
 
 Fleet Agent, Customer Agent, and Resolver are LLM Agents. The outer `order_assignment` pipeline is an Orchestrator Agent — it sequences them with no model of its own. Temporal never sees the orchestration logic; it only sees individual LLM calls and tool calls as discrete activities.
 
+### Core mechanism — how ADK becomes durable
+
+The entire demo hinges on two pieces of code working together:
+
+**1. ADK Runner executes inside a Temporal workflow** (`workflows.py` → `_run_adk_assignment()`):
+
+```python
+runner = Runner(agent=agent, app_name="meltdown_demo", session_service=session_service)
+
+async for event in runner.run_async(
+    user_id="workflow", session_id=session.id,
+    new_message=Content(parts=[Part(text=prompt)]),
+):
+    events_count += 1
+```
+
+A full multi-agent ADK pipeline (Fleet + Customer in parallel → Resolver) runs **inline inside a Temporal workflow**. Not as an external call — inside the workflow's execution context.
+
+**2. `GoogleAdkPlugin` intercepts every LLM and tool call** (`worker.py` → agents worker):
+
+```python
+Worker(
+    client, task_queue=AGENTS_QUEUE,
+    activities=[register_assignment, tool_get_fleet_status, ...],
+    plugins=[GoogleAdkPlugin()],
+)
+```
+
+The plugin turns each Gemini inference and each tool invocation into a **separate Temporal activity** — recorded in the event log, retryable, and replayable. Without it, ADK agents are ephemeral Python; with it, every reasoning step has Temporal's durability guarantees. If the worker crashes mid-reasoning, the workflow replays from the event log and resumes exactly where it left off.
+
 **Two processes**: `run.sh` starts a worker process and a server process (plus Temporal dev server). The server queries Temporal workflows for state (`_build_snapshot_from_queries()`) and sends signals only — no workers, no FleetState reads. Workers run three Temporal workers on three task queues.
 
 **3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs only workflows (no activities) — dedicated to replay. `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). `TemporalModel` uses `ActivityConfig(task_queue=AGENTS_QUEUE)` to route LLM calls to the agents worker.

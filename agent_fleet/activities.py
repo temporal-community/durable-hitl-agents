@@ -2,7 +2,7 @@
 Temporal activities for the Meltdown ice cream delivery demo.
 
 Each activity is a discrete, retryable unit of work. Activities handle:
-- AI-Driver navigation with heartbeats
+- Driver navigation with heartbeats
 - Order pickup/delivery
 - Fleet status queries (for LLM agents)
 - Customer change execution
@@ -122,7 +122,7 @@ async def get_route_polyline(
 
 @activity.defn
 async def tool_get_fleet_status() -> str:
-    """Check current fleet state: AI-Driver positions, cooler conditions, orders.
+    """Check current fleet state: Driver positions, cooler conditions, orders.
 
     Fails when Fleet Agent is disconnected — Temporal retries until reconnected.
     """
@@ -149,7 +149,7 @@ async def tool_get_route_info(
 
     Fails when Fleet Agent is disconnected — Temporal retries until reconnected.
     Returns distance, duration, and step-by-step directions.
-    Use this to assess reroute feasibility and ETAs for AI-Driver dispatching.
+    Use this to assess reroute feasibility and ETAs for Driver dispatching.
     Failures propagate to Temporal's retry mechanism.
 
     Args:
@@ -247,7 +247,7 @@ async def register_assignment(driver_id: str, order_id: str) -> str:
 @activity.defn
 async def navigate_to(inp: NavigateInput) -> NavigateOutput:
     """
-    Simulate AI-Driver navigation by interpolating position over N steps.
+    Simulate Driver navigation by interpolating position over N steps.
 
     The driver always completes navigation (truck keeps moving on the road).
     Disconnect is checked at start (fail-fast on retry while still disconnected)
@@ -256,7 +256,7 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
     """
     # Fail-fast on retry if still disconnected — don't re-drive the whole route
     if await fleet.is_driver_disconnected(inp.driver_id):
-        raise RuntimeError(f"AI-Driver {inp.driver_id} still disconnected — waiting for reconnect")
+        raise RuntimeError(f"Driver {inp.driver_id} still disconnected — waiting for reconnect")
 
     leg = inp.leg if isinstance(inp.leg, str) else str(inp.leg)
     status = (
@@ -335,7 +335,7 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
             f"{inp.driver_id} arrived at {leg} but is disconnected — cannot report"
         )
         raise RuntimeError(
-            f"AI-Driver {inp.driver_id} arrived but is disconnected — cannot check in"
+            f"Driver {inp.driver_id} arrived but is disconnected — cannot check in"
         )
 
     activity.logger.info(
@@ -364,7 +364,7 @@ async def pickup_orders(inp: PickupInput) -> PickupOutput:
 
     # Pickup done — but can't report if disconnected
     if await fleet.is_driver_disconnected(inp.driver_id):
-        raise RuntimeError(f"AI-Driver {inp.driver_id} picked up but cannot report — disconnected")
+        raise RuntimeError(f"Driver {inp.driver_id} picked up but cannot report — disconnected")
 
     activity.logger.info(f"{inp.driver_id} picked up orders {inp.order_ids}")
     return PickupOutput(driver_id=inp.driver_id, success=True)
@@ -389,7 +389,7 @@ async def deliver_order(inp: DeliverInput) -> DeliverOutput:
 
     # Delivery done — but can't report if disconnected
     if await fleet.is_driver_disconnected(inp.driver_id):
-        raise RuntimeError(f"AI-Driver {inp.driver_id} delivered but cannot report — disconnected")
+        raise RuntimeError(f"Driver {inp.driver_id} delivered but cannot report — disconnected")
 
     activity.logger.info(f"{inp.driver_id} delivered {inp.order_id}")
     return DeliverOutput(driver_id=inp.driver_id, order_id=inp.order_id, success=True)
@@ -439,9 +439,11 @@ async def execute_customer_change(
     elif (
         inp.change_type == "address_change" and inp.new_lat is not None and inp.new_lng is not None
     ):
-        await fleet.update_order_delivery(inp.order_id, inp.new_lat, inp.new_lng)
-        activity.logger.info(
-            f"Order {inp.order_id} delivery updated to ({inp.new_lat:.4f}, {inp.new_lng:.4f})"
+        await fleet.update_order_delivery(inp.order_id, inp.new_lat, inp.new_lng, inp.new_hotel)
+        await fleet.update_order_status(
+            inp.order_id, OrderStatus.REROUTED, f"Rerouted to {inp.new_hotel or 'new address'}"
         )
+        dest = inp.new_hotel or f"({inp.new_lat:.4f}, {inp.new_lng:.4f})"
+        activity.logger.info(f"Order {inp.order_id} rerouted to {dest}")
 
     return ExecuteCustomerChangeOutput(success=True)
