@@ -382,23 +382,19 @@ async def mock_reason_about_assignment(
         offline_agents.append("Customer Agent")
 
     best_label = _driver_label(best_driver)
+    order_number = inp.order_id.split("-", 1)[-1] if "-" in inp.order_id else inp.order_id
+    reasoning = f"ETA ~{best_eta}min"
     if offline_agents:
         offline_list = " and ".join(offline_agents)
         if fleet_agent_offline and customer_agent_offline:
-            resolver_context = f"Degraded — {offline_list} offline. Best-effort."
+            reasoning = f"Degraded — {offline_list} offline. Best-effort, ETA ~{best_eta}min"
         elif fleet_agent_offline:
-            resolver_context = "Degraded — Fleet Agent offline. Using last-known positions."
+            reasoning = f"Fleet offline, last-known positions, ETA ~{best_eta}min"
         else:
-            resolver_context = "Degraded — Customer Agent offline. Using order metadata."
-        resolver_summary = f"Assigned {best_label} (degraded)"
-    else:
-        resolver_context = ""
-        resolver_summary = f"Assigned to {best_label}"
+            reasoning = f"Customer offline, using order metadata, ETA ~{best_eta}min"
 
-    resolver_body = ""
-    if resolver_context:
-        resolver_body += resolver_context + "\n"
-    resolver_body += f"{best_label} -> {inp.hotel}, ETA ~{best_eta}min."
+    resolver_body = f"Order #{order_number} → {best_label} — {inp.hotel} — {reasoning}"
+    resolver_summary = f"Order #{order_number} → {best_label} — {inp.hotel}"
 
     _collect_event(
         "resolver",
@@ -412,6 +408,21 @@ async def mock_reason_about_assignment(
         resolver_body,
         summary=resolver_summary,
     )
+
+    # Acknowledge Fleet Agent gap if disconnected
+    if fleet_agent_offline:
+        _collect_event(
+            "resolver",
+            "assessment",
+            "Fleet Agent offline — assigned with customer data only",
+            summary="Fleet Agent offline — customer data only",
+        )
+        await fleet.publish_agent_event(
+            "resolver",
+            "assessment",
+            "Fleet Agent offline — assigned with customer data only",
+            summary="Fleet Agent offline — customer data only",
+        )
 
     # Register assignment in fleet state (UI projection)
     await fleet.assign_order_to_driver(best_driver, inp.order_id)

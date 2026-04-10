@@ -31,7 +31,7 @@ from temporalio.service import RPCError
 
 load_dotenv()
 
-from agent_fleet.config import TEMPORAL_ADDRESS
+from agent_fleet.config import GOOGLE_API_KEY, TEMPORAL_ADDRESS
 from agent_fleet.locations import COSMOPOLITAN, VENUES, WAREHOUSE, WAREHOUSE_LABEL
 from agent_fleet.models import (
     AgentDisconnectInput,
@@ -106,7 +106,10 @@ async def start_demo():
         try:
             handle = await _temporal_client.start_workflow(
                 MeltdownDemoWorkflow.run,
-                MeltdownDemoInput(escalation_enabled=_escalation_enabled),
+                MeltdownDemoInput(
+                    escalation_enabled=_escalation_enabled,
+                    use_mock_assignment=not bool(GOOGLE_API_KEY),
+                ),
                 id="meltdown-demo",
                 task_queue=WORKFLOWS_QUEUE,
                 static_summary="Meltdown — ice cream fleet orchestrator",

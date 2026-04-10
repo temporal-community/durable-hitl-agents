@@ -543,6 +543,7 @@ class MeltdownDemoWorkflow:
         self._pending_approvals: list[bool] = []
         self._pending_new_orders: list[OrderAssignmentResult] = []
         self._routes_done: bool = False
+        self._use_mock_assignment: bool = False
         self._disconnected_drivers: set[str] = set()
         self._disconnected_agents: set[str] = set()
         # Workflow-owned driver state
@@ -653,6 +654,7 @@ class MeltdownDemoWorkflow:
     @workflow.run
     async def run(self, inp: MeltdownDemoInput) -> str:
         workflow.logger.info(f"Meltdown demo starting (escalation={inp.escalation_enabled})")
+        self._use_mock_assignment = inp.use_mock_assignment
 
         # Initialize driver state
         for i in range(1, 6):
@@ -898,7 +900,17 @@ class MeltdownDemoWorkflow:
             disconnected_agents=list(self._disconnected_agents),
         )
 
-        assignment = await self._run_adk_assignment(assignment_input)
+        if self._use_mock_assignment:
+            assignment = await workflow.execute_activity(
+                "reason_about_assignment",
+                assignment_input,
+                task_queue=AGENTS_QUEUE,
+                summary=f"Mock resolver — assign {order.order_id}",
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=FAST_RETRY,
+            )
+        else:
+            assignment = await self._run_adk_assignment(assignment_input)
         await workflow.execute_activity(
             register_assignment,
             args=[assignment.driver_id, order.order_id],

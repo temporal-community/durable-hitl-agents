@@ -347,6 +347,7 @@ class AgentDisconnectInput:
 class MeltdownDemoInput:
     escalation_enabled: bool = False
     max_orders: int = 20
+    use_mock_assignment: bool = False
 
 
 @dataclass
