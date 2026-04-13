@@ -425,6 +425,11 @@
     color: #f87171;
     border-color: #7f1d1d;
   }
+  .tool-badge.badge-offline {
+    background: #450a0a;
+    color: #f87171;
+    border-color: #7f1d1d;
+  }
 
   /* Phase separator in agent boxes */
   .phase-separator {
@@ -993,7 +998,6 @@
     <select id="agent-disconnect-select" class="agent-select">
       <option value="fleet_agent">Fleet Agent</option>
       <option value="customer_agent">Customer Agent</option>
-      <option value="resolver">Dispatch Agent</option>
     </select>
     <button class="btn" onclick="disconnectAgent()">Agent Disconnect</button>
     <button class="btn btn-restart" onclick="reconnectAgent()">Reconnect</button>
@@ -1072,7 +1076,8 @@
               <div class="agent-box-name">Dispatch Agent</div>
               <div class="agent-box-role">Weighs both, assigns driver</div>
               <div class="agent-tool-badges">
-                <span class="tool-badge">Submit Assignment</span>
+                <span class="tool-badge" id="dispatch-badge-fleet">Fleet Agent</span>
+                <span class="tool-badge" id="dispatch-badge-customer">Customer Agent</span>
               </div>
             </div>
             <div class="agent-box-status waiting">Waiting</div>
@@ -1455,6 +1460,16 @@ function updateAgentEvents(events, agentHealth) {
         box.classList.remove('agent-offline');
       }
     });
+
+    // Dispatch Agent dependency badges — reflect upstream agent health
+    const fleetBadge = document.getElementById('dispatch-badge-fleet');
+    const customerBadge = document.getElementById('dispatch-badge-customer');
+    if (fleetBadge) {
+      fleetBadge.classList.toggle('badge-offline', agentHealth.fleet_agent === false);
+    }
+    if (customerBadge) {
+      customerBadge.classList.toggle('badge-offline', agentHealth.customer_agent === false);
+    }
   }
 
   // Group events by agent

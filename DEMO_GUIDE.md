@@ -80,7 +80,7 @@ Use this framing at the start of the talk before any demo:
 
 This is the "aha" moment. The alternative — running ADK inside a single activity — would make the entire agent pipeline one retry unit. If it fails halfway through, everything restarts from scratch. The inline pattern gives you **per-call durability**: each LLM call and each tool call is independently durable, retryable, and visible in the Temporal UI. This is what `TemporalModel` and `activity_tool` from the `temporalio[google-adk]` package were built for.
 
-Return to this when showing the Temporal UI event history — each `invoke_model` and tool call has a summary showing which agent is acting.
+Return to this when showing the Temporal UI event history — each `invoke_model` and tool call has a context-aware summary showing the agent, order number, and what data is being processed (e.g., `[#6] Fleet Agent — LLM reasoning on fleet data`, `[#6] Fleet Agent — assess ETA — driver-3 → MGM Grand`).
 
 ---
 
@@ -163,18 +163,19 @@ Fleet Agent and Customer Agent run in parallel (ADK handles that). Then the Disp
 
 A common question from engineers: "where are the Temporal activities defined for each agent's LLM call and tool call?" The answer is they aren't — they're injected automatically by two wrappers:
 
-- **`TemporalModel(DEFAULT_MODEL, activity_config=...)`** — when you set this as an agent's model, every LLM call that agent makes is automatically executed as a Temporal `invoke_model` activity routed to the agents queue. You don't write the activity. The wrapper does it. ADK supports other models too — swap `DEFAULT_MODEL` for any supported provider.
-- **`activity_tool(tool_get_fleet_status, ...)`** — when you wrap a tool function this way, every time an agent calls that tool it executes as a Temporal activity. Again, no explicit activity definition needed. Our local [`_activity_tool.py`](agent_fleet/_activity_tool.py) adds two fixes over the upstream version: correct multi-arg handling, and **graceful failure** — when an activity exhausts its retry policy, the error is returned as a string to the LLM instead of crashing the pipeline. This is how Fleet Agent disconnect works: tools fail fast (2 retries), the LLM sees the error, and the Dispatch Agent assigns without fleet data.
+- **`DemoTemporalModel(DEFAULT_MODEL, activity_config=...)`** — subclass of `TemporalModel` (in [`_demo_model.py`](agent_fleet/_demo_model.py)) that generates context-aware summaries for the Temporal UI. Every LLM call becomes an `invoke_model` activity with a summary like `[#6] Fleet Agent — LLM reasoning on fleet data` instead of generic "LLM reasoning." Also strips null fields from LLM payloads to reduce workflow history size. ADK supports other models too — swap `DEFAULT_MODEL` for any supported provider.
+- **`activity_tool(tool_get_fleet_status, ...)`** — when you wrap a tool function this way, every time an agent calls that tool it executes as a Temporal activity with a dynamic summary (e.g., `Fleet Agent — assess ETA — driver-3 → MGM Grand`). Our local [`_activity_tool.py`](agent_fleet/_activity_tool.py) adds three enhancements over the upstream version: correct multi-arg handling, **graceful failure** (error returned to LLM instead of crashing the pipeline), and **dynamic summaries** from tool arguments. This is how Fleet Agent disconnect works: tools fail fast (2 retries), the LLM sees the error, and the Dispatch Agent assigns without fleet data.
 
 So when Fleet Agent calls Gemini and then calls `tool_get_fleet_status`, both of those are Temporal activities — durable, retryable, and recorded in the event log — purely by inheritance from the wrappers. This is the `temporalio[google-adk]` integration doing its job.
 
 Here's exactly what this looks like in [`agent_fleet/agents.py`](agent_fleet/agents.py):
 
 ```python
-# Each agent gets TemporalModel — LLM calls become invoke_model activities automatically
+# Each agent gets DemoTemporalModel — LLM calls become invoke_model activities
+# with context-aware summaries (order #, agent name, tool data being processed)
 fleet_agent = Agent(
     name="assignment_fleet_agent",
-    model=TemporalModel(
+    model=DemoTemporalModel(
         DEFAULT_MODEL,
         activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),  # route to agents worker
     ),
@@ -207,11 +208,11 @@ The demo runs three Temporal workers in a **separate worker process** (`python -
 
 | Queue | Worker | What it runs |
 |---|---|---|
-| `meltdown-workflows` | Workflows only | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow` — no activities, dedicated to replay |
+| `meltdown-workflows` | Workflows + local activities | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow` + `publish_agent_event` (local activity for UI projection) |
 | `meltdown-delivery` | Delivery | `navigate_to`, `pickup_orders`, `deliver_order`, `generate_order`, `execute_customer_change`, `get_route_polyline`, `get_fleet_status`, `get_order_priorities`, `publish_agent_event` |
 | `meltdown-agents` | Agents | `register_assignment`, `tool_get_fleet_status`, `tool_get_order_priorities`, `tool_get_route_info` + `google_search` (Gemini grounding) |
 
-**Why a workflows-only worker?** Workflows must be deterministic and replayable. Keeping them on a dedicated worker with no activities makes it physically impossible for workflow code to touch `FleetState` (SQLite WAL-backed, `fleet_state.db`) or do I/O. This is the Temporal-idiomatic pattern for production deployments.
+**Why a dedicated workflow worker?** Workflows must be deterministic and replayable. The workflow worker registers only `publish_agent_event` as a local activity (lightweight UI projection — writes to `FleetState` with minimal history footprint). All other I/O runs on the delivery and agents workers. This is the Temporal-idiomatic pattern for production deployments.
 
 **Why separate activity queues?** LLM calls are slow — a single Gemini call can take 3–5 seconds. Without queue separation, a flood of assignment requests could fill all worker slots and starve navigation activities, causing drivers to miss heartbeat timeouts. The agents queue is rate-limited to 5 concurrent activities; the delivery queue runs 20.
 
@@ -221,10 +222,11 @@ The three workers are set up in [`agent_fleet/worker.py`](agent_fleet/worker.py)
 
 ```python
 def create_workflow_worker(client: Client) -> Worker:
-    """Workflow-only worker — no activities, dedicated to replay."""
+    """Workflow worker with local activity support for UI projection."""
     return Worker(client, task_queue=WORKFLOWS_QUEUE,
                   workflows=[MeltdownDemoWorkflow, DriverRouteWorkflow,
                              OrderGenerationWorkflow],
+                  activities=[publish_agent_event, publish_agent_events_batch],
                   plugins=[GoogleAdkPlugin()])  # sandbox + determinism for replay
 
 def create_agents_worker(client: Client) -> Worker:

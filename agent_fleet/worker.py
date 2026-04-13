@@ -33,6 +33,7 @@ from agent_fleet.activities import (
     navigate_to,
     pickup_orders,
     publish_agent_event,
+    publish_agent_events_batch,
     register_assignment,
     tool_get_fleet_status,
     tool_get_order_priorities,
@@ -52,15 +53,17 @@ logging.getLogger("temporalio.workflow").setLevel(logging.WARNING)
 
 
 def create_workflow_worker(client: Client) -> Worker:
-    """Workflow-only worker — no activities, dedicated to replay.
+    """Workflow worker with local activity support for UI projection.
 
     GoogleAdkPlugin is needed here for sandbox passthroughs (google.adk,
     google.genai) and deterministic runtime (uuid, time) during replay.
+    publish_agent_event registered for local activity execution.
     """
     return Worker(
         client,
         task_queue=WORKFLOWS_QUEUE,
         workflows=[MeltdownDemoWorkflow, DriverRouteWorkflow, OrderGenerationWorkflow],
+        activities=[publish_agent_event, publish_agent_events_batch],
         plugins=[GoogleAdkPlugin()],
     )
 

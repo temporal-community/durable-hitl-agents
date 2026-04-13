@@ -35,16 +35,22 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
 - **FleetState** (`simulation.py`): SQLite WAL-backed UI projection. Backed by `fleet_state.db`
   for cross-process sharing — activities in the worker write positions/statuses, server reads
   for the frontend WebSocket. In production this would be Redis or Postgres.
-- **3-queue workers** (`worker.py`): workflows-only (no activities), delivery, agents.
+- **3-queue workers** (`worker.py`): workflows + local activities, delivery, agents.
   `GoogleAdkPlugin` is on both workflow and agents workers (sandbox + determinism on
-  workflow side, `invoke_model` activity on agents side). `TemporalModel` uses
-  `ActivityConfig(task_queue=AGENTS_QUEUE)` to route LLM calls to the agents worker.
+  workflow side, `invoke_model` activity on agents side). `DemoTemporalModel` (subclass of
+  `TemporalModel` in `_demo_model.py`) generates context-aware summaries for the Temporal UI
+  and strips null fields from LLM payloads. **Note:** `DemoTemporalModel` is a temporary
+  subclass — we've requested these features (dynamic `summary_fn`, null stripping, agent
+  name in default summary) be added to the upstream `TemporalModel`. If accepted, revert
+  `agents.py` to use `TemporalModel` directly and delete `_demo_model.py`. Same applies to
+  `_activity_tool.py` dynamic summaries. `publish_agent_event` is registered on the
+  workflow worker for local activity execution (UI projection with minimal history).
 - **ADK agents** (`agents.py`): Fleet Agent + Customer Agent (parallel) → Dispatch Agent (sequential).
   Live path runs ADK inline in the workflow via `_run_adk_assignment()`. No fallback to mock —
   if an activity fails, Temporal retries. Fleet Agent tools fail fast when disconnected (2 attempts),
   error returned to LLM via `_activity_tool.py` catch — Dispatch Agent assigns with available data.
-  Agents don't call `tool_publish_agent_event` — workflow publishes short summary events to
-  FleetState after ADK completes (summary from `output_key` fields).
+  Workflow publishes short summary events to FleetState via batched local activity after ADK
+  completes (summary from `output_key` fields).
 - **Mock mode** (`agent_fleet/mock/`): completely separate folder with its own `activities.py` and
   `worker.py`. Live code has zero mock awareness. Decision at startup: `GOOGLE_API_KEY` set → live
   workers, not set → mock workers. Mock activities use `name=` overrides to match live activity names.

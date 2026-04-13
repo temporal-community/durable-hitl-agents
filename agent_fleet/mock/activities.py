@@ -180,6 +180,7 @@ async def mock_tool_get_route_info(
     destination_lat: float,
     destination_lng: float,
     destination_name: str = "",
+    origin_name: str = "",
 ) -> str:
     """Deterministic mock route info using distance calculation."""
     dlat = destination_lat - origin_lat

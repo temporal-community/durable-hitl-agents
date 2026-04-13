@@ -144,6 +144,7 @@ async def tool_get_route_info(
     destination_lat: float,
     destination_lng: float,
     destination_name: str = "",
+    origin_name: str = "",
 ) -> str:
     """Get driving route info between two points using Google Maps Directions API.
 
@@ -158,6 +159,7 @@ async def tool_get_route_info(
         destination_lat: Destination latitude
         destination_lng: Destination longitude
         destination_name: Human-readable name of the destination (e.g. "MGM Grand")
+        origin_name: Human-readable name of the origin (e.g. "driver-3")
     """
     if await fleet.is_agent_disconnected("fleet_agent"):
         raise RuntimeError("Fleet Agent is disconnected — tool unavailable")
@@ -422,6 +424,18 @@ async def publish_agent_event(
     await fleet.publish_agent_event(
         inp.agent_name, inp.event_type, inp.content, summary=inp.summary
     )
+    return PublishAgentEventOutput(success=True)
+
+
+@activity.defn
+async def publish_agent_events_batch(
+    events: list[PublishAgentEventInput],
+) -> PublishAgentEventOutput:
+    """Publish multiple agent events in a single activity call."""
+    for evt in events:
+        await fleet.publish_agent_event(
+            evt.agent_name, evt.event_type, evt.content, summary=evt.summary
+        )
     return PublishAgentEventOutput(success=True)
 
 
