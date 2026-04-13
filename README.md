@@ -18,6 +18,54 @@ Orders auto-generate on a timer from Las Vegas Strip venues. **AI agents** (Flee
 | **Service Disruption & Recovery** | Take a delivery actor offline mid-delivery | Delivery actor completes current delivery but can't report back. Temporal retries with backoff until reconnected. Stays at hotel on the map — no teleporting. Reconnect → next retry succeeds → navigates home for next order. |
 | **Human-in-the-Loop (HITL)** | Submit an address change or cancellation mid-delivery | Workflow pauses on `wait_condition`, approves, signals delivery actor — reroutes mid-delivery to new destination. Cross-workflow coordination via signals. |
 
+## Quick Start
+
+You'll need two keys to get the demo to run: `GOOGLE_API_KEY` and `GOOGLE_MAPS_API_KEY`.
+
+If you don't have them, skip down to [Obtain API Keys](#obtain-api-keys) and come back.
+
+### 0. Install
+Run the following to get things installed:
+
+```
+# Grab the code.
+git clone https://github.com/temporal-community/ice-cream-fleet-demo
+cd ice-cream-fleet-demo
+
+# Rename .env file.
+mv .env.example .env
+```
+
+### 1. Set API keys
+Replace the `GOOGLE_*_KEY` placeholder text in `.env` with your actual keys.
+
+```
+echo 'export GOOGLE_API_KEY="your-gemini-key"' > .env
+echo 'export GOOGLE_MAPS_API_KEY="your-maps-key"' >> .env  # optional, must be Maps-enabled
+```
+
+### 2. Run
+The `run.sh` script sets up your Python environment, installs dependencies, and gets Temporal running.
+
+```bash
+./run.sh    # starts Temporal dev server + worker process + server process
+```
+
+### 3. Open the dashboard
+
+| Interface | URL |
+|-----------|-----|
+| **Demo dashboard** | http://localhost:8080 |
+| **Temporal UI** (workflow history, event log) | http://localhost:8233 |
+
+## Demo Flow
+
+1. **Start Deliveries** — Orders auto-generate every 10s. AI agents reason per-order and assign to the best delivery actor. Delivery actors continuously pick up from Frosty's Ice Cream and deliver.
+2. **Demo 1: Tool Degradation** — Take Fleet Agent offline → tools fail fast (2 retries) → error returned to LLM → Dispatch Agent assigns with Customer Agent data → reconnect → full reasoning resumes
+3. **Demo 2: Service Disruption & Recovery** — Select a delivery actor → disconnect → finishes delivery, stays at hotel, can't report → Temporal retries with backoff → reconnect → next retry succeeds → navigates home
+4. **Demo 3: Human-in-the-Loop (HITL)** — Pick an active order → submit address change → workflow pauses for approval → approve → delivery actor reroutes mid-delivery to new destination
+
+
 ## Architecture
 
 ```
@@ -146,36 +194,6 @@ Mock mode is completely separate from live code. The `agent_fleet/mock/` folder 
 
 The startup decision is binary: `GOOGLE_API_KEY` set → live workers (ADK + all API activities), not set → mock workers (deterministic data, no LLM calls). Default model is `gemini-2.5-flash` (override with `DEFAULT_MODEL` env var).
 
-## Quick Start
-
-### 1. Install and configure
-
-```bash
-pip install -e ".[dev]"
-echo 'export GOOGLE_API_KEY="your-gemini-key"' > .env
-echo 'export GOOGLE_MAPS_API_KEY="your-maps-key"' >> .env  # optional, must be Maps-enabled
-```
-
-### 2. Run
-
-```bash
-./run.sh    # starts Temporal dev server + worker process + server process
-```
-
-### 3. Open the dashboard
-
-| Interface | URL |
-|-----------|-----|
-| **Demo dashboard** | http://localhost:8080 |
-| **Temporal UI** (workflow history, event log) | http://localhost:8233 |
-
-## Demo Flow
-
-1. **Start Deliveries** — Orders auto-generate every 10s. AI agents reason per-order and assign to the best delivery actor. Delivery actors continuously pick up from Frosty's Ice Cream and deliver.
-2. **Demo 1: Tool Degradation** — Take Fleet Agent offline → tools fail fast (2 retries) → error returned to LLM → Dispatch Agent assigns with Customer Agent data → reconnect → full reasoning resumes
-3. **Demo 2: Service Disruption & Recovery** — Select a delivery actor → disconnect → finishes delivery, stays at hotel, can't report → Temporal retries with backoff → reconnect → next retry succeeds → navigates home
-4. **Demo 3: Human-in-the-Loop (HITL)** — Pick an active order → submit address change → workflow pauses for approval → approve → delivery actor reroutes mid-delivery to new destination
-
 ## Key Files
 
 | File | What it does |
@@ -201,3 +219,64 @@ make fmt     # ruff format (write)
 make test    # pytest
 make run     # start the demo
 ```
+### Obtain API keys
+
+#### Google Gemini API Key
+1. Go to [Google AI Studio](https://aistudio.google.com/) > [API Keys](https://aistudio.google.com/api-keys) and sign in with your Google account.
+2. Click **Create API key**. Select an existing Google Cloud project or create a new one when prompted.
+3. To test that the key is working (replace `PASTE_KEY_HERE`):
+
+```
+curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent" \
+  -H 'Content-Type: application/json' \
+  -H 'X-goog-api-key: PASTE_KEY_HERE' \
+  -X POST \
+  -d '{
+    "contents": [
+      {
+        "parts": [
+          {
+            "text": "Explain how AI works in a few words"
+          }
+        ]
+      }
+    ]
+  }'
+```
+If you get a bunch of JSON back, you're in business!
+
+#### Google Maps API Key
+
+1. Make sure the **Directions API** is enabled: go to[Google Cloud Console](console.cloud.google.com) > [APIs & Services](https://console.cloud.google.com/apis/dashboard), search for it, and click **Enable**.
+2. Go to [Google Cloud Console](console.cloud.google.com) > [APIs & Services](https://console.cloud.google.com/apis/dashboard) > [Credentials](https://console.cloud.google.com/apis/credentials) and select your project.
+3. Click **+ Create credentials → API key.** A new key is generated immediately.
+4. Click **Edit API key** (pencil icon). Under _API restrictions_, select **Restrict key** and choose **Directions API**.
+
+## Troubleshooting
+
+### When I tested my Google Gemini API key, there was an error.
+
+If you something like this instead, double check that you've copied your key correctly:
+
+```
+  "error": {
+    "code": 400,
+    "message": "API key not valid. Please pass a valid API key.",
+    "status": "INVALID_ARGUMENT",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "API_KEY_INVALID",
+        "domain": "googleapis.com",
+        "metadata": {
+          "service": "generativelanguage.googleapis.com"
+        }
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.LocalizedMessage",
+        "locale": "en-US",
+        "message": "API key not valid. Please pass a valid API key."
+      }
+    ]
+  }
+  ```
