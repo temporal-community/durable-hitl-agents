@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS orders (
     delivery_lng REAL NOT NULL,
     assigned_driver_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
-    deadline_minutes INTEGER NOT NULL DEFAULT 45
+    deadline_minutes INTEGER NOT NULL DEFAULT 45,
+    degraded INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS order_status_log (
@@ -125,8 +126,8 @@ class FleetState:
 
     async def _seed_initial_state(self) -> None:
         conn = self._conn
-        for i in range(1, 6):
-            did = f"driver-{i}"
+        for letter in ['a', 'b', 'c', 'd', 'e']:
+            did = f"driver-{letter}"
             await conn.execute(
                 "INSERT OR IGNORE INTO drivers (driver_id, lat, lng) VALUES (?, ?, ?)",
                 (did, WAREHOUSE.lat, WAREHOUSE.lng),
@@ -371,20 +372,25 @@ class FleetState:
         await self._log_event(conn, f"New order {order_id}: {label}")
         await conn.commit()
 
-    async def assign_order_to_driver(self, driver_id: str, order_id: str) -> None:
+    async def assign_order_to_driver(
+        self, driver_id: str, order_id: str, *, degraded: bool = False
+    ) -> None:
         """Assign a single order to a driver."""
         conn = await self._get_conn()
         await conn.execute(
-            "UPDATE orders SET assigned_driver_id=?, status=? WHERE order_id=?",
-            (driver_id, OrderStatus.ASSIGNED.value, order_id),
+            "UPDATE orders SET assigned_driver_id=?, status=?, degraded=? WHERE order_id=?",
+            (driver_id, OrderStatus.ASSIGNED.value, 1 if degraded else 0, order_id),
         )
         await conn.execute(
             "INSERT OR IGNORE INTO driver_orders (driver_id, order_id) VALUES (?, ?)",
             (driver_id, order_id),
         )
+        msg = f"Assigned to {driver_id}"
+        if degraded:
+            msg += " (degraded — no fleet visibility)"
         await conn.execute(
             "INSERT INTO order_status_log (order_id, message) VALUES (?, ?)",
-            (order_id, f"Assigned to {driver_id}"),
+            (order_id, msg),
         )
         await self._log_event(conn, f"Order {order_id} assigned to {driver_id}")
         await conn.commit()
@@ -576,6 +582,7 @@ class FleetState:
                     "assigned_driver_id": row["assigned_driver_id"],
                     "status": row["status"],
                     "deadline_minutes": row["deadline_minutes"],
+                    "degraded": bool(row["degraded"]),
                     "status_log": status_log,
                 }
 

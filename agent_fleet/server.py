@@ -59,18 +59,18 @@ async def _cancel_running_workflows() -> None:
     """Best-effort terminate of known workflow IDs."""
     if _temporal_client is None:
         return
-    # Terminate main workflow and all Driver routes
-    workflow_ids = ["meltdown-demo"]
-    for i in range(1, 4):
-        workflow_ids.append(f"route-driver-{i}")
+    # Terminate main workflow, order generation, and all Driver routes
+    workflow_ids = ["meltdown-demo", "order-generation"]
+    for letter in ["a", "b", "c", "d", "e"]:
+        workflow_ids.append(f"route-driver-{letter}")
     for wf_id in workflow_ids:
         try:
             handle = _temporal_client.get_workflow_handle(wf_id)
             await handle.terminate("Demo reset")
         except Exception:
             pass
-    # Wait for Temporal to fully close the workflows
-    await asyncio.sleep(1.0)
+    # Wait for Temporal to fully close workflows and in-flight activities to drain
+    await asyncio.sleep(2.0)
 
 
 # --- App lifecycle ---
@@ -132,6 +132,9 @@ async def reset_demo():
     """Cancel running workflows and reset state."""
     await _cancel_running_workflows()
     await fleet.reset()
+    # Second reset catches any writes from activities that drained after first reset
+    await asyncio.sleep(0.5)
+    await fleet.reset()
     return {"status": "reset"}
 
 
@@ -139,7 +142,7 @@ async def reset_demo():
 
 
 class DriverDisconnectRequest(BaseModel):
-    driver_id: str = "driver-1"
+    driver_id: str = "driver-a"
 
 
 @app.post("/api/disconnect-crew")

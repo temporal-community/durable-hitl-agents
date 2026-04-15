@@ -19,12 +19,18 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
   (`worker.py`) with live/mock mode selection at startup (`GOOGLE_API_KEY` set → live, not set → mock).
 - **Workflows own state** (`workflows.py`): `MeltdownDemoWorkflow` owns driver positions, order
   assignments, and disconnect status. Builds `DriverSnapshot`s and passes to activities as inputs.
-  `DriverRouteWorkflow` is a per-driver child workflow — tracks status, is_disconnected,
+  Capacity guardrail: if ADK assigns to a full (3 orders) or disconnected driver, auto-reassigns
+  to next available. Orders assigned while Fleet Agent is offline get `degraded=True` flag.
+  `DriverRouteWorkflow` is a per-driver child workflow — batch-picks up to 3 orders at Ziggy's,
+  delivers sequentially (hotel A → hotel B → ...), then returns. Tracks status, is_disconnected,
   is_recovering, path_history, and current_orders. Disconnect uses Temporal-native retry: activities
   check FleetState for disconnect, fail if disconnected, Temporal retries with backoff until
   reconnected. Driver completes delivery, stays at hotel, can't report back until reconnected.
+  On reconnect, `sync_driver_position` activity reads actual position from FleetState — no
+  teleporting. Completed deliveries are not repeated; batch continues from next pending order.
   Supports mid-delivery reroute: `update_order` signal sets `_reroute_pending` flag — driver
-  finishes current navigation leg then re-navigates to new destination. Cancel via `cancel_order`.
+  finishes current navigation leg then re-navigates to new destination. For queued (not yet active)
+  orders, coordinates update in-place silently. Cancel via `cancel_order`.
   `OrderGenerationWorkflow` is a child workflow that generates orders on a randomized timer and
   signals the parent. Parent handles assignment.
 - **Server reads FleetState** (`server.py`): WebSocket data comes from `fleet.snapshot()` (SQLite).
@@ -43,14 +49,14 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
   subclass — we've requested these features (dynamic `summary_fn`, null stripping, agent
   name in default summary) be added to the upstream `TemporalModel`. If accepted, revert
   `agents.py` to use `TemporalModel` directly and delete `_demo_model.py`. Same applies to
-  `_activity_tool.py` dynamic summaries. `publish_agent_event` is registered on the
+  `_activity_tool.py` dynamic summaries. `publish_agent_event` and `publish_agent_events_batch` are registered on the
   workflow worker for local activity execution (UI projection with minimal history).
 - **ADK agents** (`agents.py`): Fleet Agent + Customer Agent (parallel) → Dispatch Agent (sequential).
   Live path runs ADK inline in the workflow via `_run_adk_assignment()`. No fallback to mock —
   if an activity fails, Temporal retries. Fleet Agent tools fail fast when disconnected (2 attempts),
-  error returned to LLM via `_activity_tool.py` catch — Dispatch Agent assigns with available data.
-  Workflow publishes short summary events to FleetState via batched local activity after ADK
-  completes (summary from `output_key` fields).
+  error returned to LLM via `_activity_tool.py` catch — Dispatch Agent assigns with available data
+  but orders are flagged as `degraded`. Workflow publishes short summary events to FleetState via
+  batched local activity after ADK completes (summary from `output_key` fields).
 - **Mock mode** (`agent_fleet/mock/`): completely separate folder with its own `activities.py` and
   `worker.py`. Live code has zero mock awareness. Decision at startup: `GOOGLE_API_KEY` set → live
   workers, not set → mock workers. Mock activities use `name=` overrides to match live activity names.
@@ -70,6 +76,9 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
   `GOOGLE_MAPS_API_KEY` (Directions API) — cannot be combined
 - `DEFAULT_MODEL` defaults to `gemini-2.5-flash` (swappable via env)
 - Random order generation from 3 Las Vegas venues (`locations.py`)
+- Drivers use letter IDs: `driver-a` through `driver-e`, displayed as `Driver-A` etc.
+- Ice cream shop is "Ziggy's Ice Cream" (`WAREHOUSE_LABEL` in `locations.py`)
+- Max 30 orders per demo run, drivers batch up to 3 orders (`DRIVER_CAPACITY`)
 
 ## Commands
 

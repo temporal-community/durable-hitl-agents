@@ -88,7 +88,7 @@ async def tool_submit_assignment(
     """Submit the final order assignment decision. You MUST call this tool with your recommendation.
 
     Args:
-        driver_id: The Driver ID to assign the order to (e.g. "driver-1")
+        driver_id: The Driver ID to assign the order to (e.g. "driver-a")
         reasoning_summary: Brief explanation of why this driver was chosen
     """
     tool_context.state["assignment"] = {
@@ -126,7 +126,7 @@ def create_assignment_fleet_agent() -> Agent:
             "- Skip drivers at capacity (no free slots)\n"
             "- Prefer the closest driver with capacity\n\n"
             "Respond with ONLY: the recommended driver ID and ETA. "
-            "Example: 'driver-2 — 4min ETA, closest with capacity.' "
+            "Example: 'driver-b — 4min ETA, closest with capacity.' "
             "No preamble, no comparisons of other drivers."
         ),
         tools=[_fleet_status_tool, _route_info_tool],

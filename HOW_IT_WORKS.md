@@ -2,7 +2,7 @@
 
 This demo has two distinct actor types:
 - **AI Agents** (Fleet Agent, Customer Agent, Dispatch Agent) — these **reason**. They call LLMs, use tools, and make decisions about order assignment. Each runs inline in the workflow via ADK.
-- **Delivery actors** (Driver 1, 2, 3, 4, 5) — these **execute**. They receive orders via signals and follow a fixed route: pickup → navigate → deliver → return. Each runs in its own child workflow (`DriverRouteWorkflow`). They don't reason — they carry out the agents' decisions.
+- **Delivery actors** (Driver-A through Driver-E) — these **execute**. They receive orders via signals and batch-pickup at Ziggy's, then deliver sequentially to multiple hotels before returning. Each runs in its own child workflow (`DriverRouteWorkflow`). They don't reason — they carry out the agents' decisions.
 
 In Temporal terms, the delivery actors are **child workflows**. They are not Temporal workers (infrastructure) and not AI agents (reasoning).
 
@@ -65,7 +65,7 @@ If you break determinism, Temporal raises a non-determinism error on replay. Thi
 
 **`MeltdownDemoWorkflow`** is the brain. It owns the fleet state — driver positions, order assignments, disconnect/reconnect status. It runs assignment agents (ADK inline via `_run_adk_assignment()` in live mode), builds `DriverSnapshot`s from its own state and passes them to activities as inputs, and handles customer changes. It never does delivery work directly — it delegates to child workflows.
 
-**`DriverRouteWorkflow`** is the legs. One instance per driver, it executes the physical route: navigate to kitchen → pick up → navigate to hotel → deliver → signal parent → return to base → loop. It owns its own disconnect state (status, is_disconnected, is_recovering, path_history, current_orders). Disconnect uses **Temporal-native retry**: activities check FleetState for disconnect status and fail if disconnected. Temporal retries with backoff (`NAV_RETRY`, unlimited attempts). The driver finishes its current delivery, stays at the hotel (can't report back), and resumes when reconnected. No workflow-side cancellation needed.
+**`DriverRouteWorkflow`** is the legs. One instance per driver, it batches pending orders: navigate to Ziggy's → batch-pickup all orders → deliver sequentially (hotel A → hotel B → ...) → signal parent after each delivery → return to base → loop. It owns its own disconnect state (status, is_disconnected, is_recovering, path_history, current_orders). Disconnect uses **Temporal-native retry**: activities check FleetState for disconnect status and fail if disconnected. Temporal retries with backoff (`NAV_RETRY`, unlimited attempts). The driver finishes its current delivery, stays at the hotel (can't report back), and resumes when reconnected — a `sync_driver_position` activity reads the actual position from FleetState so the workflow never teleports. No workflow-side cancellation needed.
 
 **`OrderGenerationWorkflow`** is a child workflow that generates orders on a timer and signals the parent with each new order. The first 3 orders fire in a quick burst (2s apart) to get multiple drivers on the road immediately, then settles into a normal cadence (±30% jitter around 10s base). The parent handles assignment.
 
@@ -77,16 +77,16 @@ The workflows connect through signals in both directions:
 OrderGenerationWorkflow fires on timer
   → signals parent MeltdownDemoWorkflow with new order
   → MeltdownDemoWorkflow builds DriverSnapshots from workflow state
-  → runs ADK inline (_run_adk_assignment) → "give this to Driver 2"
+  → runs ADK inline (_run_adk_assignment) → "give this to Driver-B"
   → updates self._driver_orders, sends add_order signal to DriverRouteWorkflow
   → DriverRouteWorkflow executes the delivery
   → on completion, signals parent with order_delivered
 ```
 
 The key design principles:
-- **Child workflows give you fault isolation.** Each delivery actor runs independently. If Driver 1 hits an error, the other 4 keep running.
+- **Child workflows give you fault isolation.** Each delivery actor runs independently. If Driver-A hits an error, the others keep running.
 - **Workflows own state, activities are pure.** Activities receive everything they need as inputs — they never read shared state for decision-making. The server queries workflows directly for the frontend.
-- **Disconnect uses Temporal retry.** Activities check FleetState for disconnect (simulates network unreachability), fail, and Temporal retries with backoff. The delivery actor finishes its delivery but can't report back. No workflow-side cancellation or polling — just the standard Temporal retry mechanism.
+- **Disconnect uses Temporal retry.** Activities check FleetState for disconnect (simulates network unreachability), fail, and Temporal retries with backoff. The delivery actor finishes its delivery but can't report back. On reconnect, a `sync_driver_position` activity reads the actual position from FleetState so the workflow resumes from where the driver actually is — no teleporting. Completed deliveries are not repeated; the batch continues from the next pending order.
 
 ### Where the ADK agents fit
 
@@ -122,7 +122,7 @@ Fleet Agent and Customer Agent run in parallel (ADK handles that). Then the Disp
 A common question from engineers: "where are the Temporal activities defined for each agent's LLM call and tool call?" The answer is they aren't — they're injected automatically by two wrappers:
 
 - **`TemporalModel(DEFAULT_MODEL, activity_config=...)`** — when you set this as an agent's model, every LLM call that agent makes is automatically executed as a Temporal `invoke_model` activity routed to the agents queue. You don't write the activity. The wrapper does it. ADK supports other models too — swap `DEFAULT_MODEL` for any supported provider.
-- **`activity_tool(tool_get_fleet_status, ...)`** — when you wrap a tool function this way, every time an agent calls that tool it executes as a Temporal activity. Again, no explicit activity definition needed. Our local [`_activity_tool.py`](agent_fleet/_activity_tool.py) adds two fixes over the upstream version: correct multi-arg handling, and **graceful failure** — when an activity exhausts its retry policy, the error is returned as a string to the LLM instead of crashing the pipeline. This is how Fleet Agent disconnect works: tools fail fast (2 retries), the LLM sees the error, and the Dispatch Agent assigns without fleet data.
+- **`activity_tool(tool_get_fleet_status, ...)`** — when you wrap a tool function this way, every time an agent calls that tool it executes as a Temporal activity. Again, no explicit activity definition needed. Our local [`_activity_tool.py`](agent_fleet/_activity_tool.py) adds two fixes over the upstream version: correct multi-arg handling, and **graceful failure** — when an activity exhausts its retry policy, the error is returned as a string to the LLM instead of crashing the pipeline. This is how Fleet Agent disconnect works: tools fail fast (2 retries), the LLM sees the error, and the Dispatch Agent assigns without fleet data. The same graceful degradation applies to real API failures — `tool_get_route_info` calls the Google Maps Directions API for driving ETAs, which can fail from rate limiting, quota exhaustion, or transient network errors. These are not bugs — the error flows back to the LLM as context, the Fleet Agent notes the missing ETA, and the Dispatch Agent compensates. Orders assigned during these failures are flagged as `degraded` in the UI.
 
 So when Fleet Agent calls Gemini and then calls `tool_get_fleet_status`, both of those are Temporal activities — durable, retryable, and recorded in the event log — purely by inheritance from the wrappers. This is the `temporalio[google-adk]` integration doing its job.
 
@@ -166,7 +166,7 @@ The demo runs three Temporal workers in a **separate worker process** (`python -
 | Queue | Worker | What it runs |
 |---|---|---|
 | `meltdown-workflows` | Workflows only | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow` — no activities, dedicated to replay |
-| `meltdown-delivery` | Delivery | `navigate_to`, `pickup_orders`, `deliver_order`, `generate_order`, `execute_customer_change`, `get_route_polyline`, `get_fleet_status`, `get_order_priorities`, `publish_agent_event` |
+| `meltdown-delivery` | Delivery | `navigate_to`, `pickup_orders`, `deliver_order`, `generate_order`, `execute_customer_change`, `get_route_polyline`, `get_fleet_status`, `get_order_priorities`, `publish_agent_event`, `sync_driver_position` |
 | `meltdown-agents` | Agents | `register_assignment`, `tool_get_fleet_status`, `tool_get_order_priorities`, `tool_get_route_info` + `google_search` (Gemini grounding) |
 
 **Why a workflows-only worker?** Workflows must be deterministic and replayable. Keeping them on a dedicated worker with no activities makes it physically impossible for workflow code to touch `FleetState` (SQLite WAL-backed, `fleet_state.db`) or do I/O. This is the Temporal-idiomatic pattern for production deployments.
@@ -256,22 +256,25 @@ This traces a single order from button click to delivery — every function and 
 - [`workflows.py`](agent_fleet/workflows.py) `_run_adk_assignment()` → reads `session.state["assignment"]` → returns `ReasonAboutAssignmentOutput`
 
 **9. Assignment registered, delivery actor signaled**
-- [`workflows.py`](agent_fleet/workflows.py) `_assign_order()` → calls `register_assignment` activity (FleetState write) → signals chosen `DriverRouteWorkflow` with `add_order`
+- [`workflows.py`](agent_fleet/workflows.py) `_assign_order()` → checks if chosen driver has capacity (max 3 orders) and isn't disconnected — reassigns to next available driver if not → calls `register_assignment` activity (FleetState write, marks `degraded` if Fleet Agent was offline) → signals chosen `DriverRouteWorkflow` with `add_order`
 
-**10. Delivery actor executes**
-- [`workflows.py`](agent_fleet/workflows.py) `DriverRouteWorkflow.run()` → for each order:
-  - `get_route_polyline` activity → Google Maps polyline to warehouse
-  - `navigate_to` activity → interpolates position with heartbeats (0.4s/step)
-  - `pickup_orders` activity → marks picked up
-  - `get_route_polyline` activity → Google Maps polyline to hotel
-  - `navigate_to` activity → drives to hotel
-  - (if `_reroute_pending` flag set by `update_order` signal → re-navigates to new destination)
-  - `deliver_order` activity → marks delivered (skipped if `_cancel_pending`)
+**10. Delivery actor executes (batch pickup → sequential delivery)**
+- [`workflows.py`](agent_fleet/workflows.py) `DriverRouteWorkflow.run()`:
+  - Collects all pending orders into a batch
+  - If reconnecting: `sync_driver_position` activity reads actual position from FleetState
+  - Drives to Ziggy's (skipped if already there)
+  - `pickup_orders` activity → batch-picks all orders at once
+  - For each order in the batch:
+    - `get_route_polyline` activity → Google Maps polyline to hotel
+    - `navigate_to` activity → drives to hotel with heartbeats (0.4s/step)
+    - (if `_reroute_pending` flag set by `update_order` signal → re-navigates to new destination)
+    - `deliver_order` activity → marks delivered (skipped if `_cancel_pending`)
+    - Signals parent with `order_delivered` after each delivery
 - [`activities.py`](agent_fleet/activities.py) — all activities on `DELIVERY_QUEUE`
 
-**11. Delivery actor signals parent, returns to base**
-- [`workflows.py`](agent_fleet/workflows.py) → signals parent with `order_delivered` → parent updates `_driver_orders` and `_driver_last_position`
-- After all pending orders delivered, delivery actor navigates back to Frosty's (visible on map) → idle, waits for next order
+**11. Delivery actor returns to base**
+- [`workflows.py`](agent_fleet/workflows.py) → after all orders in batch delivered, delivery actor navigates back to Ziggy's (visible on map) → idle, waits for next batch
+- On disconnect mid-batch: driver finishes current delivery, stays at hotel, Temporal retries. On reconnect, resumes from next order in batch — completed deliveries are not repeated
 
 **Key difference in live vs mock:** In live mode, ADK runs inline in the workflow — every LLM call and tool call is a separate Temporal activity visible in the event log. In mock mode, the entire reasoning is a single `reason_about_assignment` activity.
 

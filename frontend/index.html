@@ -6,7 +6,7 @@
 <title>Meltdown — Ice Cream Delivery Fleet</title>
 <link rel="stylesheet" href="/static/vendor/leaflet.css" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Monoton&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=Monoton&family=Noto+Sans+Mono&display=swap" rel="stylesheet">
 <script src="/static/vendor/leaflet.js"></script>
 <style>
   /* --- Brand palette --- */
@@ -38,41 +38,77 @@
     height: 100vh;
     display: grid;
     font-size: 20px;
-    grid-template-columns: 520px 1fr;
-    grid-template-rows: 64px auto auto 1fr;
+    grid-template-columns: 485px 1fr;
+    grid-template-rows: 80px auto minmax(0, auto) 1fr;
+    grid-template-areas:
+      "header  header"
+      "tabs    tabs"
+      "left    fleet"
+      "left    map";
   }
 
   /* --- Header --- */
   header {
-    grid-column: 1 / -1;
-    background: var(--surface-1);
+    grid-area: header;
+    background:
+      radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,0.7) 0%, transparent 100%),
+      radial-gradient(1px 1px at 30% 65%, rgba(255,255,255,0.5) 0%, transparent 100%),
+      radial-gradient(1px 1px at 55% 15%, rgba(255,255,255,0.6) 0%, transparent 100%),
+      radial-gradient(1px 1px at 70% 75%, rgba(255,255,255,0.4) 0%, transparent 100%),
+      radial-gradient(1px 1px at 85% 35%, rgba(255,255,255,0.5) 0%, transparent 100%),
+      radial-gradient(1px 1px at 15% 80%, rgba(255,255,255,0.3) 0%, transparent 100%),
+      radial-gradient(1px 1px at 45% 45%, rgba(255,255,255,0.6) 0%, transparent 100%),
+      radial-gradient(1px 1px at 92% 55%, rgba(255,255,255,0.4) 0%, transparent 100%),
+      radial-gradient(1.5px 1.5px at 25% 40%, rgba(255,255,255,0.8) 0%, transparent 100%),
+      radial-gradient(1.5px 1.5px at 65% 60%, rgba(255,255,255,0.7) 0%, transparent 100%),
+      radial-gradient(1.5px 1.5px at 80% 10%, rgba(255,255,255,0.6) 0%, transparent 100%),
+      radial-gradient(1px 1px at 5% 50%, rgba(255,255,255,0.5) 0%, transparent 100%),
+      radial-gradient(1px 1px at 38% 85%, rgba(255,255,255,0.4) 0%, transparent 100%),
+      radial-gradient(1px 1px at 60% 30%, rgba(255,255,255,0.5) 0%, transparent 100%),
+      radial-gradient(1px 1px at 95% 80%, rgba(255,255,255,0.3) 0%, transparent 100%),
+      radial-gradient(ellipse at 80% 20%, rgba(100, 60, 180, 0.25) 0%, transparent 50%),
+      radial-gradient(ellipse at 10% 80%, rgba(255, 0, 128, 0.08) 0%, transparent 40%),
+      linear-gradient(188deg, #211b4e 0%, #0d0d14 60%, var(--temporal-black) 100%);
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 24px;
+    padding: 0 40px;
+    height: 80px;
+    position: relative;
+    overflow: hidden;
+  }
+  header::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='5' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    opacity: 0.18;
+    mix-blend-mode: soft-light;
+    pointer-events: none;
   }
   .header-left {
     display: flex;
     align-items: center;
   }
   header h1 {
-    font-size: 24px;
-    font-weight: 700;
+    font-size: 20px;
+    font-weight: 400;
     color: #fff;
+    letter-spacing: 1px;
   }
   header h1 .accent {
     font-family: 'Monoton', cursive;
-    font-size: 28px;
+    font-size: 36px;
     font-weight: 400;
-    color: #ff2a6d;
-    text-shadow:
-      0 0 7px #ff2a6d,
-      0 0 20px #ff2a6d88,
-      0 0 40px #ff2a6d44;
+    background: linear-gradient(208deg, #ff5555 0%, #b664ff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    filter: drop-shadow(0 0 8px #ff5555aa) drop-shadow(0 0 20px #b664ff66);
     letter-spacing: 2px;
   }
-  header h1 .sub { color: var(--text-muted); font-weight: 400; font-size: 15px; margin-left: 8px; }
+  header h1 .sub { color: #465a78; font-weight: 400; font-size: 15px; margin-left: 8px; }
   .header-right {
     display: flex;
     align-items: center;
@@ -84,166 +120,272 @@
     gap: 8px;
   }
   .header-brand svg, .header-brand img {
-    opacity: 0.9;
+    opacity: 1;
   }
   .brand-name {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text-muted);
+    font-size: 20px;
+    font-weight: 400;
+    color: #fff;
     letter-spacing: 0.3px;
   }
   .header-divider {
     width: 1px;
-    height: 20px;
-    background: var(--border);
+    height: 24px;
+    background: #465a78;
   }
 
   /* --- Tab bar + panels --- */
   .tab-bar {
-    grid-column: 1 / -1;
-    background: #161922;
-    border-bottom: 1px solid #2a2d3a;
+    grid-area: tabs;
+    background: black;
+    border-bottom: 1px solid #465a78;
     display: flex;
     align-items: stretch;
+    padding-left: 40px;
+    gap: 32px;
   }
   .tab-bar .tab {
-    padding: 14px 24px;
-    font-size: 16px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: #6b7280;
+    padding: 12px 4px;
+    font-size: 20px;
+    font-weight: 500;
+    font-family: 'Inter', -apple-system, sans-serif;
+    text-transform: none;
+    letter-spacing: 0;
+    color: #465a78;
     cursor: pointer;
-    background: #1e2130;
+    background: transparent;
     border: none;
-    border-bottom: 3px solid transparent;
+    border-bottom: 2px solid transparent;
     transition: all 0.15s ease;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
   }
-  .tab-bar .tab:hover { color: #e0e0e0; }
+  .tab-bar .tab:hover { color: #8098f9; }
   .tab-bar .tab.active {
-    color: var(--temporal-uv);
-    border-bottom-color: var(--temporal-uv);
-    background: var(--surface-1);
+    color: #8098f9;
+    border-bottom-color: #6172f3;
+    background: transparent;
   }
   .tab-scenario {
     display: block;
-    font-size: 11px;
-    font-weight: 500;
+    font-size: 14px;
+    font-weight: 400;
     text-transform: none;
     letter-spacing: 0;
-    color: #4b5563;
+    color: inherit;
     opacity: 0.7;
-    margin-top: 2px;
+    margin-top: 0;
   }
   .tab-bar .tab.active .tab-scenario {
-    color: var(--temporal-uv);
-    opacity: 0.6;
+    color: #8098f9;
+    opacity: 0.7;
   }
   .tab-bar .status-area {
     margin-left: auto;
     display: flex;
     align-items: center;
-    padding: 0 24px;
+    padding: 0 40px;
+    gap: 12px;
   }
   .tab-panels {
-    grid-column: 1 / -1;
-    background: #161922;
-    border-bottom: 1px solid #2a2d3a;
-    padding: 12px 24px;
+    background: transparent;
+    padding: 14px 40px;
+    border-bottom: 1px solid #465a78;
   }
   .tab-panel {
     display: none;
-    gap: 8px;
-    align-items: center;
-    flex-wrap: wrap;
+    gap: 10px;
+    flex-direction: column;
+    align-items: stretch;
   }
   .tab-panel.active { display: flex; }
 
   .btn {
-    padding: 8px 16px;
-    border: none;
+    padding: 10px 16px;
+    border: 1px solid #465a78;
     border-radius: 6px;
-    font-size: 17px;
-    font-weight: 600;
+    font-size: 16px;
+    font-weight: 500;
     cursor: pointer;
     transition: all 0.15s ease;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
+    text-transform: none;
+    letter-spacing: 0;
     white-space: nowrap;
+    background: black;
+    color: #92a4c3;
+    font-family: 'Inter', -apple-system, sans-serif;
   }
+  .btn:hover { color: #f8fafc; border-color: #8098f9; }
   .btn:active { transform: scale(0.97); }
-  .btn-start { background: #22c55e; color: #fff; }
-  .btn-start:hover { background: #16a34a; }
-  .btn-restart { background: #3b82f6; color: #fff; }
-  .btn-restart:hover { background: #2563eb; }
-  .btn-disrupt { background: #f97316; color: #fff; }
-  .btn-disrupt:hover { background: #ea580c; }
-  .btn-change { background: #a855f7; color: #fff; }
-  .btn-change:hover { background: #9333ea; }
-  .btn-approve { background: #22c55e; color: #fff; font-size: 15px; padding: 6px 12px; }
-  .btn-reject { background: #ef4444; color: #fff; font-size: 15px; padding: 6px 12px; }
-  .btn-reset { background: #374151; color: #9ca3af; }
-  .btn-reset:hover { background: #4b5563; color: #fff; }
+  .btn-start {
+    background: #22974c;
+    color: #f8fafc;
+    border: none;
+    font-size: 16px;
+    font-weight: 500;
+    padding: 8px 16px;
+    text-transform: uppercase;
+    width: 100%;
+    height: 38px;
+  }
+  .btn-start:hover { background: #1a7a3d; }
+  .btn-restart { background: #0a1828; color: #4080b0; border-color: #153a65; }
+  .btn-restart:hover { color: #60a5fa; border-color: #2563eb; }
+  .btn-disrupt { background: #1a0a12; color: #e45858; border-color: #721e1e; }
+  .btn-disrupt:hover { color: #f87171; border-color: #ef4444; }
+  .btn-change { background: black; color: #92a4c3; border: 1px solid #465a78; }
+  .btn-change:hover { color: #f8fafc; border-color: #8098f9; }
+  .btn-approve { background: #22974c; color: #fff; font-size: 15px; padding: 6px 12px; border: none; }
+  .btn-reject { background: #ef4444; color: #fff; font-size: 15px; padding: 6px 12px; border: none; }
+  .btn-reset { background: #111318; color: #6b7280; border: 1px solid #374151; }
+  .btn-reset:hover { color: #9ca3af; border-color: #4b5563; }
+  .btn-row {
+    display: flex;
+    gap: 10px;
+  }
+  .btn-row .btn { flex: 1; }
 
   .worker-indicator {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 15px;
-    font-weight: 600;
+    gap: 12px;
+    font-size: 20px;
+    font-weight: 500;
+    text-transform: uppercase;
   }
   .worker-dot {
-    width: 8px;
-    height: 8px;
+    width: 12px;
+    height: 12px;
     border-radius: 50%;
   }
-  .worker-indicator.online .worker-dot { background: #22c55e; }
-  .worker-indicator.online { color: #22c55e; }
+  .worker-indicator.online .worker-dot { background: #56d282; }
+  .worker-indicator.online { color: #56d282; }
   .worker-indicator.offline .worker-dot { background: #ef4444; animation: pulse 1s infinite; }
   .worker-indicator.offline { color: #ef4444; }
 
   /* --- Left panel --- */
   .left-panel {
-    background: #161922;
-    border-right: 1px solid #2a2d3a;
-    overflow: hidden;
+    grid-area: left;
+    background: black;
+    border-right: 1px solid #465a78;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 0;
   }
 
-  .panel-section {
-    padding: 14px 20px;
-    border-bottom: 1px solid #2a2d3a;
-    position: relative;
-    z-index: 1;
-    background: var(--surface-0);
+  /* --- Fleet & Orders row (above map) --- */
+  .fleet-orders-row {
+    grid-area: fleet;
+    display: flex;
+    border-bottom: 1px solid #465a78;
+    max-height: 35vh;
+    overflow: hidden;
   }
-
-  .section-label {
-    font-size: 18px;
-    font-weight: 700;
+  .fleet-orders-row > .fleet-panel,
+  .fleet-orders-row > .orders-panel {
+    flex: 1;
+    background: black;
+    border: 1px solid #465a78;
+    border-top: none;
+    overflow-y: auto;
+    padding: 16px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .fleet-orders-row > .fleet-panel {
+    border-left: none;
+    border-right: none;
+  }
+  .fleet-orders-row > .orders-panel {
+    border-right: none;
+  }
+  .fleet-panel-label,
+  .orders-panel-label {
+    font-size: 16px;
+    font-weight: 500;
+    color: #92a4c3;
     text-transform: uppercase;
-    letter-spacing: 1px;
-    color: #6b7280;
-    margin-bottom: 8px;
+    font-family: 'Inter', -apple-system, sans-serif;
     cursor: pointer;
     user-select: none;
     display: flex;
     align-items: center;
     justify-content: space-between;
   }
-  .section-label::after {
+  .fleet-panel-label::after,
+  .orders-panel-label::after {
     content: '\25B4';
-    font-size: 14px;
-    color: #4b5563;
+    font-size: 12px;
+    color: #465a78;
     transition: transform 0.2s ease;
   }
-  .panel-section.collapsed .section-label::after {
+  .fleet-panel.collapsed .fleet-panel-label::after,
+  .orders-panel.collapsed .orders-panel-label::after {
     transform: rotate(180deg);
   }
-  .panel-section.collapsed .section-label {
-    margin-bottom: 0;
+  .fleet-panel.collapsed #crew-cards,
+  .orders-panel.collapsed #order-cards {
+    display: none;
+  }
+  .fleet-panel.collapsed,
+  .orders-panel.collapsed {
+    flex: 0 0 auto;
+    overflow: hidden;
+  }
+
+  /* Responsive: compact fleet/orders at narrow widths */
+  @media (max-width: 1400px) {
+    .fleet-orders-row {
+      flex-direction: column;
+      max-height: 30vh;
+    }
+    .fleet-orders-row > .fleet-panel,
+    .fleet-orders-row > .orders-panel {
+      padding: 10px 16px;
+    }
+  }
+  @media (max-width: 1100px) {
+    .fleet-orders-row {
+      max-height: 20vh;
+    }
+    .fleet-orders-row > .fleet-panel,
+    .fleet-orders-row > .orders-panel {
+      padding: 8px 12px;
+      gap: 6px;
+    }
+    .fleet-panel-label,
+    .orders-panel-label {
+      font-size: 13px;
+      margin-bottom: 0;
+    }
+    #order-cards,
+    #crew-cards {
+      gap: 6px;
+    }
+    .card {
+      padding: 8px 10px;
+    }
+  }
+
+  .panel-section {
+    padding: 20px 40px;
+    position: relative;
+    z-index: 1;
+    background: black;
+  }
+
+  .section-label {
+    font-size: 16px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0;
+    color: #92a4c3;
+    margin-bottom: 8px;
+    font-family: 'Inter', -apple-system, sans-serif;
   }
 
   /* --- Agent reasoning panel --- */
@@ -252,42 +394,17 @@
     min-height: 0;
     overflow-y: auto;
   }
-  .agent-panel.collapsed {
-    flex: 0 0 auto;
-    overflow: visible;
-  }
 
-  /* Middle sections (couriers/orders) — compact, collapsible */
-  .mid-sections {
-    flex-shrink: 0;
+  #order-cards,
+  #crew-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: calc(3 * 52px + 2 * 12px);  /* ~3 cards + gaps */
     overflow-y: auto;
-    border-bottom: 1px solid #2a2d3a;
-  }
-  #order-cards {
-    max-height: 210px;
-    overflow-y: auto;
-  }
-
-  /* Event log — pinned at bottom */
-  .event-log-section {
-    flex-shrink: 0;
-    max-height: 190px;
-    overflow: hidden;
-  }
-  .event-log-section .section-body {
-    padding-bottom: 8px;
-  }
-  .event-log-section .event-log {
-    max-height: 120px;
   }
 
   .section-body {
-    transition: max-height 0.3s ease, opacity 0.2s ease;
-    overflow: hidden;
-  }
-  .panel-section.collapsed .section-body {
-    max-height: 0 !important;
-    opacity: 0;
     overflow: hidden;
   }
   .agent-boxes {
@@ -297,77 +414,68 @@
   }
   .agent-box {
     border-radius: 10px;
-    border: 1px solid #2a2d3a;
+    border: 1px solid var(--agent-border, #2a2d3a);
+    background: var(--agent-bg, transparent);
     overflow: hidden;
-    transition: border-color 0.3s ease;
+    transition: all 0.3s ease;
+    padding: 16px;
   }
-  .agent-box.active { border-color: var(--agent-color); }
   .agent-box-header {
     display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    background: #1a1d28;
-  }
-  .agent-box-icon {
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 13px;
-    font-weight: 700;
-    color: #fff;
-    flex-shrink: 0;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 4px;
   }
   .agent-box-name {
-    font-size: 15px;
-    font-weight: 700;
+    font-size: 16px;
+    font-weight: 500;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0;
     color: var(--agent-color);
+    font-family: 'Inter', -apple-system, sans-serif;
   }
   .agent-box-role {
-    font-size: 13px;
-    color: #6b7280;
+    font-size: 12px;
+    color: #92a4c3;
     font-weight: 400;
     text-transform: none;
     letter-spacing: 0;
   }
   .agent-box-status {
     margin-left: auto;
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 12px;
+    font-weight: 400;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
-    padding: 2px 8px;
-    border-radius: 10px;
+    letter-spacing: 0;
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-family: 'Fragment Mono', 'Noto Sans Mono', monospace;
+    flex-shrink: 0;
   }
   .agent-box-status.waiting {
-    background: #1e2130;
-    color: #4b5563;
+    background: #0a1828;
+    color: #4080b0;
+    border: 1px solid #153a65;
   }
   .agent-box-status.thinking {
-    background: #422006;
-    color: #fbbf24;
+    background: #0a1828;
+    color: #4080b0;
+    border: 1px solid #153a65;
     animation: pulse 1.5s infinite;
   }
   .agent-box-status.done {
-    background: #052e16;
-    color: #22c55e;
+    background: #0c2218;
+    color: #42c472;
+    border: 1px solid #1a5e35;
   }
   .agent-box-status.offline {
-    background: #450a0a;
-    color: #f87171;
+    background: #280c0c;
+    color: #e45858;
+    border: 1px solid #721e1e;
     animation: pulse 1s infinite;
   }
   .agent-box.agent-offline {
-    opacity: 0.5;
-    border-color: #ef4444;
-  }
-  .agent-box.agent-offline .agent-box-header {
-    background: #1a1215;
+    opacity: 1;
   }
   .agent-box-body {
     padding: 0;
@@ -376,31 +484,36 @@
     transition: max-height 0.3s ease, padding 0.3s ease;
   }
   .agent-box.active .agent-box-body {
-    padding: 10px 14px;
-    max-height: 180px;
+    padding: 0;
+    padding-top: 16px;
+    max-height: 160px;
     overflow-y: auto;
   }
-  .agent-box-entry {
-    font-size: 15px;
-    line-height: 1.5;
-    color: #d1d5db;
-    padding: 8px 0;
-    border-bottom: 1px solid #2a2d3a;
+  .dispatch-offline-notice {
+    padding: 10px 0 4px;
   }
-  .agent-box-entry:last-child { border-bottom: none; }
+  .agent-box-entry {
+    font-size: 14px;
+    line-height: 20px;
+    color: #fff;
+    font-family: 'Inter', -apple-system, sans-serif;
+    font-weight: 400;
+  }
   .agent-box-entry .entry-type {
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0;
     color: var(--agent-color);
-    opacity: 0.7;
-    margin-bottom: 2px;
+    margin-bottom: 0;
+    line-height: 16px;
   }
 
-  .agent-box.fleet_agent { --agent-color: var(--google-blue); }
-  .agent-box.customer_agent { --agent-color: var(--adk-accent); }
-  .agent-box.resolver { --agent-color: var(--google-green); }
+  .agent-box.fleet_agent { --agent-color: #0ff; --agent-bg: rgba(0,255,255,0.1); --agent-border: rgba(0,255,255,0.3); }
+  .agent-box.fleet_agent.agent-offline { --agent-color: #ff0080; --agent-bg: rgba(255,0,128,0.1); --agent-border: rgba(255,0,128,0.3); }
+  .agent-box.customer_agent { --agent-color: #0ff; --agent-bg: rgba(0,255,255,0.1); --agent-border: rgba(0,255,255,0.3); }
+  .agent-box.customer_agent.agent-offline { --agent-color: #ff0080; --agent-bg: rgba(255,0,128,0.1); --agent-border: rgba(255,0,128,0.3); }
+  .agent-box.resolver { --agent-color: #34d058; --agent-bg: rgba(52,208,88,0.08); --agent-border: rgba(52,208,88,0.25); }
 
   /* Tool badges */
   .agent-tool-badges {
@@ -411,24 +524,40 @@
   }
   .tool-badge {
     font-size: 10px;
-    font-weight: 600;
-    padding: 2px 7px;
+    font-weight: 400;
+    padding: 2px 6px;
     border-radius: 8px;
-    background: #1e2130;
-    color: #9ca3af;
-    border: 1px solid #2a2d3a;
-    letter-spacing: 0.3px;
+    background: #1a1c4c;
+    color: #22974c;
+    border: none;
+    letter-spacing: 0;
     transition: all 0.3s ease;
+    font-family: 'Noto Sans Mono', monospace;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .tool-badge::before {
+    content: '';
+    display: inline-block;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #22974c;
+    flex-shrink: 0;
   }
   .agent-box.agent-offline .tool-badge {
-    background: #450a0a;
-    color: #f87171;
-    border-color: #7f1d1d;
+    color: #ff6637;
+  }
+  .agent-box.agent-offline .tool-badge::before {
+    background: #ff6637;
   }
   .tool-badge.badge-offline {
-    background: #450a0a;
-    color: #f87171;
-    border-color: #7f1d1d;
+    color: #ff6637;
+  }
+  .tool-badge.badge-offline::before {
+    background: #ff6637;
   }
 
   /* Phase separator in agent boxes */
@@ -466,56 +595,53 @@
     text-align: center;
   }
 
-  /* --- Driver cards scroll --- */
-  #crew-cards {
-    max-height: 210px;
-    overflow-y: auto;
-  }
 
   /* --- Order & courier cards --- */
   .card {
-    background: #1e2130;
+    background: rgba(30, 41, 59, 0.5);
     border-radius: 8px;
-    padding: 12px 16px;
-    border: 1px solid #2a2d3a;
-    margin-bottom: 8px;
+    padding: 12px;
+    border: 1px solid #1e293b;
   }
   .card h3 {
-    font-size: 16px;
-    font-weight: 600;
+    font-size: 18px;
+    font-weight: 500;
     margin-bottom: 4px;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 13px;
+    font-family: 'Inter', -apple-system, sans-serif;
   }
   .status-pill {
     display: inline-block;
-    font-size: 12px;
-    padding: 3px 8px;
-    border-radius: 10px;
-    font-weight: 600;
+    font-size: 10px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    font-weight: 400;
     text-transform: uppercase;
-    letter-spacing: 0.3px;
+    letter-spacing: 0;
+    font-family: 'Noto Sans Mono', monospace;
+    line-height: 14px;
   }
-  .status-idle { background: #1e293b; color: #94a3b8; }
+  .status-idle { background: #0f1014; color: #92a4c3; border: 1px solid rgba(146,164,195,0.3); }
   .status-en_route_pickup,
-  .status-en_route_delivery { background: #172554; color: #60a5fa; }
+  .status-en_route_delivery { background: #060d12; color: #4080b0; border: 1px solid rgba(64,128,176,0.3); }
   .status-picking_up,
-  .status-delivering { background: #1a2e1a; color: #4ade80; }
-  .status-returning { background: #422006; color: #fbbf24; }
-  .status-failed { background: #450a0a; color: #f87171; animation: pulse 1s infinite; }
-  .status-disconnected { background: #450a0a; color: #f87171; animation: pulse 1s infinite; }
-  .status-recovered { background: #422006; color: #fbbf24; }
-  .status-pending { background: #1e293b; color: #94a3b8; }
-  .status-assigned { background: #172554; color: #60a5fa; }
-  .status-picked_up { background: #1a2e1a; color: #4ade80; }
-  .status-in_transit { background: #172554; color: #60a5fa; }
-  .status-delivered { background: #052e16; color: #22c55e; }
-  .status-at_risk { background: #451a03; color: #f97316; animation: pulse 1s infinite; }
-  .status-rerouted { background: #422006; color: #fbbf24; }
-  .status-cancelled { background: #450a0a; color: #f87171; }
+  .status-delivering { background: #07140b; color: #42c472; border: 1px solid rgba(66,196,114,0.3); }
+  .status-returning { background: #160b03; color: #d8701e; border: 1px solid rgba(216,112,30,0.3); }
+  .status-failed { background: #280c0c; color: #e45858; border: 1px solid rgba(228,88,88,0.3); animation: pulse 1s infinite; }
+  .status-disconnected { background: #280c0c; color: #e45858; border: 1px solid rgba(228,88,88,0.3); animation: pulse 1s infinite; }
+  .status-recovered { background: #160b03; color: #d8701e; border: 1px solid rgba(216,112,30,0.3); }
+  .status-pending { background: #0f1014; color: #92a4c3; border: 1px solid rgba(146,164,195,0.3); }
+  .status-assigned { background: #060d12; color: #4080b0; border: 1px solid rgba(64,128,176,0.3); }
+  .status-picked_up { background: #07140b; color: #42c472; border: 1px solid rgba(66,196,114,0.3); }
+  .status-in_transit { background: #060d12; color: #4080b0; border: 1px solid rgba(64,128,176,0.3); }
+  .status-delivered { background: #07140b; color: #42c472; border: 1px solid rgba(66,196,114,0.3); }
+  .status-at_risk { background: #160b03; color: #d8701e; border: 1px solid rgba(216,112,30,0.3); animation: pulse 1s infinite; }
+  .status-rerouted { background: #160b03; color: #d8701e; border: 1px solid rgba(216,112,30,0.3); }
+  .status-cancelled { background: #280c0c; color: #e45858; border: 1px solid rgba(228,88,88,0.3); }
   .priority-vip { color: #f97316; font-weight: 700; }
-  .priority-standard { color: #6b7280; }
+  .priority-standard { color: #6172f3; font-weight: 400; }
 
   .detail { font-size: 15px; color: #6b7280; margin-top: 3px; }
 
@@ -526,8 +652,8 @@
 
   /* --- Map --- */
   #map {
+    grid-area: map;
     background: #1a1d28;
-    border-left: 1px solid var(--border);
   }
   .crew-marker {
     background: none !important;
@@ -638,7 +764,26 @@
     border-radius: 1px;
   }
 
-  /* --- Neon ice cream shop sign --- */
+  /* --- Hotel signs on map --- */
+  .hotel-sign {
+    filter: drop-shadow(0 2px 8px rgba(0,0,0,0.6));
+  }
+
+  /* --- Ziggy's neon sign on map --- */
+  .ziggy-neon {
+    width: 140px;
+    height: auto;
+    animation: neon-flicker 3s ease-in-out infinite alternate;
+  }
+  @keyframes neon-flicker {
+    0% { filter: drop-shadow(0 0 6px #ff69b4aa) drop-shadow(0 0 14px #ff69b466) brightness(0.95); }
+    25% { filter: drop-shadow(0 0 10px #ff69b4) drop-shadow(0 0 24px #ff69b488) brightness(1.05); }
+    50% { filter: drop-shadow(0 0 8px #ff69b4cc) drop-shadow(0 0 18px #ff69b466) brightness(1); }
+    75% { filter: drop-shadow(0 0 12px #ff69b4) drop-shadow(0 0 30px #ff69b4aa) brightness(1.08); }
+    100% { filter: drop-shadow(0 0 6px #ff69b4aa) drop-shadow(0 0 14px #ff69b466) brightness(0.95); }
+  }
+
+  /* --- Neon ice cream shop sign (legacy) --- */
   .retro-sign {
     display: flex;
     flex-direction: column;
@@ -837,56 +982,12 @@
     background: var(--surface-2);
   }
 
-  /* --- Event log --- */
-  .event-log {
-    max-height: 200px;
-    overflow-y: auto;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 14px;
-    color: #6b7280;
-    background: #111318;
-    border-radius: 6px;
-    padding: 6px;
-    border: 1px solid #2a2d3a;
-  }
-  .event-log div {
-    padding: 1px 0;
-    border-bottom: 1px solid #1a1d28;
-  }
-  .event-log .event-time { color: #4b5563; }
 
   /* --- Agent snippet styles --- */
   .entry-content {
-    max-height: 2.4em;
-    overflow: hidden;
     position: relative;
-    cursor: pointer;
-    transition: max-height 0.3s ease;
-  }
-  .entry-content.expanded {
-    max-height: none;
-  }
-  .entry-content:not(.expanded)::after {
-    content: '';
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 1.2em;
-    background: linear-gradient(transparent, #1e2130);
-    pointer-events: none;
-  }
-  .entry-content.short::after {
-    display: none;
   }
   .entry-ellipsis {
-    font-size: 13px;
-    color: var(--agent-color, #6b7280);
-    opacity: 0.6;
-    cursor: pointer;
-    user-select: none;
-  }
-  .entry-content.expanded + .entry-ellipsis {
     display: none;
   }
 
@@ -914,8 +1015,8 @@
   .crew-disconnect-banner {
     display: none;
     position: fixed;
-    top: 64px;
-    left: 520px;
+    top: 80px;
+    left: 485px;
     right: 0;
     background: rgba(239, 68, 68, 0.88);
     z-index: 999;
@@ -942,21 +1043,17 @@
   }
 
   /* Crew select dropdown */
-  .crew-select {
-    background: #1e2130;
-    color: #e0e0e0;
-    border: 1px solid #2a2d3a;
-    border-radius: 6px;
-    padding: 7px 10px;
-    font-size: 16px;
-  }
+  .crew-select,
   .agent-select {
-    background: #1e2130;
-    color: #e0e0e0;
-    border: 1px solid #2a2d3a;
+    background: #1e293b;
+    color: #f8fafc;
+    border: 1px solid #465a78;
     border-radius: 6px;
-    padding: 7px 10px;
+    padding: 8px 12px;
     font-size: 16px;
+    font-family: 'Inter', -apple-system, sans-serif;
+    font-weight: 500;
+    width: 100%;
   }
 </style>
 </head>
@@ -964,26 +1061,23 @@
 
 <header>
   <div class="header-left">
-    <h1><span class="accent">Meltdown</span> Ice Cream Delivery<span class="sub">Las Vegas Strip</span></h1>
+    <h1><span class="accent">MELTDOWN</span> Ice Cream Delivery <span class="sub">Las Vegas</span></h1>
   </div>
   <div class="header-right">
-    <div class="header-brand">
-      <svg height="20" width="20" viewBox="725 262 390 390" fill="none" title="Temporal">
-        <path d="M988.375 388.625C979.152 319.648 955.892 262 920 262C884.208 262 860.848 319.648 851.625 388.625C782.648 397.848 725 421.108 725 457C725 492.792 782.648 516.152 851.625 525.375C860.848 594.352 884.108 652 920 652C955.792 652 979.152 594.352 988.375 525.375C1057.35 516.152 1115 492.892 1115 457C1115 421.108 1057.35 397.748 988.375 388.625ZM849.419 505.123C783.35 495.599 744.751 473.743 744.751 456.9C744.751 440.057 783.249 418.201 849.419 408.676C847.915 424.617 847.213 440.859 847.213 456.9C847.213 472.941 847.915 489.283 849.419 505.123ZM920 281.65C936.843 281.65 958.699 320.149 968.224 386.319C952.283 384.815 936.041 384.113 920 384.113C903.959 384.113 887.717 384.915 871.776 386.319C881.301 320.249 903.157 281.65 920 281.65ZM990.581 505.123C987.373 505.625 973.938 507.129 970.63 507.53C970.329 510.938 968.725 524.272 968.224 527.481C958.699 593.55 936.843 632.149 920 632.149C903.157 632.149 881.301 593.65 871.776 527.481C871.275 524.272 869.771 510.838 869.37 507.53C867.866 491.889 866.864 475.046 866.864 456.9C866.864 438.753 867.766 422.01 869.37 406.27C885.01 404.766 901.853 403.763 920 403.763C938.147 403.763 954.889 404.666 970.63 406.27C974.039 406.571 987.373 408.175 990.581 408.676C1056.65 418.201 1095.25 440.057 1095.25 456.9C1095.25 473.743 1056.65 495.599 990.581 505.123Z" fill="#444CE7"/>
-      </svg>
-      <span class="brand-name">Temporal</span>
-    </div>
+    <a href="https://github.com/temporal-community/ice-cream-fleet-demo" target="_blank" class="header-brand" style="text-decoration:none;">
+      <img src="/static/img/temporal_logo.svg" alt="Temporal" title="Temporal — View on GitHub" style="height:40px;" />
+    </a>
     <div class="header-divider"></div>
-    <div class="header-brand">
-      <img src="https://raw.githubusercontent.com/google/adk-docs/main/docs/assets/agent-development-kit.png" alt="Google ADK" title="Google Agent Development Kit" style="height:20px;" />
+    <a href="https://adk.dev" target="_blank" class="header-brand" style="text-decoration:none;">
+      <img src="/static/img/google_adk.png" alt="Google ADK" title="Google Agent Development Kit" style="height:40px;" />
       <span class="brand-name">Google ADK</span>
-    </div>
+    </a>
   </div>
 </header>
 
 <div class="tab-bar">
   <button class="tab active" data-tab="agent" onclick="switchTab('agent')">Agent Disconnect <span class="tab-scenario">Tool Degradation</span></button>
-  <button class="tab" data-tab="crew" onclick="switchTab('crew')">Crew Disconnect <span class="tab-scenario">Retries</span></button>
+  <button class="tab" data-tab="crew" onclick="switchTab('crew')">Fleet Disconnect <span class="tab-scenario">Retries</span></button>
   <button class="tab" data-tab="customer" onclick="switchTab('customer')">Customer Change <span class="tab-scenario">HITL</span></button>
   <div class="status-area">
     <div id="worker-status" class="worker-indicator online">
@@ -992,59 +1086,70 @@
     </div>
   </div>
 </div>
-<div class="tab-panels">
-  <div class="tab-panel active" id="panel-agent">
-    <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
-    <select id="agent-disconnect-select" class="agent-select">
-      <option value="fleet_agent">Fleet Agent</option>
-      <option value="customer_agent">Customer Agent</option>
-    </select>
-    <button class="btn" onclick="disconnectAgent()">Agent Disconnect</button>
-    <button class="btn btn-restart" onclick="reconnectAgent()">Reconnect</button>
-    <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
-  </div>
-  <div class="tab-panel" id="panel-crew">
-    <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
-    <select id="crew-disconnect-select" class="crew-select">
-      <option value="driver-1">Driver 1</option>
-      <option value="driver-2">Driver 2</option>
-      <option value="driver-3">Driver 3</option>
-      <option value="driver-4">Driver 4</option>
-      <option value="driver-5">Driver 5</option>
-    </select>
-    <button class="btn" onclick="disconnectCrew()">Service Lost</button>
-    <button class="btn btn-restart" onclick="reconnectCrew()">Reconnect Crew</button>
-    <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
-  </div>
-  <div class="tab-panel" id="panel-customer">
-    <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
-    <select id="change-order" style="background:#1e2130;color:#e0e0e0;border:1px solid #2a2d3a;border-radius:6px;padding:7px 10px;font-size:16px;">
-      <option value="">— no active orders —</option>
-    </select>
-    <select id="change-type" style="background:#1e2130;color:#e0e0e0;border:1px solid #2a2d3a;border-radius:6px;padding:7px 10px;font-size:16px;">
-      <option value="address_change">Address Change</option>
-      <option value="cancel">Cancel Order</option>
-    </select>
-    <button class="btn btn-change" onclick="submitCustomerChange()">Submit Change</button>
-    <span id="change-status" style="font-size:16px;color:#fbbf24;display:none;">Awaiting approval...</span>
-    <button class="btn btn-approve" id="btn-approve" onclick="approveChange(true)" style="display:none;">Approve</button>
-    <button class="btn btn-reject" id="btn-reject" onclick="approveChange(false)" style="display:none;">Reject</button>
-    <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
-  </div>
-</div>
-
 <div class="left-panel">
+  <!-- Controls -->
+  <div class="tab-panels">
+    <div class="tab-panel active" id="panel-agent">
+      <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
+      <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
+      <select id="agent-disconnect-select" class="agent-select">
+        <option value="fleet_agent">Fleet Agent</option>
+        <option value="customer_agent">Customer Agent</option>
+      </select>
+      <button class="btn btn-disrupt" onclick="disconnectAgent()">Agent Disconnect</button>
+      <div class="btn-row">
+        <button class="btn btn-restart" onclick="reconnectAgent()">Reconnect</button>
+        <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
+      </div>
+    </div>
+    <div class="tab-panel" id="panel-crew">
+      <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
+      <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
+      <select id="crew-disconnect-select" class="crew-select">
+        <option value="driver-a">Driver A</option>
+        <option value="driver-b">Driver B</option>
+        <option value="driver-c">Driver C</option>
+        <option value="driver-d">Driver D</option>
+        <option value="driver-e">Driver E</option>
+      </select>
+      <button class="btn btn-disrupt" onclick="disconnectCrew()">Service Lost</button>
+      <div class="btn-row">
+        <button class="btn btn-restart" onclick="reconnectCrew()">Reconnect Crew</button>
+        <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
+      </div>
+    </div>
+    <div class="tab-panel" id="panel-customer">
+      <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
+      <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
+      <select id="change-order" class="agent-select">
+        <option value="">— no active orders —</option>
+      </select>
+      <select id="change-type" class="agent-select">
+        <option value="address_change">Address Change</option>
+        <option value="cancel">Cancel Order</option>
+      </select>
+      <div class="btn-row">
+        <button class="btn btn-change" onclick="submitCustomerChange()">Submit Change</button>
+        <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
+      </div>
+      <span id="change-status" style="font-size:14px;color:#fbbf24;display:none;">Awaiting approval...</span>
+      <div class="btn-row">
+        <button class="btn btn-approve" id="btn-approve" onclick="approveChange(true)" style="display:none;">Approve</button>
+        <button class="btn btn-reject" id="btn-reject" onclick="approveChange(false)" style="display:none;">Reject</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Agent Reasoning Panel -->
   <div class="panel-section agent-panel" id="section-agents">
-    <div class="section-label" onclick="toggleSection('section-agents')">ADK Agent Team</div>
+    <div class="section-label">ADK Agent Team</div>
     <div class="section-body">
       <div id="agent-events" class="agent-boxes">
         <div class="agent-box fleet_agent" id="agent-box-fleet_agent">
           <div class="agent-box-header">
-            <div class="agent-box-icon" style="background:#1e3a5f;">F</div>
             <div>
               <div class="agent-box-name">Fleet Agent</div>
-              <div class="agent-box-role">Fleet status, route ETAs</div>
+              <div class="agent-box-role">Operations and logistics</div>
               <div class="agent-tool-badges">
                 <span class="tool-badge">Fleet Status</span>
                 <span class="tool-badge">Route Info</span>
@@ -1056,10 +1161,9 @@
         </div>
         <div class="agent-box customer_agent" id="agent-box-customer_agent">
           <div class="agent-box-header">
-            <div class="agent-box-icon" style="background:#3d1f5e;">C</div>
             <div>
               <div class="agent-box-name">Customer Agent</div>
-              <div class="agent-box-role">Order priorities, hotel events</div>
+              <div class="agent-box-role">Priorities and deadlines</div>
               <div class="agent-tool-badges">
                 <span class="tool-badge">Order Priorities</span>
                 <span class="tool-badge">Google Search</span>
@@ -1071,7 +1175,6 @@
         </div>
         <div class="agent-box resolver" id="agent-box-resolver">
           <div class="agent-box-header">
-            <div class="agent-box-icon" style="background:#1a3a1a;">D</div>
             <div>
               <div class="agent-box-name">Dispatch Agent</div>
               <div class="agent-box-role">Weighs both, assigns driver</div>
@@ -1087,29 +1190,16 @@
       </div>
     </div>
   </div>
+</div>
 
-  <!-- Couriers + Orders (middle, compact) -->
-  <div class="mid-sections">
-    <div class="panel-section collapsed" id="section-couriers">
-      <div class="section-label" onclick="toggleSection('section-couriers')">Drivers</div>
-      <div class="section-body">
-        <div id="crew-cards"></div>
-      </div>
-    </div>
-    <div class="panel-section collapsed" id="section-orders">
-      <div class="section-label" onclick="toggleSection('section-orders')">Orders</div>
-      <div class="section-body">
-        <div id="order-cards"></div>
-      </div>
-    </div>
+<div class="fleet-orders-row">
+  <div class="fleet-panel" id="fleet-panel">
+    <div class="fleet-panel-label" onclick="document.getElementById('fleet-panel').classList.toggle('collapsed')">Delivery Fleet</div>
+    <div id="crew-cards"></div>
   </div>
-
-  <!-- Event Log (pinned bottom) -->
-  <div class="panel-section event-log-section" id="section-events">
-    <div class="section-label" onclick="toggleSection('section-events')">Event Log</div>
-    <div class="section-body">
-      <div id="event-log" class="event-log"></div>
-    </div>
+  <div class="orders-panel" id="orders-panel">
+    <div class="orders-panel-label" onclick="document.getElementById('orders-panel').classList.toggle('collapsed')">Customer Orders</div>
+    <div id="order-cards"></div>
   </div>
 </div>
 
@@ -1121,11 +1211,6 @@
 </div>
 
 <script>
-// --- Collapsible sections ---
-function toggleSection(id) {
-  document.getElementById(id).classList.toggle('collapsed');
-}
-
 // --- Tab switching ---
 function switchTab(tabName) {
   document.querySelectorAll('.tab-bar .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
@@ -1214,24 +1299,71 @@ function getBearing(prev, curr) {
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
-function crewIcon(color, isDisconnected, bearing) {
-  // 🚚 emoji faces left by default. Flip when heading east (0-180) so truck faces forward.
-  const flip = typeof bearing === 'number' && bearing <= 180;
+const TRUCK_SVGS = {
+  'driver-a': ['/static/img/truck_a.svg', '/static/img/truck_a_west.svg'],
+  'driver-b': ['/static/img/truck_b.svg', '/static/img/truck_b_west.svg'],
+  'driver-c': ['/static/img/truck_c.svg', '/static/img/truck_c_west.svg'],
+  'driver-d': ['/static/img/truck_d.svg', '/static/img/truck_d_west.svg'],
+  'driver-e': ['/static/img/truck_e.svg', '/static/img/truck_e_west.svg'],
+};
+
+// Base sizes at zoom 15
+const BASE_ZOOM = 15;
+const BASE_TRUCK_W = 60, BASE_TRUCK_H = 49;
+const BASE_ZIGGY_W = 140;
+
+function mapScale() {
+  const z = map.getZoom();
+  return Math.pow(1.4, z - BASE_ZOOM);
+}
+
+function crewIcon(color, isDisconnected, bearing, driverId) {
+  const s = mapScale();
+  const w = Math.round(BASE_TRUCK_W * s);
+  const h = Math.round(BASE_TRUCK_H * s);
+  const westbound = typeof bearing === 'number' && bearing > 180;
+  const ringSize = Math.round(68 * s);
   const ring = isDisconnected
-    ? `<div style="position:absolute;top:-6px;left:50%;transform:translateX(-50%);width:56px;height:56px;border:3px solid #ef4444;border-radius:50%;animation:pulse 1.5s infinite;z-index:0;"></div>`
+    ? `<div style="position:absolute;top:${Math.round(-6*s)}px;left:50%;transform:translateX(-50%);width:${ringSize}px;height:${Math.round(58*s)}px;border:3px solid #ef4444;border-radius:50%;animation:pulse 1.5s infinite;z-index:0;"></div>`
     : '';
+  const variants = TRUCK_SVGS[driverId] || TRUCK_SVGS['driver-a'];
+  const truckSrc = westbound ? variants[1] : variants[0];
   return L.divIcon({
     className: 'crew-marker',
-    html: `<div style="position:relative;width:52px;height:44px;">
+    html: `<div style="position:relative;width:${w}px;height:${h}px;">
       ${ring}
-      <div style="position:absolute;top:-8px;left:50%;transform:translateX(-50%);font-size:30px;line-height:1;z-index:2;">🍦</div>
-      <div style="margin-top:18px;font-size:28px;line-height:1;text-align:center;${flip ? 'transform:scaleX(-1);' : ''}">🚚</div>
-      <div style="position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:36px;height:4px;background:${color};border-radius:2px;opacity:0.8;"></div>
+      <img src="${truckSrc}" style="width:${w}px;height:${h}px;" />
     </div>`,
-    iconSize: [52, 44],
-    iconAnchor: [26, 22],
+    iconSize: [w, h],
+    iconAnchor: [Math.round(w/2), Math.round(h/2)],
   });
 }
+
+// Refresh all markers + Ziggy's sign on zoom
+let _lastCrews = null;
+map.on('zoomend', () => {
+  // Resize truck markers
+  if (_lastCrews) {
+    Object.values(_lastCrews).forEach(c => {
+      if (crewMarkers[c.driver_id]) {
+        const color = CREW_COLORS[c.status] || '#94a3b8';
+        const driverColor = DRIVER_COLORS[c.driver_id] || color;
+        const isDisconnected = c.disconnected || c.status === 'disconnected';
+        const prev = prevPositions[c.driver_id];
+        crewMarkers[c.driver_id].setIcon(crewIcon(driverColor, isDisconnected, prev?.bearing || 0, c.driver_id));
+      }
+    });
+  }
+  // Resize Ziggy's sign
+  const ziggyImg = document.querySelector('.ziggy-neon');
+  if (ziggyImg) {
+    ziggyImg.style.width = Math.round(BASE_ZIGGY_W * mapScale()) + 'px';
+  }
+  // Resize hotel signs
+  document.querySelectorAll('.hotel-sign').forEach(el => {
+    el.style.width = Math.round(BASE_SIGN_W * mapScale()) + 'px';
+  });
+});
 
 const CREW_COLORS = {
   idle: '#94a3b8',
@@ -1246,35 +1378,42 @@ const CREW_COLORS = {
 };
 
 const DRIVER_COLORS = {
-  'driver-1': '#3b82f6',
-  'driver-2': '#22c55e',
-  'driver-3': '#a855f7',
-  'driver-4': '#FF8C00',
-  'driver-5': '#00CED1',
+  'driver-a': '#3b82f6',
+  'driver-b': '#22c55e',
+  'driver-c': '#a855f7',
+  'driver-d': '#FF8C00',
+  'driver-e': '#00CED1',
 };
 
 // --- Sign tooltips ---
+const HOTEL_SIGNS = {
+  'MGM Grand': '/static/img/sign_mgm.png',
+  'Caesars': '/static/img/sign_caesars.png',
+  'Caesars Palace': '/static/img/sign_caesars.png',
+  'Mandalay Bay': '/static/img/sign_mandalay.png',
+  'Cosmopolitan': '/static/img/sign_cosmopolitan.png',
+  'The Cosmopolitan': '/static/img/sign_cosmopolitan.png',
+};
+const BASE_SIGN_W = 120;
+
 function vegasSign(name, sub) {
-  return `<div class="vegas-sign">
-    <div class="vegas-star">★</div>
-    <div class="vegas-diamond">
-      <div class="vegas-name">${name}</div>
-      ${sub ? `<div class="vegas-sub">${sub}</div>` : ''}
-    </div>
-    <div class="vegas-pole"></div>
+  const signSrc = HOTEL_SIGNS[name];
+  if (signSrc) {
+    const w = Math.round(BASE_SIGN_W * mapScale());
+    return `<div style="text-align:center;">
+      <img src="${signSrc}" class="hotel-sign" style="width:${w}px;height:auto;" alt="${name}" />
+    </div>`;
+  }
+  // Fallback for unknown hotels (e.g. Cosmopolitan reroute)
+  return `<div style="text-align:center;padding:4px 10px;background:rgba(0,0,0,0.7);border:1px solid #c8a84e;border-radius:4px;">
+    <div style="color:#ffe14d;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">${name}</div>
+    ${sub ? `<div style="color:#f0d080;font-size:10px;">${sub}</div>` : ''}
   </div>`;
 }
 
 function retroSign(name) {
-  return `<div class="retro-sign">
-    <div class="retro-neon-wrap">
-      <div class="retro-body">
-        <div class="retro-icon">🍦</div>
-        <div class="retro-name">${name}</div>
-        <div class="retro-sub">Ice Cream &amp; Treats</div>
-      </div>
-    </div>
-    <div class="retro-pole"></div>
+  return `<div style="text-align:center;">
+    <img src="/static/img/ziggys_neon.png" class="ziggy-neon" alt="${name}" />
   </div>`;
 }
 
@@ -1336,7 +1475,6 @@ function connectWS() {
     updateOrders(state.orders);
     updateChangeOrderDropdown(state.orders);
     updateAgentEvents(state.agent_events, state.agent_health);
-    updateEventLog(state.event_log);
     updateCrewDisconnectBanner(state.drivers);
   };
   ws.onclose = () => setTimeout(connectWS, 1000);
@@ -1345,6 +1483,7 @@ connectWS();
 
 // --- Update couriers ---
 function updateCrews(crews) {
+  _lastCrews = crews;
   Object.values(crews).forEach(c => {
     const pos = [c.position.lat, c.position.lng];
     const color = CREW_COLORS[c.status] || '#94a3b8';
@@ -1360,14 +1499,14 @@ function updateCrews(crews) {
     const isDisconnected = c.disconnected || c.status === 'disconnected';
     const driverColor = DRIVER_COLORS[c.driver_id] || color;
     if (!crewMarkers[c.driver_id]) {
-      crewMarkers[c.driver_id] = L.marker(pos, { icon: crewIcon(driverColor, isDisconnected, bearing) }).addTo(map);
-      crewMarkers[c.driver_id].bindTooltip(c.driver_id, { direction: 'top', offset: [0, -24] });
+      crewMarkers[c.driver_id] = L.marker(pos, { icon: crewIcon(driverColor, isDisconnected, bearing, c.driver_id) }).addTo(map);
+      crewMarkers[c.driver_id].bindTooltip(c.driver_id.replace(/^driver-(.)/, (_, l) => 'Driver-' + l.toUpperCase()), { direction: 'top', offset: [0, -24] });
       crewTrails[c.driver_id] = L.polyline([], {
         color: driverColor, weight: 2, opacity: 0.4, dashArray: '4 6',
       }).addTo(map);
     } else {
       crewMarkers[c.driver_id].setLatLng(pos);
-      crewMarkers[c.driver_id].setIcon(crewIcon(driverColor, isDisconnected, bearing));
+      crewMarkers[c.driver_id].setIcon(crewIcon(driverColor, isDisconnected, bearing, c.driver_id));
     }
 
     const delivering = ['en_route_delivery', 'delivering'].includes(c.status);
@@ -1379,14 +1518,18 @@ function updateCrews(crews) {
     }
   });
 
-  // Sidebar cards
+  // Fleet panel cards
   const container = document.getElementById('crew-cards');
   container.innerHTML = Object.values(crews).map(c => {
-    const orders = c.current_orders.length > 0 ? c.current_orders.join(', ') : 'none';
+    const driverLabel = c.driver_id.replace(/^driver-(.)/, (_, l) => 'Driver-' + l.toUpperCase());
+    const orderStr = c.current_orders.length > 0 ? c.current_orders.join(', ') : 'None';
     return `
-      <div class="card">
-        <h3>${c.driver_id} <span class="status-pill status-${c.status}">${c.status.replace(/_/g, ' ')}</span></h3>
-        <div class="detail">Orders: ${orders}</div>
+      <div class="card" style="display:flex;align-items:center;gap:13px;">
+        <div style="flex:1;display:flex;align-items:center;gap:13px;">
+          <span style="font-size:18px;font-weight:500;color:#f8fafc;">${driverLabel}</span>
+          <span class="status-pill status-${c.status}">${c.status.replace(/_/g, ' ')}</span>
+        </div>
+        <span style="font-size:14px;color:#92a4c3;">Order: ${orderStr}</span>
       </div>
     `;
   }).join('');
@@ -1397,19 +1540,27 @@ function updateOrders(orders) {
   const container = document.getElementById('order-cards');
   container.innerHTML = Object.values(orders).map(o => {
     const priorityClass = o.priority === 'vip' ? 'priority-vip' : 'priority-standard';
-    const lastLog = o.status_log.length > 0 ? o.status_log[o.status_log.length - 1] : '';
-    const orderNum = o.order_id.replace(/^order-/, '#');
+    const driverLetter = o.assigned_driver_id ? o.assigned_driver_id.replace(/^driver-/, '').toUpperCase() : '—';
+    const degradedBadge = o.degraded ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:#451a03;color:#f97316;border:1px solid rgba(249,115,22,0.3);font-family:\'Noto Sans Mono\',monospace;text-transform:uppercase;">Degraded</span>' : '';
     return `
-      <div class="card">
-        <h3>
-          <span style="font-size:17px;font-weight:800;color:#e0e0e0;margin-right:2px;">${orderNum}</span>
-          <span class="${priorityClass}">${o.priority.toUpperCase()}</span>
-          ${o.hotel}
-          <span class="status-pill status-${o.status}">${o.status.replace(/_/g, ' ')}</span>
-        </h3>
-        <div class="detail">${o.label} &middot; ${o.servings} servings</div>
-        <div class="detail">Driver: ${o.assigned_driver_id || 'unassigned'} &middot; Deadline: ${o.deadline_minutes}min</div>
-        ${lastLog ? `<div class="detail" style="color: #9ca3af;">${lastLog}</div>` : ''}
+      <div class="card" style="display:flex;gap:13px;align-items:flex-start;${o.degraded ? 'border-color:rgba(249,115,22,0.3);' : ''}">
+        <div style="flex:1;display:flex;flex-direction:column;gap:8px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="${priorityClass}" style="font-size:14px;">${o.priority === 'vip' ? 'VIP' : 'Standard'}</span>
+            <span style="font-size:18px;font-weight:500;color:#f8fafc;">${o.hotel}</span>
+            <span class="status-pill status-${o.status}">${o.status.replace(/_/g, ' ')}</span>
+            ${degradedBadge}
+          </div>
+          <div style="font-size:14px;color:#92a4c3;line-height:20px;">${o.label}<br>${o.servings} servings</div>
+        </div>
+        <div style="background:#1a1c4c;padding:4px 8px;text-align:right;flex-shrink:0;">
+          <div style="font-size:12px;color:#92a4c3;font-weight:500;">Driver</div>
+          <div style="font-size:14px;color:#f8fafc;font-family:'Noto Sans Mono',monospace;">${driverLetter}</div>
+        </div>
+        <div style="background:#1a1c4c;padding:4px 8px;text-align:right;flex-shrink:0;">
+          <div style="font-size:12px;color:#92a4c3;font-weight:500;">Deadline</div>
+          <div style="font-size:14px;color:#f8fafc;font-family:'Noto Sans Mono',monospace;">${o.deadline_minutes} min</div>
+        </div>
       </div>
     `;
   }).join('');
@@ -1440,7 +1591,6 @@ let prevEventCounts = { fleet_agent: 0, customer_agent: 0, resolver: 0 };
 let prevTotalCount = 0;
 let _pendingChangeDetails = '';
 
-const SNIPPET_LEN = 60;
 
 function updateAgentEvents(events, agentHealth) {
   if (!events) return;
@@ -1469,6 +1619,29 @@ function updateAgentEvents(events, agentHealth) {
     }
     if (customerBadge) {
       customerBadge.classList.toggle('badge-offline', agentHealth.customer_agent === false);
+    }
+  }
+
+  // Propagate offline status to Dispatch panel — insert after header, not inside body
+  const dispatchBox = document.getElementById('agent-box-resolver');
+  let offlineBanner = dispatchBox.querySelector('.dispatch-offline-notice');
+  if (agentHealth) {
+    const offlineAgents = ['fleet_agent', 'customer_agent'].filter(a => agentHealth[a] === false);
+    if (offlineAgents.length > 0) {
+      const names = offlineAgents.map(a => a === 'fleet_agent' ? 'Fleet Agent' : 'Customer Agent').join(', ');
+      if (!offlineBanner) {
+        offlineBanner = document.createElement('div');
+        offlineBanner.className = 'dispatch-offline-notice';
+        // Insert after the header, before the body — so innerHTML wipes don't remove it
+        const header = dispatchBox.querySelector('.agent-box-header');
+        header.insertAdjacentElement('afterend', offlineBanner);
+      }
+      offlineBanner.innerHTML = `<div style="color:#e45858;font-size:12px;font-weight:500;text-transform:uppercase;margin-bottom:2px;">Service Disruption</div><div style="color:#e45858;font-size:14px;">${names} offline — dispatching with available data only</div>`;
+      offlineBanner.style.display = 'block';
+      // Ensure dispatch box is active so the notice is visible
+      dispatchBox.classList.add('active');
+    } else if (offlineBanner) {
+      offlineBanner.style.display = 'none';
     }
   }
 
@@ -1536,12 +1709,7 @@ function updateAgentEvents(events, agentHealth) {
         const full = e.content;
         const summary = e.summary || '';
         const displayText = summary || full;
-        const isLong = full.length > SNIPPET_LEN;
-        const hasSummary = summary.length > 0;
-        const snippet = hasSummary ? summary : (isLong ? full.substring(0, SNIPPET_LEN) + '...' : full);
-        const encoded = encodeURIComponent(full);
         const typingClass = (isLast && isThinking) ? ' typing' : '';
-        const shortClass = (!isLong && !hasSummary) ? ' short' : '';
         const isReeval = full.toUpperCase().includes('RE-EVALUATING') || full.toUpperCase().includes('ITERATION');
         if (isReeval && idx > 0) {
           html += `<div class="phase-separator reeval"><span>RE-EVALUATING — new information</span></div>`;
@@ -1549,10 +1717,9 @@ function updateAgentEvents(events, agentHealth) {
         html += `
           <div class="agent-box-entry${typingClass}">
             <div class="entry-type">${e.event_type}</div>
-            <div class="entry-content${shortClass}${hasSummary ? ' has-summary' : ''}" data-full="${encoded}" onclick="toggleEntry(this)">
-              ${snippet.replace(/\n/g, '<br>')}
+            <div class="entry-content">
+              ${displayText.replace(/\n/g, '<br>')}
             </div>
-            ${(isLong || hasSummary) ? '<div class="entry-ellipsis" onclick="toggleEntry(this.previousElementSibling)">click to expand</div>' : ''}
           </div>
         `;
       });
@@ -1567,32 +1734,7 @@ function updateAgentEvents(events, agentHealth) {
   prevTotalCount = totalCount;
 }
 
-function toggleEntry(el) {
-  if (!el || !el.classList.contains('entry-content')) return;
-  if (el.classList.contains('expanded')) {
-    // Collapse: show snippet
-    el.classList.remove('expanded');
-    const full = decodeURIComponent(el.dataset.full);
-    const snippet = full.substring(0, SNIPPET_LEN) + '...';
-    el.innerHTML = snippet.replace(/\n/g, '<br>');
-  } else {
-    // Expand: show full content
-    el.classList.add('expanded');
-    const full = decodeURIComponent(el.dataset.full);
-    el.innerHTML = full.replace(/\n/g, '<br>');
-  }
-}
 
-// --- Update event log ---
-function updateEventLog(events) {
-  const container = document.getElementById('event-log');
-  container.innerHTML = events.slice().reverse().slice(0, 50).map(e => {
-    const t = new Date(e.t * 1000).toLocaleTimeString();
-    const isReplay = e.msg && e.msg.includes('[REPLAY]');
-    const style = isReplay ? ' style="color: #38bdf8; font-weight: 600;"' : '';
-    return `<div${style}><span class="event-time">${t}</span> ${e.msg}</div>`;
-  }).join('');
-}
 
 // --- API helpers ---
 async function api(endpoint, method = 'POST', body = null) {
@@ -1682,13 +1824,14 @@ function updateCrewDisconnectBanner(crews) {
   const disconnected = Object.values(crews).filter(c => c.disconnected);
   const recovering = Object.values(crews).filter(c => c.recovering);
 
+  const driverLabel = (id) => id.replace(/^driver-(.)/, (_, l) => 'Driver-' + l.toUpperCase());
   if (recovering.length > 0) {
-    const ids = recovering.map(c => c.driver_id).join(', ');
+    const ids = recovering.map(c => driverLabel(c.driver_id)).join(', ');
     banner.classList.add('active', 'recovering');
     textEl.textContent = `Replaying — ${ids}`;
     subEl.textContent = 'Temporal restoring workflow state from durable history...';
   } else if (disconnected.length > 0) {
-    const ids = disconnected.map(c => c.driver_id).join(', ');
+    const ids = disconnected.map(c => driverLabel(c.driver_id)).join(', ');
     banner.classList.add('active');
     banner.classList.remove('recovering');
     textEl.textContent = `${ids} Disconnected`;
@@ -1712,14 +1855,31 @@ async function reconnectAgent() {
 }
 
 async function resetDemo() {
-  Object.values(crewTrails).forEach(t => t.setLatLngs([]));
-  const result = await api('reset');
+  try {
+    // Clear map trails and markers
+    Object.values(crewTrails).forEach(t => t.setLatLngs([]));
+    Object.keys(crewMarkers).forEach(id => {
+      map.removeLayer(crewMarkers[id]);
+      delete crewMarkers[id];
+    });
+    _lastCrews = null;
+
+    // Call server reset
+    const result = await api('reset');
+    console.log('Reset:', result);
+  } catch (e) {
+    console.error('Reset API error:', e);
+  }
+
+  // Force-clear UI regardless of API result
   const el = document.getElementById('worker-status');
   el.className = 'worker-indicator online';
   el.innerHTML = '<div class="worker-dot"></div><span>Service Online</span>';
+
   // Reset crew disconnect banner
   const crewBanner = document.getElementById('crew-disconnect-banner');
   crewBanner.classList.remove('active', 'recovering');
+
   // Reset agent boxes
   AGENT_IDS.forEach(agentId => {
     const box = document.getElementById(`agent-box-${agentId}`);
@@ -1728,9 +1888,17 @@ async function resetDemo() {
     box.querySelector('.agent-box-status').textContent = 'Waiting';
     box.querySelector('.agent-box-body').innerHTML = '';
   });
+  // Clear dispatch offline notice
+  const offlineNotice = document.querySelector('.dispatch-offline-notice');
+  if (offlineNotice) offlineNotice.style.display = 'none';
+
+  // Clear cards
+  document.getElementById('crew-cards').innerHTML = '';
+  document.getElementById('order-cards').innerHTML = '';
+
+  // Reset counters
   prevEventCounts = { fleet_agent: 0, customer_agent: 0, resolver: 0 };
   prevTotalCount = 0;
-  console.log('Reset:', result);
 }
 </script>
 </body>

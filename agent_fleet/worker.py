@@ -35,6 +35,7 @@ from agent_fleet.activities import (
     publish_agent_event,
     publish_agent_events_batch,
     register_assignment,
+    sync_driver_position,
     tool_get_fleet_status,
     tool_get_order_priorities,
     tool_get_route_info,
@@ -83,6 +84,7 @@ def create_delivery_worker(client: Client) -> Worker:
             get_fleet_status,
             get_order_priorities,
             publish_agent_event,
+            sync_driver_position,
         ],
         max_concurrent_activities=20,
     )

@@ -60,67 +60,63 @@ The `run.sh` script sets up your Python environment, installs dependencies, and 
 
 ## Demo Flow
 
-1. **Start Deliveries** — Orders auto-generate every 10s. AI agents reason per-order and assign to the best delivery actor. Delivery actors continuously pick up from Frosty's Ice Cream and deliver.
+1. **Start Deliveries** — Orders auto-generate every 10s. AI agents reason per-order and assign to the best delivery actor. Drivers batch-pickup up to 3 orders at Ziggy's Ice Cream and deliver them sequentially.
 2. **Demo 1: Tool Degradation** — Take Fleet Agent offline → tools fail fast (2 retries) → error returned to LLM → Dispatch Agent assigns with Customer Agent data → reconnect → full reasoning resumes
-3. **Demo 2: Service Disruption & Recovery** — Select a delivery actor → disconnect → finishes delivery, stays at hotel, can't report → Temporal retries with backoff → reconnect → next retry succeeds → navigates home
+3. **Demo 2: Fleet Disconnect & Recovery** — Select a driver with multiple orders → disconnect → finishes current delivery, stays at hotel → Temporal retries with backoff → reconnect → resumes from next order, no repeated work
 4. **Demo 3: Human-in-the-Loop (HITL)** — Pick an active order → submit address change → workflow pauses for approval → approve → delivery actor reroutes mid-delivery to new destination
 
 
 ## Architecture
 
 ```
-┌──────────────────────────────────┐
-│         Temporal Server          │
-│   (workflow state + replay)      │
-└──────────┬───────────────────────┘
-           │
-     ┌─────┴─────────────────────────────────┐
-     │                                       │
-┌────▼─────────────────────────────────┐ ┌───▼──────────────────────────┐
-│  Worker process (3 workers)          │ │  Server process              │
-│                                      │ │  FastAPI + WebSocket         │
-│  meltdown-workflows worker           │ │                              │
-│  ├─ MeltdownDemoWorkflow (state)     │ │  Queries Temporal for state: │
-│  │    ├─ owns driver positions,      │ │  ├─ MeltdownDemoWorkflow     │
-│  │    │   order assignments          │ │  │   .get_status             │
-│  │    ├─ builds DriverSnapshots      │ │  └─ DriverRouteWorkflow     │
-│  │    ├─ _run_adk_assignment()       │ │      .get_status             │
-│  │    │   inline (live mode)         │ │                              │
-│  │    ├─ OrderGenerationWorkflow     │ │  Sends signals only:         │
-│  │    │   child (timer + orders)     │ │  disconnect, reconnect,      │
-│  │    └─ DriverRouteWorkflow x5      │ │  customer change, start      │
-│  │        child workflows            │ │                              │
-│  └─ DriverRouteWorkflow              │ │  No workers, no FleetState   │
-│       ├─ owns disconnect state       │ └──────────────────────────────┘
-│       │   (Temporal retry pattern)   │
-│       ├─ tracks status, path_history,│
-│       │   is_disconnected,           │
-│       │   is_recovering,             │
-│       │   current_orders             │
-│       ├─ navigate_to() → DELIVERY    │
-│       ├─ pickup_orders() → DELIVERY  │
-│       ├─ deliver_order() → DELIVERY  │
-│       └─ signals parent on complete  │
-│                                      │
-│  meltdown-delivery worker (max 20)   │
-│  └─ navigation, pickup, deliver,     │
-│     order generation, changes        │
-│                                      │
-│  meltdown-agents worker (max 5)      │
-│  └─ ADK tool activities              │
-│       (via TemporalModel):           │
-│       ParallelAgent:                 │
-│       ├─ Fleet Agent                 │
-│       │   tool_get_fleet_status      │
-│       │   tool_get_route_info (Maps) │
-│       └─ Customer Agent              │
-│           tool_get_order_priorities  │
-│           google_search (grounding)  │
-│       Dispatch Agent →               │
-│         tool_submit_assignment       │
-│       TemporalModel(→AGENTS_QUEUE)   │
-└──────────────────────────────────────┘
+                        ┌─────────────────────────┐
+                        │     Temporal Server      │
+                        │   event log + replay     │
+                        └────────────┬────────────┘
+                                     │
+                ┌────────────────────┼────────────────────┐
+                │                    │                    │
+                ▼                    ▼                    ▼
+   ┌─────────────────────┐  ┌───────────────┐  ┌──────────────────┐
+   │   Workflow Worker    │  │Delivery Worker│  │  Agents Worker   │
+   │  meltdown-workflows │  │meltdown-deliv.│  │ meltdown-agents  │
+   └─────────┬───────────┘  └───────┬───────┘  └────────┬─────────┘
+             │                      │                    │
+             │                      │                    │
+   ┌─────────▼───────────┐  ┌──────▼────────┐  ┌────────▼─────────┐
+   │ MeltdownDemoWorkflow │  │  Activities:  │  │  ADK Agents      │
+   │                      │  │  navigate_to  │  │  (via Temporal-  │
+   │  OrderGeneration ◄───┤  │  pickup_orders│  │   Model):        │
+   │    (child, timer)    │  │  deliver_order│  │                  │
+   │                      │  │  get_route_   │  │  ┌────┐ ┌────┐  │
+   │  Driver-A ◄──────────┤  │   polyline    │  │  │Fleet│ │Cust│  │
+   │  Driver-B ◄──────────┤  │  generate_    │  │  │Agent│ │Agnt│  │
+   │  Driver-C ◄──────────┤  │   order       │  │  └──┬─┘ └─┬──┘  │
+   │  Driver-D ◄──────────┤  │  sync_driver_ │  │     └──┬──┘     │
+   │  Driver-E ◄──────────┤  │   position    │  │  ┌─────▼─────┐  │
+   │  (child workflows)   │  │  execute_     │  │  │ Dispatch   │  │
+   │                      │  │   customer_   │  │  │  Agent     │  │
+   │  ADK runs inline:    │  │   change      │  │  └───────────┘  │
+   │  _run_adk_assignment │  └───────────────┘  │                  │
+   │  (live mode)         │                     │  invoke_model    │
+   └──────────────────────┘                     │  tool_get_fleet  │
+                                                │  tool_get_route  │
+   ┌──────────────────────┐                     │  tool_get_order  │
+   │   Server Process     │                     │  google_search   │
+   │   FastAPI + WS       │                     └──────────────────┘
+   │                      │
+   │  Queries workflows   │   ┌──────────────────────────────────┐
+   │  for state (no       │   │         Frontend (SPA)           │
+   │  workers, no         │◄──┤  Leaflet map + WebSocket feed    │
+   │  FleetState reads)   │   │  Agent reasoning panels          │
+   │                      │   │  Fleet/order status cards         │
+   │  Sends signals:      │   └──────────────────────────────────┘
+   │  start, disconnect,  │
+   │  reconnect, change   │
+   └──────────────────────┘
 ```
+
+**Order lifecycle:** Order generates on timer → ADK agents reason (Fleet + Customer in parallel → Dispatch) → capacity check + assignment → driver batch-picks up at Ziggy's → delivers sequentially to hotels → signals parent on each completion → returns to base
 
 **How ADK and Temporal map to each other:**
 
@@ -179,7 +175,9 @@ Fleet and Customer run **in parallel** (`ParallelAgent`), then the Dispatch Agen
 
 > **Note:** Gemini's built-in `google_search` grounding normally can't be combined with custom function tools in the same request. ADK's `GoogleSearchTool(bypass_multi_tools_limit=True)` enables this — the Customer Agent uses Google Search alongside `tool_get_order_priorities` in a single agent, no sub-agent needed.
 
-> **Agent disconnect resilience:** When Fleet Agent is disconnected, its tool activities (`tool_get_fleet_status`, `tool_get_route_info`) check FleetState and raise `RuntimeError`. Temporal retries (2 attempts, fast backoff via `_FLEET_TOOL_RETRY`). The `_activity_tool.py` wrapper catches the exhausted retry and returns an error string to the LLM — the agent reasons about the failure, and the Dispatch Agent assigns based on Customer Agent data alone. No pipeline crash.
+> **Agent disconnect resilience:** When Fleet Agent is disconnected, its tool activities (`tool_get_fleet_status`, `tool_get_route_info`) check FleetState and raise `RuntimeError`. Temporal retries (2 attempts, fast backoff via `_FLEET_TOOL_RETRY`). The `_activity_tool.py` wrapper catches the exhausted retry and returns an error string to the LLM — the agent reasons about the failure, and the Dispatch Agent assigns based on Customer Agent data alone. Orders assigned during Fleet Agent outage are flagged as `degraded` in the UI. No pipeline crash.
+>
+> **Note on Maps API errors:** `tool_get_route_info` calls the Google Maps Directions API for driving ETAs. Occasional failures (rate limiting, quota, transient errors) are normal — the same graceful degradation applies. The error is returned to the LLM as context, the Fleet Agent notes the missing ETA, and the Dispatch Agent assigns with available data. This is the system working as designed, not a bug.
 
 ### Mock mode
 

@@ -276,14 +276,14 @@ async def mock_reason_about_assignment(
             best_driver = driver.driver_id
     if best_driver is None:
         # Fallback: pick any driver with capacity even if busy
-        best_driver = "driver-1"
+        best_driver = "driver-a"
 
     best_eta = max(2, int(best_dist * 69.0 * 3.5))
 
     # Map driver IDs to driver labels for display
     def _driver_label(cid: str) -> str:
         if cid.startswith("driver-"):
-            return f"Driver {cid.split('-')[-1]}"
+            return f"Driver-{cid.split('-')[-1].upper()}"
         return cid
 
     if fleet_agent_offline:

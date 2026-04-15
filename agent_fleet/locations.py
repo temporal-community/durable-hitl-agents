@@ -10,10 +10,10 @@ import random
 
 from agent_fleet.models import Coords
 
-# Frosty's Ice Cream — midway between Caesars (36.1162) and Mandalay (36.0919),
+# Ziggy's Ice Cream — midway between Caesars (36.1162) and Mandalay (36.0919),
 # east of the Strip on Paradise Rd
 WAREHOUSE = Coords(lat=36.1040, lng=-115.1530)
-WAREHOUSE_LABEL = "Frosty's Ice Cream"
+WAREHOUSE_LABEL = "Ziggy's Ice Cream"
 
 # Delivery destinations — 3 hotels on the Strip
 VENUES: list[dict] = [

@@ -159,7 +159,7 @@ async def tool_get_route_info(
         destination_lat: Destination latitude
         destination_lng: Destination longitude
         destination_name: Human-readable name of the destination (e.g. "MGM Grand")
-        origin_name: Human-readable name of the origin (e.g. "driver-3")
+        origin_name: Human-readable name of the origin (e.g. "driver-c")
     """
     if await fleet.is_agent_disconnected("fleet_agent"):
         raise RuntimeError("Fleet Agent is disconnected — tool unavailable")
@@ -240,9 +240,9 @@ async def generate_order(inp: GenerateOrderInput) -> GenerateOrderOutput:
 
 
 @activity.defn
-async def register_assignment(driver_id: str, order_id: str) -> str:
+async def register_assignment(driver_id: str, order_id: str, degraded: bool = False) -> str:
     """Register an ADK-decided assignment in fleet state (UI projection)."""
-    await fleet.assign_order_to_driver(driver_id, order_id)
+    await fleet.assign_order_to_driver(driver_id, order_id, degraded=degraded)
     return f"Assigned {order_id} to {driver_id}"
 
 
@@ -461,3 +461,13 @@ async def execute_customer_change(
         activity.logger.info(f"Order {inp.order_id} rerouted to {dest}")
 
     return ExecuteCustomerChangeOutput(success=True)
+
+
+# --- Position sync activity ---
+
+
+@activity.defn
+async def sync_driver_position(driver_id: str) -> list[float]:
+    """Read actual driver position from FleetState — used to sync workflow state after reconnect."""
+    lat, lng = await fleet.get_driver_position(driver_id)
+    return [lat, lng]

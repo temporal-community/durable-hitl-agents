@@ -24,6 +24,7 @@ from agent_fleet.activities import (
     navigate_to,
     pickup_orders,
     publish_agent_event,
+    sync_driver_position,
 )
 from agent_fleet.locations import VENUES
 from agent_fleet.mock.activities import mock_get_route_polyline
@@ -64,6 +65,7 @@ async def run_delivery_workers(env: WorkflowEnvironment):
             get_fleet_status,
             get_order_priorities,
             publish_agent_event,
+            sync_driver_position,
         ],
     )
 
@@ -86,13 +88,13 @@ async def test_driver_route_completes_with_signal(env: WorkflowEnvironment):
         delivery_coords=venue["coords"],
         deadline_minutes=30,
     )
-    await fleet.assign_order_to_driver("driver-1", "order-1")
+    await fleet.assign_order_to_driver("driver-a", "order-1")
 
     async with run_delivery_workers(env):
         handle = await env.client.start_workflow(
             DriverRouteWorkflow.run,
-            DriverRouteInput(driver_id="driver-1"),
-            id="test-route-driver-1",
+            DriverRouteInput(driver_id="driver-a"),
+            id="test-route-driver-a",
             task_queue=WORKFLOWS_QUEUE,
         )
 
@@ -110,7 +112,7 @@ async def test_driver_route_completes_with_signal(env: WorkflowEnvironment):
         await handle.signal(DriverRouteWorkflow.stop)
 
         result = await handle.result()
-        assert "driver-1" in result
+        assert "driver-a" in result
         assert "1 deliveries" in result or "completed" in result.lower()
 
 
@@ -128,12 +130,12 @@ async def test_driver_route_handles_multiple_orders(env: WorkflowEnvironment):
             delivery_coords=venue["coords"],
             deadline_minutes=30,
         )
-        await fleet.assign_order_to_driver("driver-1", f"order-{i}")
+        await fleet.assign_order_to_driver("driver-a", f"order-{i}")
 
     async with run_delivery_workers(env):
         handle = await env.client.start_workflow(
             DriverRouteWorkflow.run,
-            DriverRouteInput(driver_id="driver-1"),
+            DriverRouteInput(driver_id="driver-a"),
             id="test-route-multi",
             task_queue=WORKFLOWS_QUEUE,
         )

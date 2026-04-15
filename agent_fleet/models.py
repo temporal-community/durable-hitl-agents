@@ -346,13 +346,13 @@ class AgentDisconnectInput:
 @dataclass
 class MeltdownDemoInput:
     escalation_enabled: bool = False
-    max_orders: int = 20
+    max_orders: int = 30
     use_mock_assignment: bool = False
 
 
 @dataclass
 class OrderGenerationInput:
-    max_orders: int = 20
+    max_orders: int = 30
     order_interval_seconds: int = 15
 
 

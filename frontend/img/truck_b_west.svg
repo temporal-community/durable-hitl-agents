@@ -1,0 +1,32 @@
+<svg preserveAspectRatio="none" width="100%" height="100%" overflow="visible" style="display: block;" viewBox="0 0 60 49" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="truck_B_west">
+<g transform="translate(60,0) scale(-1,1)">
+<path d="M9.41663 13L25.0166 3L27.4166 13H9.41663Z" fill="#F3C979" stroke="black" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M28.5184 2.5578C30.7059 2.05856 31.8116 4.38224 32.9964 6.04388C34.2905 7.68055 35.7474 9.02245 38.1537 8.47328C37.6954 9.99469 36.5785 11.1512 35.131 11.8679C33.6557 12.4623 32.0685 12.5669 30.6443 12.3767L28.5184 2.5578Z" fill="#DF5C9F" stroke="black" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M27.2761 2C28.3804 2 28.6013 3.18999 28.9326 4.49898L30.3683 10.6869C30.5892 11.7579 30.037 12.7099 29.043 12.9479C28.0491 13.1859 27.1656 12.5909 26.9448 11.5199L25.5091 5.33197C25.1778 3.66599 25.73 2 27.2761 2Z" fill="#DF5C9F" stroke="black" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M2.41663 19.1538C2.41663 16.8692 4.31663 15 6.63885 15H36.1944C38.5166 15 40.4166 16.8692 40.4166 19.1538V42H6.63885C4.31663 42 2.41663 40.1308 2.41663 37.8462V19.1538Z" fill="url(#paint0_b_west)" stroke="black" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M38.5 17H47.2632L49.2105 25.3333H53.1053C55.15 25.3333 57 27.3125 57 29.5V37.8333C57 40.125 55.2474 42 53.1053 42H38.5V17Z" fill="#DF5C9F" stroke="black" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M38.5 17H48.3182L50.5 25.5H38.5V17Z" fill="#B9CDE1" stroke="black" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M28.3864 18H10.6136C9.17016 18 8 19.4391 8 21.2143V32.7857C8 34.5609 9.17016 36 10.6136 36H28.3864C29.8298 36 31 34.5609 31 32.7857V21.2143C31 19.4391 29.8298 18 28.3864 18Z" fill="#B9CDE1" stroke="black" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M31.375 18H8.45829C7.883 18 7.41663 18.4197 7.41663 18.9375V20.0625C7.41663 20.5803 7.883 21 8.45829 21H31.375C31.9503 21 32.4166 20.5803 32.4166 20.0625V18.9375C32.4166 18.4197 31.9503 18 31.375 18Z" fill="#FFE58D" stroke="black" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M13.0312 21.0259H31V21.656C31 22.412 29.7422 23 28.125 23C26.5977 23 25.25 22.412 25.25 21.656C25.25 22.412 23.9922 23 22.375 23C20.8477 23 19.5 22.412 19.5 21.656C19.5 22.412 18.2422 23 16.625 23C15.0977 23 13.75 22.412 13.75 21.656C13.75 22.412 12.4922 23 10.875 23C9.34766 23 8 21.756 8 21L13.0312 21.0259Z" fill="#F8B198" stroke="black" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M38.4166 17V42" stroke="black" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M41.4166 28H44.4166" stroke="black" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M13.4166 15V13" stroke="black" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M27.4166 15V13" stroke="black" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="11" cy="43" r="4" fill="black" stroke="black" stroke-width="1.1"/>
+<circle cx="11" cy="43" r="3" fill="#EEF0F4" stroke="black" stroke-width="0.9"/>
+<circle cx="47" cy="43" r="4" fill="black" stroke="black" stroke-width="1.1"/>
+<circle cx="47" cy="43" r="3" fill="#EEF0F4" stroke="black" stroke-width="0.9"/>
+</g>
+<g transform="translate(20,0)">
+<path d="M17.0244 34V24.5455H20.8099C21.5054 24.5455 22.0856 24.6486 22.5503 24.8548C23.015 25.061 23.3643 25.3472 23.5982 25.7134C23.8321 26.0766 23.9491 26.4951 23.9491 26.9691C23.9491 27.3384 23.8752 27.6631 23.7275 27.9432C23.5798 28.2202 23.3766 28.4479 23.1181 28.6264C22.8627 28.8018 22.5703 28.9265 22.241 29.0004V29.0927C22.6011 29.1081 22.9381 29.2096 23.252 29.3974C23.569 29.5851 23.826 29.8482 24.0229 30.1868C24.2199 30.5223 24.3184 30.9223 24.3184 31.3871C24.3184 31.8887 24.1938 32.3365 23.9445 32.7305C23.6983 33.1213 23.3336 33.4306 22.8504 33.6584C22.3672 33.8861 21.7716 34 21.0638 34H17.0244ZM19.0233 32.3658H20.6529C21.21 32.3658 21.6162 32.2596 21.8717 32.0472C22.1271 31.8318 22.2548 31.5456 22.2548 31.1886C22.2548 30.927 22.1917 30.6961 22.0656 30.4961C21.9394 30.296 21.7593 30.1391 21.5254 30.0252C21.2946 29.9113 21.0192 29.8544 20.6991 29.8544H19.0233V32.3658ZM19.0233 28.5018H20.5052C20.7791 28.5018 21.0222 28.4541 21.2346 28.3587C21.45 28.2602 21.6193 28.1217 21.7424 27.9432C21.8686 27.7647 21.9317 27.5508 21.9317 27.3015C21.9317 26.9599 21.8101 26.6844 21.567 26.4751C21.3269 26.2659 20.9853 26.1612 20.5421 26.1612H19.0233V28.5018Z" fill="black"/>
+</g>
+</g>
+<defs>
+<linearGradient id="paint0_b_west" x1="40.4166" y1="15" x2="-1.80694" y2="30.4789" gradientUnits="userSpaceOnUse">
+<stop stop-color="#FF5555"/>
+<stop offset="1" stop-color="#B664FF"/>
+</linearGradient>
+</defs>
+</svg>
