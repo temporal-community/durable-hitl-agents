@@ -1857,7 +1857,10 @@ async function reconnectAgent() {
 async function resetDemo() {
   try {
     // Clear map trails and markers
-    Object.values(crewTrails).forEach(t => t.setLatLngs([]));
+    Object.keys(crewTrails).forEach(id => {
+      map.removeLayer(crewTrails[id]);
+      delete crewTrails[id];
+    });
     Object.keys(crewMarkers).forEach(id => {
       map.removeLayer(crewMarkers[id]);
       delete crewMarkers[id];
