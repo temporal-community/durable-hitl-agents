@@ -46,10 +46,14 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
   workflow side, `invoke_model` activity on agents side). `DemoTemporalModel` (subclass of
   `TemporalModel` in `_demo_model.py`) generates context-aware summaries for the Temporal UI
   and strips null fields from LLM payloads. **Note:** `DemoTemporalModel` is a temporary
-  subclass — we've requested these features (dynamic `summary_fn`, null stripping, agent
-  name in default summary) be added to the upstream `TemporalModel`. If accepted, revert
-  `agents.py` to use `TemporalModel` directly and delete `_demo_model.py`. Same applies to
-  `_activity_tool.py` dynamic summaries. `publish_agent_event` and `publish_agent_events_batch` are registered on the
+  subclass. The upstream SDK PR (temporalio/sdk-python#1451) adds `AdkActivityConfig` with
+  `summary_fn` + agent name fallback — tested on branch `test/sdk-temporal-model-summary`
+  and confirmed working. When that PR ships: (1) bump `temporalio` version, (2) in
+  `agents.py` replace `DemoTemporalModel` with `TemporalModel` using
+  `AdkActivityConfig(summary_fn=_build_summary)`, (3) delete the `DemoTemporalModel` class
+  from `_demo_model.py` but keep `_build_summary` and its helpers. Null stripping is not
+  covered by the SDK PR but is cosmetic only. Same applies to `_activity_tool.py` dynamic
+  summaries. `publish_agent_event` and `publish_agent_events_batch` are registered on the
   workflow worker for local activity execution (UI projection with minimal history).
 - **ADK agents** (`agents.py`): Fleet Agent + Customer Agent (parallel) → Dispatch Agent (sequential).
   Live path runs ADK inline in the workflow via `_run_adk_assignment()`. No fallback to mock —

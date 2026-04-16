@@ -270,6 +270,10 @@ class DriverRouteWorkflow:
             if self._stop:
                 break
 
+            # Collection window: wait briefly to accumulate more orders
+            # before starting the pickup trip (allows multi-order batching)
+            await workflow.sleep(timedelta(seconds=4))
+
             # --- Position sync after reconnect ---
             if self._position_sync_needed:
                 self._position_sync_needed = False

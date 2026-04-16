@@ -448,6 +448,14 @@ async def execute_customer_change(
 ) -> ExecuteCustomerChangeOutput:
     """Execute a customer-initiated change (address update or cancellation)."""
     if inp.change_type == "cancel":
+        # Don't cancel if already delivered — the deliver_order activity may have
+        # completed between the cancel request and approval
+        order = await fleet.get_order(inp.order_id)
+        if order and order.status == OrderStatus.DELIVERED:
+            activity.logger.info(
+                f"Order {inp.order_id} already delivered — skipping cancel"
+            )
+            return ExecuteCustomerChangeOutput(success=False)
         await fleet.cancel_order(inp.order_id)
         activity.logger.info(f"Order {inp.order_id} cancelled")
     elif (

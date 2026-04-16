@@ -312,6 +312,28 @@ class FleetState:
             status_before_disconnect=DriverStatus(row["status_before_disconnect"]),
         )
 
+    async def get_all_drivers(self) -> list[Driver]:
+        """Get all drivers with their current state."""
+        conn = await self._get_conn()
+        drivers = []
+        async with conn.execute("SELECT * FROM drivers") as cursor:
+            async for row in cursor:
+                drivers.append(
+                    Driver(
+                        driver_id=row["driver_id"],
+                        position=Coords(lat=row["lat"], lng=row["lng"]),
+                        battery_pct=row["battery_pct"],
+                        status=DriverStatus(row["status"]),
+                        capacity=row["capacity"],
+                        current_orders=[],
+                        path_history=[],
+                        disconnected=bool(row["disconnected"]),
+                        recovering=bool(row["recovering"]),
+                        status_before_disconnect=DriverStatus(row["status_before_disconnect"]),
+                    )
+                )
+        return drivers
+
     async def get_order(self, order_id: str) -> Order | None:
         conn = await self._get_conn()
         async with conn.execute("SELECT * FROM orders WHERE order_id=?", (order_id,)) as cursor:
@@ -641,8 +663,12 @@ class FleetState:
                 orders_str = ", ".join(order_ids) if order_ids else "none"
                 disconnect_tag = " **DISCONNECTED**" if row["disconnected"] else ""
                 recovering_tag = " [recovering]" if row["recovering"] else ""
+                cap_used = len(order_ids)
+                cap_total = row["capacity"]
                 lines.append(
                     f"  {did}: status={row['status']}, "
+                    f"pos=({row['lat']:.4f}, {row['lng']:.4f}), "
+                    f"capacity={cap_used}/{cap_total}, "
                     f"orders=[{orders_str}]"
                     f"{disconnect_tag}{recovering_tag}"
                 )

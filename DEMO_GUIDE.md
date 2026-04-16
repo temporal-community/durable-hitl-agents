@@ -17,14 +17,14 @@ This guide is for anyone presenting the Meltdown demo. It covers setup, the one-
 
 If completed successfully, the web app should look like the following:
 
-<img width="1502" height="799" alt="Screenshot 2026-04-10 at 11 04 23 PM" src="https://github.com/user-attachments/assets/39a485e5-cbbf-4057-bb93-e15c7285ee3a" />
+![Meltdown Demo](.github/assets/meltdown-new-look.png)
 
 ## How it works
 See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" information.
 
 ## Pre-flight check
-- Map shows 3 hotels (MGM Grand, Caesars, Mandalay Bay) and Ziggy's Ice Cream shop
-- All 5 delivery actors are at the ice cream shop, status idle
+- Map shows the Las Vegas Strip with 3 hotels (MGM Grand, Caesars, Mandalay Bay) and Ziggy's Ice Cream
+- All 5 drivers (A–E) are parked at Ziggy's, status idle
 - "Start Deliveries" button is active
 - If you see a stale state from a prior run, click **Reset** first
 
@@ -36,7 +36,7 @@ See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" informati
 
 Use this framing at the start of the talk before any demo:
 
-> "AI agents are increasingly being used to automate complex decisions — but in production, they break. The worker crashes. A tool call times out. The LLM call returns mid-reasoning and the state is gone. What we're showing today is what happens when you combine Google ADK — a framework for composing multi-agent AI — with Temporal — a durable execution engine — so that every agent action is retryable, replayable, and recoverable."
+> "Ziggy's Ice Cream delivers to hotels on the Las Vegas Strip. They built their delivery intelligence on Temporal with Google ADK agents handling dispatch decisions. What we're showing today is their system under stress — what happens when an agent goes offline, a driver loses connection, or a customer changes their order mid-delivery. Every failure is recoverable because Temporal holds the state. Ice cream delivery can't afford lost state."
 
 ---
 
@@ -58,20 +58,20 @@ Use this framing at the start of the talk before any demo:
 
 ---
 
-### Opening: Continuous Order Flow — Agents Reasoning in Real Time
+### Opening: Ziggy's Opens for Business
 **Time: 1–2 min | Best for: opening with the "living system" feel before the 3 demos**
 
-**Setup:** Click **Start Deliveries**. Orders auto-generate every 10 seconds from 3 Las Vegas hotels (MGM Grand, Caesars Palace, Mandalay Bay).
+**Setup:** Click **Start Deliveries**. Ziggy's kitchen starts taking orders. Hotels on the Strip place orders every few seconds — MGM Grand, Caesars Palace, Mandalay Bay.
 
 **What happens automatically:**
-1. Each order triggers multi-agent reasoning — watch the Agent Reasoning panel
-2. Fleet Agent calls `tool_get_fleet_status` and `tool_get_route_info` — scans delivery actor positions, free capacity slots, and driving ETAs. Recommends the closest available delivery actor.
+1. Each order triggers multi-agent reasoning — watch the ADK Agent Team panel
+2. Fleet Agent calls `tool_get_fleet_status` for driver positions and capacity, then `tool_get_route_info` for the 1–3 closest drivers to get driving ETAs from Google Maps. Each ETA call is a separate Temporal activity — individually durable.
 3. Customer Agent calls `tool_get_order_priorities` and uses `google_search` (Gemini grounding) — evaluates VIP tier, deadline pressure, hotel events (conferences, galas), and guest count. Mandalay Bay orders are always VIP.
-4. Dispatch Agent synthesizes both assessments and calls `tool_submit_assignment` — picks the best delivery actor and explains why
-5. Delivery actors continuously pick up from Ziggy's and deliver to hotels, looping back for more
+4. Dispatch Agent synthesizes both assessments and calls `tool_submit_assignment` — picks the best driver and explains why
+5. Drivers batch-pickup at Ziggy's (up to 3 orders per trip) and deliver sequentially to hotels
 
 **What to say:**
-> "This is a continuous fleet — orders keep coming in, agents keep reasoning. Every assignment is a multi-agent decision. Fleet Agent checks who's closest and has capacity. Customer Agent evaluates priority — that Mandalay Bay order is VIP. The Dispatch Agent weighs both and assigns. Each delivery actor runs in its own child workflow, picking up and delivering in a continuous loop."
+> "This is Ziggy's delivery system running live. Orders keep flooding in from the Strip, and three AI agents reason about every single one. Fleet Agent checks who's closest — those are real Google Maps API calls, each one a separate Temporal activity. Customer Agent evaluates priority. Dispatch Agent weighs both and assigns. The drivers run in their own child workflows — batch-picking up orders and delivering them in sequence. Everything you see in the Temporal UI is individually durable and replayable."
 
 **Before you demo, set up the Temporal UI:**
 - Open http://localhost:8233 in a separate browser tab

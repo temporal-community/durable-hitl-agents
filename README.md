@@ -1,12 +1,12 @@
 # Meltdown — Ice Cream Delivery Fleet Demo <img src="https://github.com/google/adk-docs/raw/main/docs/assets/agent-development-kit.png" alt="Google ADK" height="28">
 
-A conference demo showing **Google ADK** multi-agent reasoning with **Temporal** durable execution, visualized as an ice cream delivery fleet on the Las Vegas Strip.
+Ziggy's Ice Cream runs its Las Vegas Strip delivery fleet on Temporal. When orders flood in from MGM Grand, Caesars Palace, and Mandalay Bay, AI agents reason about which driver to send — and Temporal guarantees every decision, every delivery, and every failure recovery runs to completion. This demo shows what happens when things go wrong: agents lose connectivity, drivers disconnect mid-delivery, customers change orders mid-route — and the system keeps running.
 
 <p align="center">
-  <img src=".github/assets/meltdown-snapshot.png" alt="Meltdown demo dashboard" width="900">
+  <img src=".github/assets/meltdown-new-look.png" alt="Meltdown demo dashboard" width="900">
 </p>
 
-Orders auto-generate on a timer from Las Vegas Strip venues. **AI agents** (Fleet, Customer, Dispatch Agent) reason about each order — evaluating positions, capacity, and priority — then assign it to the best **delivery actor**. When things go wrong — delivery actor disconnects, agent failures, customer changes — Temporal ensures nothing is lost.
+Built with **Google ADK** for multi-agent reasoning and **Temporal** for durable execution. Orders auto-generate on a timer. AI agents (Fleet, Customer, Dispatch) evaluate positions, capacity, ETAs, and priority — then assign each order to the best driver. Drivers batch-pickup at Ziggy's and deliver sequentially. When failures hit, Temporal's event log holds every step — nothing is lost, nothing repeats.
 
 > **Terminology:** AI agents **reason** (LLM + tools, run inline via ADK). Delivery actors **execute** (child workflows that carry out routes). They are not Temporal workers.
 
@@ -60,60 +60,58 @@ The `run.sh` script sets up your Python environment, installs dependencies, and 
 
 ## Demo Flow
 
-1. **Start Deliveries** — Orders auto-generate every 10s. AI agents reason per-order and assign to the best delivery actor. Drivers batch-pickup up to 3 orders at Ziggy's Ice Cream and deliver them sequentially.
-2. **Demo 1: Tool Degradation** — Take Fleet Agent offline → tools fail fast (2 retries) → error returned to LLM → Dispatch Agent assigns with Customer Agent data → reconnect → full reasoning resumes
-3. **Demo 2: Fleet Disconnect & Recovery** — Select a driver with multiple orders → disconnect → finishes current delivery, stays at hotel → Temporal retries with backoff → reconnect → resumes from next order, no repeated work
-4. **Demo 3: Human-in-the-Loop (HITL)** — Pick an active order → submit address change → workflow pauses for approval → approve → delivery actor reroutes mid-delivery to new destination
+1. **Start Deliveries** — Ziggy's opens for business. Orders flood in from the Strip hotels. AI agents reason per-order and assign to the best driver. Drivers batch-pickup at Ziggy's and deliver sequentially.
+2. **Demo 1: Agent Goes Down** — Fleet Agent loses connectivity → its tools fail fast (2 retries) → Dispatch Agent flies blind, assigns with degraded quality → reconnect → full fleet visibility restored
+3. **Demo 2: Driver Loses Connection** — A driver with multiple orders disconnects mid-delivery → finishes current delivery, stuck at hotel → Temporal retries with backoff → reconnect → resumes from next order, no repeated work
+4. **Demo 3: Customer Changes Mind** — Customer changes an order's destination mid-route → workflow pauses for approval → approve → driver reroutes to The Cosmopolitan. For queued orders, the address updates silently in workflow state.
 
 
 ## Architecture
 
 ```
-                        ┌─────────────────────────┐
-                        │     Temporal Server      │
-                        │   event log + replay     │
-                        └────────────┬────────────┘
-                                     │
-                ┌────────────────────┼────────────────────┐
-                │                    │                    │
-                ▼                    ▼                    ▼
-   ┌─────────────────────┐  ┌───────────────┐  ┌──────────────────┐
-   │   Workflow Worker    │  │Delivery Worker│  │  Agents Worker   │
-   │  meltdown-workflows │  │meltdown-deliv.│  │ meltdown-agents  │
-   └─────────┬───────────┘  └───────┬───────┘  └────────┬─────────┘
-             │                      │                    │
-             │                      │                    │
-   ┌─────────▼───────────┐  ┌──────▼────────┐  ┌────────▼─────────┐
-   │ MeltdownDemoWorkflow │  │  Activities:  │  │  ADK Agents      │
-   │                      │  │  navigate_to  │  │  (via Temporal-  │
-   │  OrderGeneration ◄───┤  │  pickup_orders│  │   Model):        │
-   │    (child, timer)    │  │  deliver_order│  │                  │
-   │                      │  │  get_route_   │  │  ┌────┐ ┌────┐  │
-   │  Driver-A ◄──────────┤  │   polyline    │  │  │Fleet│ │Cust│  │
-   │  Driver-B ◄──────────┤  │  generate_    │  │  │Agent│ │Agnt│  │
-   │  Driver-C ◄──────────┤  │   order       │  │  └──┬─┘ └─┬──┘  │
-   │  Driver-D ◄──────────┤  │  sync_driver_ │  │     └──┬──┘     │
-   │  Driver-E ◄──────────┤  │   position    │  │  ┌─────▼─────┐  │
-   │  (child workflows)   │  │  execute_     │  │  │ Dispatch   │  │
-   │                      │  │   customer_   │  │  │  Agent     │  │
-   │  ADK runs inline:    │  │   change      │  │  └───────────┘  │
-   │  _run_adk_assignment │  └───────────────┘  │                  │
-   │  (live mode)         │                     │  invoke_model    │
-   └──────────────────────┘                     │  tool_get_fleet  │
-                                                │  tool_get_route  │
-   ┌──────────────────────┐                     │  tool_get_order  │
-   │   Server Process     │                     │  google_search   │
-   │   FastAPI + WS       │                     └──────────────────┘
-   │                      │
-   │  Queries workflows   │   ┌──────────────────────────────────┐
-   │  for state (no       │   │         Frontend (SPA)           │
-   │  workers, no         │◄──┤  Leaflet map + WebSocket feed    │
-   │  FleetState reads)   │   │  Agent reasoning panels          │
-   │                      │   │  Fleet/order status cards         │
-   │  Sends signals:      │   └──────────────────────────────────┘
-   │  start, disconnect,  │
-   │  reconnect, change   │
-   └──────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          Temporal Server                               │
+│                     event log, replay, scheduling                      │
+└──────────────────────────────┬──────────────────────────────────────────┘
+                               │
+          ┌────────────────────┼──────────────────────┐
+          │                    │                      │
+          ▼                    ▼                      ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Worker Process (3 task queues)                       │
+│                                                                        │
+│  WORKFLOWS QUEUE             DELIVERY QUEUE         AGENTS QUEUE       │
+│  ─────────────────           ──────────────         ────────────       │
+│  MeltdownDemoWorkflow        navigate_to            invoke_model       │
+│  ├─ OrderGeneration          pickup_orders          tool_get_fleet     │
+│  │   (child, timer)          deliver_order          tool_get_route     │
+│  ├─ ADK inline:              get_route_polyline     tool_get_order     │
+│  │   Fleet + Customer        generate_order         google_search      │
+│  │   in parallel →           sync_driver_position   tool_submit_       │
+│  │   Dispatch Agent          execute_customer_        assignment       │
+│  │                             change                                  │
+│  └─ 5 DriverRouteWorkflows                         TemporalModel      │
+│     (Driver-A … Driver-E)                           routes LLM calls   │
+│     batch pickup → deliver                          + tool calls here  │
+│     sequentially → return                           (max 5 concurrent) │
+│     (max 20 concurrent)                                                │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────┐      ┌───────────────────────────────────────┐
+│    Server Process        │      │           Frontend (SPA)              │
+│    FastAPI + WebSocket   │◄────►│  Leaflet map + WebSocket state feed   │
+│                          │      │  Agent reasoning panels               │
+│  Queries Temporal for    │      │  Fleet / order status cards           │
+│  workflow state          │      │  Demo controls (disconnect, change)   │
+│                          │      └───────────────────────────────────────┘
+│  Sends signals:          │
+│  start, disconnect,      │
+│  reconnect, customer     │
+│  change, reset           │
+└──────────┬───────────────┘
+           │ queries + signals
+           ▼
+     Temporal Server
 ```
 
 **Order lifecycle:** Order generates on timer → ADK agents reason (Fleet + Customer in parallel → Dispatch) → capacity check + assignment → driver batch-picks up at Ziggy's → delivers sequentially to hotels → signals parent on each completion → returns to base
