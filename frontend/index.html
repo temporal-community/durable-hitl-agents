@@ -1546,6 +1546,7 @@ function updateOrders(orders) {
       <div class="card" style="display:flex;gap:13px;align-items:flex-start;${o.degraded ? 'border-color:rgba(249,115,22,0.3);' : ''}">
         <div style="flex:1;display:flex;flex-direction:column;gap:8px;">
           <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:13px;font-weight:700;color:#6b7280;font-family:'Noto Sans Mono',monospace;">${o.order_id.replace(/^order-/, '#')}</span>
             <span class="${priorityClass}" style="font-size:14px;">${o.priority === 'vip' ? 'VIP' : 'Standard'}</span>
             <span style="font-size:18px;font-weight:500;color:#f8fafc;">${o.hotel}</span>
             <span class="status-pill status-${o.status}">${o.status.replace(/_/g, ' ')}</span>

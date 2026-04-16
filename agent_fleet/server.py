@@ -38,6 +38,7 @@ from agent_fleet.models import (
     CustomerChangeInput,
     DriverDisconnectInput,
     MeltdownDemoInput,
+    OrderUpdateInput,
 )
 from agent_fleet.queues import WORKFLOWS_QUEUE
 from agent_fleet.simulation import fleet
@@ -306,6 +307,25 @@ async def submit_customer_change(body: CustomerChangeRequest):
         await handle.signal(MeltdownDemoWorkflow.customer_change, change)
     except RPCError as e:
         return {"error": f"Failed to signal workflow: {e}"}
+
+    # Signal the child workflow directly to hold before delivery —
+    # same pattern as disconnect/reconnect. Parent handles the approval
+    # decision, child handles the operational pause independently.
+    order = await fleet.get_order(body.order_id)
+    if order and order.assigned_driver_id:
+        try:
+            child = _temporal_client.get_workflow_handle(
+                f"route-{order.assigned_driver_id}"
+            )
+            await child.signal(
+                "update_pending",
+                OrderUpdateInput(
+                    order_id=body.order_id,
+                    change_type=body.change_type,
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to signal child for hold: {e}")
 
     return {
         "status": "change_submitted",

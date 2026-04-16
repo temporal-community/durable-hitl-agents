@@ -70,7 +70,7 @@ If you break determinism, Temporal raises a non-determinism error on replay. Thi
 **`OrderGenerationWorkflow`** is a child workflow that generates orders on a timer and signals the parent with each new order. The first 3 orders fire in a quick burst (2s apart) to get multiple drivers on the road immediately, then settles into a normal cadence (±30% jitter around 10s base). The parent handles assignment.
 
 The workflows connect through signals in both directions:
-- **Parent → child:** `add_order` (new delivery), `driver_disconnected` / `driver_reconnected`, `update_order` (address change), `cancel_order` (cancellation)
+- **Parent → child:** `add_order` (new delivery), `driver_disconnected` / `driver_reconnected`, `update_pending` (HITL hold before delivery), `resolve_update` (HITL decision: cancel/reroute/release), `cancel_order` (pending/batched order cancellation)
 - **Child → parent:** `order_delivered` (updates parent's driver state — position and order count)
 
 ```
@@ -267,8 +267,8 @@ This traces a single order from button click to delivery — every function and 
   - For each order in the batch:
     - `get_route_polyline` activity → Google Maps polyline to hotel
     - `navigate_to` activity → drives to hotel with heartbeats (0.4s/step)
-    - (if `_reroute_pending` flag set by `update_order` signal → re-navigates to new destination)
-    - `deliver_order` activity → marks delivered (skipped if `_cancel_pending`)
+    - HITL hold: if `update_pending` signal received → `wait_condition` pauses before delivery (`awaiting_update` status). On `resolve_update`: cancel → skip delivery, address_change → reroute to new destination, release → deliver normally
+    - `deliver_order` activity → marks delivered (skipped if cancelled)
     - Signals parent with `order_delivered` after each delivery
 - [`activities.py`](agent_fleet/activities.py) — all activities on `DELIVERY_QUEUE`
 

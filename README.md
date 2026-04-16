@@ -16,7 +16,7 @@ Built with **Google ADK** for multi-agent reasoning and **Temporal** for durable
 |----------|-------------|---------------|
 | **Tool Degradation** | Take Fleet Agent offline | Fleet Agent's tools fail fast (2 retries), error returned to LLM — Dispatch Agent assigns with Customer Agent data only. Reconnect → tools succeed → full assessment resumes. Temporal shows retry attempts in the UI. |
 | **Service Disruption & Recovery** | Take a delivery actor offline mid-delivery | Delivery actor completes current delivery but can't report back. Temporal retries with backoff until reconnected. Stays at hotel on the map — no teleporting. Reconnect → next retry succeeds → navigates home for next order. |
-| **Human-in-the-Loop (HITL)** | Submit an address change or cancellation mid-delivery | Workflow pauses on `wait_condition`, approves, signals delivery actor — reroutes mid-delivery to new destination. Cross-workflow coordination via signals. |
+| **Human-in-the-Loop (HITL)** | Submit an address change or cancellation | Driver navigates to hotel but holds before delivering (`awaiting_update`). Parent waits for human approval, child waits for parent's decision. Approve cancel → delivery skipped. Approve reroute → driver navigates to new destination. Two `wait_condition` patterns, cross-workflow signals. |
 
 ## Quick Start
 
@@ -63,7 +63,7 @@ The `run.sh` script sets up your Python environment, installs dependencies, and 
 1. **Start Deliveries** — Ziggy's opens for business. Orders flood in from the Strip hotels. AI agents reason per-order and assign to the best driver. Drivers batch-pickup at Ziggy's and deliver sequentially.
 2. **Demo 1: Agent Goes Down** — Fleet Agent loses connectivity → its tools fail fast (2 retries) → Dispatch Agent flies blind, assigns with degraded quality → reconnect → full fleet visibility restored
 3. **Demo 2: Driver Loses Connection** — A driver with multiple orders disconnects mid-delivery → finishes current delivery, stuck at hotel → Temporal retries with backoff → reconnect → resumes from next order, no repeated work
-4. **Demo 3: Customer Changes Mind** — Customer changes an order's destination mid-route → workflow pauses for approval → approve → driver reroutes to The Cosmopolitan. For queued orders, the address updates silently in workflow state.
+4. **Demo 3: Customer Changes Mind** — Customer submits a change → parent signals child to hold → driver arrives at hotel but pauses before delivering → human approves → cancel skips delivery, reroute sends driver to The Cosmopolitan
 
 
 ## Architecture

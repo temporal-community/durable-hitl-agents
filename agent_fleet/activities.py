@@ -240,10 +240,13 @@ async def generate_order(inp: GenerateOrderInput) -> GenerateOrderOutput:
 
 
 @activity.defn
-async def register_assignment(driver_id: str, order_id: str, degraded: bool = False) -> str:
-    """Register an ADK-decided assignment in fleet state (UI projection)."""
-    await fleet.assign_order_to_driver(driver_id, order_id, degraded=degraded)
-    return f"Assigned {order_id} to {driver_id}"
+async def register_assignment(driver_id: str, order_id: str, degraded: bool = False) -> bool:
+    """Register an ADK-decided assignment in fleet state (UI projection).
+
+    Returns True if assignment was written, False if order was already
+    in a terminal state (cancelled/delivered/assigned).
+    """
+    return await fleet.assign_order_to_driver(driver_id, order_id, degraded=degraded)
 
 
 @activity.defn
@@ -274,6 +277,10 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
             OrderStatus.IN_TRANSIT,
             f"En route to {leg}",
         )
+
+    # Clear path history at start of delivery leg so trail shows only this leg
+    if inp.leg == "delivery":
+        await fleet.clear_driver_path_history(inp.driver_id)
 
     # Read actual position from FleetState — handles retry after disconnect where
     # the driver may have moved (completed navigation) but the workflow didn't get
@@ -378,20 +385,30 @@ async def deliver_order(inp: DeliverInput) -> DeliverOutput:
 
     Driver physically delivers, then checks connection to report.
     If disconnected, Temporal retries until reconnected.
+    CANCELLED is a terminal state — update_order_status and
+    complete_order_delivery both refuse to overwrite it.
     """
+    # Fail-fast if disconnected — don't mutate visible state before checking
+    if await fleet.is_driver_disconnected(inp.driver_id):
+        raise RuntimeError(
+            f"Driver {inp.driver_id} disconnected — cannot deliver"
+        )
+
     await fleet.set_driver_status(inp.driver_id, DriverStatus.DELIVERING)
     await fleet.update_order_status(inp.order_id, OrderStatus.IN_TRANSIT, "Delivering")
 
     await asyncio.sleep(1.5)
 
-    # UI projection — mark order delivered and update driver status
-    remaining_count = await fleet.complete_order_delivery(inp.driver_id, inp.order_id)
-    if remaining_count == 0:
+    # Mark delivered (atomic: won't overwrite CANCELLED)
+    delivered, remaining_count = await fleet.complete_order_delivery(inp.driver_id, inp.order_id)
+    if delivered and remaining_count == 0:
         await fleet.set_driver_status(inp.driver_id, DriverStatus.IDLE)
 
-    # Delivery done — but can't report if disconnected
+    # Final disconnect check — delivery committed but can't report
     if await fleet.is_driver_disconnected(inp.driver_id):
-        raise RuntimeError(f"Driver {inp.driver_id} delivered but cannot report — disconnected")
+        raise RuntimeError(
+            f"Driver {inp.driver_id} delivered but cannot report — disconnected"
+        )
 
     activity.logger.info(f"{inp.driver_id} delivered {inp.order_id}")
     return DeliverOutput(driver_id=inp.driver_id, order_id=inp.order_id, success=True)
@@ -448,27 +465,39 @@ async def execute_customer_change(
 ) -> ExecuteCustomerChangeOutput:
     """Execute a customer-initiated change (address update or cancellation)."""
     if inp.change_type == "cancel":
-        # Don't cancel if already delivered — the deliver_order activity may have
-        # completed between the cancel request and approval
-        order = await fleet.get_order(inp.order_id)
-        if order and order.status == OrderStatus.DELIVERED:
-            activity.logger.info(
-                f"Order {inp.order_id} already delivered — skipping cancel"
-            )
-            return ExecuteCustomerChangeOutput(success=False)
+        # cancel_order is atomic — won't overwrite DELIVERED
         await fleet.cancel_order(inp.order_id)
         activity.logger.info(f"Order {inp.order_id} cancelled")
     elif (
         inp.change_type == "address_change" and inp.new_lat is not None and inp.new_lng is not None
     ):
         await fleet.update_order_delivery(inp.order_id, inp.new_lat, inp.new_lng, inp.new_hotel)
-        await fleet.update_order_status(
-            inp.order_id, OrderStatus.REROUTED, f"Rerouted to {inp.new_hotel or 'new address'}"
-        )
+        # Status update only — note is empty because update_order_delivery
+        # already wrote the reroute log entry
+        await fleet.update_order_status(inp.order_id, OrderStatus.REROUTED)
         dest = inp.new_hotel or f"({inp.new_lat:.4f}, {inp.new_lng:.4f})"
         activity.logger.info(f"Order {inp.order_id} rerouted to {dest}")
 
     return ExecuteCustomerChangeOutput(success=True)
+
+
+# --- Driver status + position sync activities ---
+
+
+@activity.defn
+async def set_driver_idle(driver_id: str) -> None:
+    """Set a driver to idle and clear path history in FleetState."""
+    await fleet.set_driver_status(driver_id, DriverStatus.IDLE)
+    await fleet.clear_driver_path_history(driver_id)
+
+
+# --- Warmup visibility activity ---
+
+
+@activity.defn
+async def set_warmup_hidden(driver_ids: list[str], hidden: bool = True) -> None:
+    """Hide or show drivers during warmup phase."""
+    await fleet.set_drivers_warmup_hidden(driver_ids, hidden)
 
 
 # --- Position sync activity ---

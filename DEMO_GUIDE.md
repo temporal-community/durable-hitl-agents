@@ -141,30 +141,30 @@ Use this framing at the start of the talk before any demo:
 
 ---
 
-### Demo 3: Human-in-the-Loop (HITL) — Customer Change with Mid-Delivery Reroute
-**Time: 2–3 min | Best for: showing signals, workflow waiting, and cross-workflow coordination**
+### Demo 3: Human-in-the-Loop (HITL) — Customer Change with Delivery Hold
+**Time: 2–3 min | Best for: showing signals, wait_condition, and cross-workflow coordination**
 
-**Setup:** Start deliveries. Wait for a delivery actor to be en route to a hotel (actively delivering).
+**Setup:** Start deliveries. Wait for a driver to be en route to a hotel.
 
 **Steps:**
-1. In the Customer Changes panel, the dropdown shows **active orders with their assigned delivery actor** — pick one that's currently being delivered
-2. Select "Address Change" and click **Submit Change** — this always reroutes to **The Cosmopolitan**, which appears as a new marker on the map
-3. The workflow received the request and is holding it — waiting for approval. Meanwhile, orders keep generating and deliveries continue.
-4. Click **Approve** — the parent signals the delivery actor's child workflow with `update_order`
-5. Watch the map: the delivery actor **finishes its current navigation leg**, then **reroutes to The Cosmopolitan** — a new marker appears and the order card updates to show the new hotel
-6. **Multi-order twist:** If the driver has 3 orders queued, try changing order 3's address while order 1 is being delivered. Orders 1 and 2 deliver normally. When the driver gets to order 3, it goes to the updated address — the workflow held the change in state the entire time.
-7. For cancellation: select "Cancel Order" → Approve → the delivery actor skips that delivery and moves to the next order in its batch
+1. In the Customer Change panel, pick an active order being delivered
+2. Select "Cancel Order" or "Address Change" and click **Submit Change**
+3. Watch the driver: it **arrives at the hotel but holds before delivering** — status shows `awaiting_update`. The parent workflow is waiting for your approval. The child workflow is waiting for the parent's decision. Two `wait_condition` pauses, both durable.
+4. Meanwhile, everything else keeps running — other orders still come in, other drivers still deliver
+5. Click **Approve**
+6. **For cancel:** the driver skips delivery entirely and moves to its next order (or returns to Ziggy's)
+7. **For address change:** the driver reroutes from the hotel to **The Cosmopolitan** — a new marker appears on the map, the order card updates
+8. **For reject:** driver delivers normally to the original hotel
 
 **What to say:**
-> "The workflow received the change request and is holding it in memory — waiting for the approval signal. Meanwhile, everything else keeps running. When approved, there are two cases: if the order is actively being delivered, the driver finishes the current leg and reroutes. But if the order is still queued — like order 3 while the driver is delivering order 1 — the coordinates update silently in the workflow state. No reroute needed yet. When the driver eventually gets to that order, it goes to the new address. Temporal held the updated state across all three deliveries."
+> "The customer submitted a change, and look — the driver arrived at the hotel but it's holding. It won't deliver until we decide. That's two `wait_condition` pauses working together: the parent workflow is waiting for the human to approve, and the child workflow is waiting for the parent to tell it what to do. Meanwhile, the rest of Ziggy's system keeps running — other orders, other drivers, unaffected. Now we approve the cancel — and the driver skips delivery, no race condition, because delivery never started. Temporal held both workflows in that waiting state, fully durable."
 
 **What you'll see in Temporal UI:**
-- `meltdown-demo` workflow: `WorkflowExecutionSignaled` (`customer_change`) → `WorkflowExecutionSignaled` (`change_approved`) → `execute_customer_change` activity → signal sent to child
-- `route-driver-X` workflow: `WorkflowExecutionSignaled` (`update_order`) — for active orders, new `get_route_polyline` and `navigate_to` activities as the driver reroutes; for queued orders, the signal updates pending state silently
-- The parent workflow stays busy between those signals — orders keep generating, agents keep reasoning. The `wait_condition` pauses only the customer-change code path, not the whole workflow.
-- Point to the child workflow: *"Two workflows coordinating via signals — durable and recoverable, whether the change hits an active delivery or a queued one."*
+- `meltdown-demo` workflow: `WorkflowExecutionSignaled` (`customer_change`) → `update_pending` signal sent to child → `WorkflowExecutionSignaled` (`change_approved`) → `execute_customer_change` activity → `resolve_update` signal sent to child
+- `route-driver-X` workflow: `WorkflowExecutionSignaled` (`update_pending`) → driver holds with `awaiting_update` → `WorkflowExecutionSignaled` (`resolve_update`) → cancel skips `deliver_order` / reroute triggers new `navigate_to`
+- Point out: *"Two workflows, both paused on wait_condition, both durable. The parent waits for the human. The child waits for the parent. No polling, no database checks, no timeout hacks."*
 
-**Temporal concept to highlight:** Signals, `wait_condition`, cross-workflow signaling, mid-delivery reroute, durable state for queued changes
+**Temporal concept to highlight:** Dual `wait_condition` (parent + child), cross-workflow signals, durable pause without polling
 
 ---
 
