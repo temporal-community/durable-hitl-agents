@@ -96,6 +96,14 @@
     font-weight: 400;
     color: #fff;
     letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  header h1 .brand-logo {
+    height: 56px;
+    width: auto;
+    display: block;
   }
   header h1 .accent {
     font-family: 'Monoton', cursive;
@@ -1061,7 +1069,10 @@
 
 <header>
   <div class="header-left">
-    <h1><span class="accent">MELTDOWN</span> Ice Cream Delivery <span class="sub">Las Vegas</span></h1>
+    <h1>
+      <img src="/static/img/ziggymeltdownneon.png" alt="Meltdown" class="brand-logo" />
+      <span class="sub">Ice Cream Delivery · Las Vegas</span>
+    </h1>
   </div>
   <div class="header-right">
     <a href="https://github.com/temporal-community/ice-cream-fleet-demo" target="_blank" class="header-brand" style="text-decoration:none;">
@@ -1387,12 +1398,12 @@ const DRIVER_COLORS = {
 
 // --- Sign tooltips ---
 const HOTEL_SIGNS = {
-  'MGM Grand': '/static/img/sign_mgm.png',
-  'Caesars': '/static/img/sign_caesars.png',
-  'Caesars Palace': '/static/img/sign_caesars.png',
-  'Mandalay Bay': '/static/img/sign_mandalay.png',
-  'Cosmopolitan': '/static/img/sign_cosmopolitan.png',
-  'The Cosmopolitan': '/static/img/sign_cosmopolitan.png',
+  'MGM Grand': '/static/img/vegassign_mgmgrand_animated.svg',
+  'Caesars': '/static/img/vegassign_caesars_animated.svg',
+  'Caesars Palace': '/static/img/vegassign_caesars_animated.svg',
+  'Mandalay Bay': '/static/img/vegassign_mandalaybay_animated.svg',
+  'Cosmopolitan': '/static/img/vegassign_cosmo_animated.svg',
+  'The Cosmopolitan': '/static/img/vegassign_cosmo_animated.svg',
 };
 const BASE_SIGN_W = 120;
 

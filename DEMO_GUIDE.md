@@ -17,7 +17,7 @@ This guide is for anyone presenting the Meltdown demo. It covers setup, the one-
 
 If completed successfully, the web app should look like the following:
 
-![Meltdown Demo](.github/assets/meltdown-new-look.png)
+![Meltdown Demo](.github/assets/meltdown-screenshot-3.png)
 
 ## How it works
 See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" information.
