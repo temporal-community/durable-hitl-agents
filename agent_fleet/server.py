@@ -314,9 +314,7 @@ async def submit_customer_change(body: CustomerChangeRequest):
     order = await fleet.get_order(body.order_id)
     if order and order.assigned_driver_id:
         try:
-            child = _temporal_client.get_workflow_handle(
-                f"route-{order.assigned_driver_id}"
-            )
+            child = _temporal_client.get_workflow_handle(f"route-{order.assigned_driver_id}")
             await child.signal(
                 "update_pending",
                 OrderUpdateInput(

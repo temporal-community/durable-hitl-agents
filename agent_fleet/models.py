@@ -292,6 +292,7 @@ class OrderUpdateInput:
     change_type: str  # "address_change" or "cancel"
     new_lat: float | None = None
     new_lng: float | None = None
+    new_hotel: str | None = None
 
 
 @dataclass

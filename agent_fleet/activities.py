@@ -343,9 +343,7 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
         activity.logger.warning(
             f"{inp.driver_id} arrived at {leg} but is disconnected — cannot report"
         )
-        raise RuntimeError(
-            f"Driver {inp.driver_id} arrived but is disconnected — cannot check in"
-        )
+        raise RuntimeError(f"Driver {inp.driver_id} arrived but is disconnected — cannot check in")
 
     activity.logger.info(
         f"{inp.driver_id} arrived at {leg} ({inp.target_lat:.4f}, {inp.target_lng:.4f})"
@@ -388,11 +386,22 @@ async def deliver_order(inp: DeliverInput) -> DeliverOutput:
     CANCELLED is a terminal state — update_order_status and
     complete_order_delivery both refuse to overwrite it.
     """
+    # Idempotency guard: if the order already reached a terminal state on a
+    # prior run (this call is a Temporal retry after the final disconnect
+    # check fired post-commit), don't re-set DELIVERING — that would stomp
+    # the IDLE status from the prior successful run and leave the driver
+    # visibly stuck as DELIVERING during return-to-base.
+    if await fleet.is_order_terminal(inp.order_id):
+        if await fleet.is_driver_disconnected(inp.driver_id):
+            raise RuntimeError(f"Driver {inp.driver_id} disconnected — cannot report")
+        activity.logger.info(
+            f"{inp.driver_id} deliver_order retry for {inp.order_id} — already terminal, no-op"
+        )
+        return DeliverOutput(driver_id=inp.driver_id, order_id=inp.order_id, success=True)
+
     # Fail-fast if disconnected — don't mutate visible state before checking
     if await fleet.is_driver_disconnected(inp.driver_id):
-        raise RuntimeError(
-            f"Driver {inp.driver_id} disconnected — cannot deliver"
-        )
+        raise RuntimeError(f"Driver {inp.driver_id} disconnected — cannot deliver")
 
     await fleet.set_driver_status(inp.driver_id, DriverStatus.DELIVERING)
     await fleet.update_order_status(inp.order_id, OrderStatus.IN_TRANSIT, "Delivering")
@@ -406,9 +415,7 @@ async def deliver_order(inp: DeliverInput) -> DeliverOutput:
 
     # Final disconnect check — delivery committed but can't report
     if await fleet.is_driver_disconnected(inp.driver_id):
-        raise RuntimeError(
-            f"Driver {inp.driver_id} delivered but cannot report — disconnected"
-        )
+        raise RuntimeError(f"Driver {inp.driver_id} delivered but cannot report — disconnected")
 
     activity.logger.info(f"{inp.driver_id} delivered {inp.order_id}")
     return DeliverOutput(driver_id=inp.driver_id, order_id=inp.order_id, success=True)

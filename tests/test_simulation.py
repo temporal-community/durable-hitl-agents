@@ -154,3 +154,48 @@ async def test_get_driver_position():
     lat, lng = await fleet.get_driver_position("driver-a")
     assert abs(lat - 36.12) < 0.001
     assert abs(lng - (-115.18)) < 0.001
+
+
+async def test_is_order_terminal():
+    """deliver_order relies on is_order_terminal to short-circuit retries after
+    a successful DB commit. If this check regresses (e.g. looks at the wrong
+    column or misses DELIVERED/CANCELLED), disconnect/reconnect starts
+    re-running set_driver_status(DELIVERING) on already-delivered orders and
+    the driver visibly sticks as DELIVERING during return-to-base.
+    """
+    from agent_fleet.models import Coords
+
+    await fleet.reset()
+    await fleet.register_order(
+        order_id="order-terminal-test",
+        hotel="MGM Grand",
+        label="terminal test",
+        priority="standard",
+        servings=10,
+        delivery_coords=Coords(lat=36.1024, lng=-115.1725),
+        deadline_minutes=30,
+    )
+
+    # Fresh order — not terminal
+    assert await fleet.is_order_terminal("order-terminal-test") is False
+
+    # Unknown order id — False (not True by accident)
+    assert await fleet.is_order_terminal("order-does-not-exist") is False
+
+    # DELIVERED — terminal
+    await fleet.assign_order_to_driver("driver-a", "order-terminal-test")
+    await fleet.complete_order_delivery("driver-a", "order-terminal-test")
+    assert await fleet.is_order_terminal("order-terminal-test") is True
+
+    # CANCELLED — also terminal
+    await fleet.register_order(
+        order_id="order-cancel-test",
+        hotel="MGM Grand",
+        label="cancel test",
+        priority="standard",
+        servings=10,
+        delivery_coords=Coords(lat=36.1024, lng=-115.1725),
+        deadline_minutes=30,
+    )
+    await fleet.cancel_order("order-cancel-test")
+    assert await fleet.is_order_terminal("order-cancel-test") is True

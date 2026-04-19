@@ -1584,6 +1584,14 @@ function updateChangeOrderDropdown(orders) {
   const currentVal = select.value;
   // Only include orders that are not yet delivered
   const active = Object.values(orders).filter(o => o.status !== 'delivered' && o.status !== 'cancelled');
+  // Build a signature of the desired options so we only rebuild when it changes.
+  // Reassigning innerHTML on every WebSocket tick was closing / fighting the
+  // open native dropdown while the user was trying to pick an order.
+  const signature = active.length === 0
+    ? '__empty__'
+    : active.map(o => `${o.order_id}|${o.hotel}|${o.assigned_driver_id || ''}`).join(',');
+  if (select.dataset.optionsSignature === signature) return;
+  select.dataset.optionsSignature = signature;
   if (active.length === 0) {
     select.innerHTML = '<option value="">— no active orders —</option>';
     return;

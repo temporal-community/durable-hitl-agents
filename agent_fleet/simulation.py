@@ -127,7 +127,7 @@ class FleetState:
 
     async def _seed_initial_state(self) -> None:
         conn = self._conn
-        for letter in ['a', 'b', 'c', 'd', 'e']:
+        for letter in ["a", "b", "c", "d", "e"]:
             did = f"driver-{letter}"
             await conn.execute(
                 "INSERT OR IGNORE INTO drivers (driver_id, lat, lng) VALUES (?, ?, ?)",
@@ -164,9 +164,7 @@ class FleetState:
 
     # --- Warmup visibility ---
 
-    async def set_drivers_warmup_hidden(
-        self, driver_ids: list[str], hidden: bool = True
-    ) -> None:
+    async def set_drivers_warmup_hidden(self, driver_ids: list[str], hidden: bool = True) -> None:
         """Hide/show drivers during warmup phase."""
         conn = await self._get_conn()
         for did in driver_ids:
@@ -197,9 +195,7 @@ class FleetState:
             "status=status_before_disconnect WHERE driver_id=?",
             (driver_id,),
         )
-        await self._log_event(
-            conn, f"[RECONNECT] Driver {driver_id} reconnecting — replaying..."
-        )
+        await self._log_event(conn, f"[RECONNECT] Driver {driver_id} reconnecting — replaying...")
         await conn.commit()
 
     async def mark_driver_recovery_complete(self, driver_id: str) -> None:
@@ -279,9 +275,7 @@ class FleetState:
     async def clear_driver_path_history(self, driver_id: str) -> None:
         """Clear path history for a driver — called at start of each delivery leg."""
         conn = await self._get_conn()
-        await conn.execute(
-            "DELETE FROM driver_path_history WHERE driver_id=?", (driver_id,)
-        )
+        await conn.execute("DELETE FROM driver_path_history WHERE driver_id=?", (driver_id,))
         await conn.commit()
 
     async def get_driver_position(self, driver_id: str) -> tuple[float, float]:
@@ -429,8 +423,14 @@ class FleetState:
         cursor = await conn.execute(
             "UPDATE orders SET assigned_driver_id=?, status=?, degraded=? "
             "WHERE order_id=? AND status NOT IN (?, ?)",
-            (driver_id, OrderStatus.ASSIGNED.value, 1 if degraded else 0,
-             order_id, OrderStatus.CANCELLED.value, OrderStatus.DELIVERED.value),
+            (
+                driver_id,
+                OrderStatus.ASSIGNED.value,
+                1 if degraded else 0,
+                order_id,
+                OrderStatus.CANCELLED.value,
+                OrderStatus.DELIVERED.value,
+            ),
         )
         if cursor.rowcount > 0:
             await conn.execute(
@@ -467,7 +467,8 @@ class FleetState:
                         "INSERT INTO order_status_log (order_id, message) VALUES (?, ?)",
                         (order_id, note),
                     )
-                await self._log_event(conn, f"Order {order_id} -> {status.value}: {note}")
+                msg = f"Order {order_id} -> {status.value}" + (f": {note}" if note else "")
+                await self._log_event(conn, msg)
         else:
             await conn.execute(
                 "UPDATE orders SET status=? WHERE order_id=?",
@@ -478,12 +479,11 @@ class FleetState:
                     "INSERT INTO order_status_log (order_id, message) VALUES (?, ?)",
                     (order_id, note),
                 )
-            await self._log_event(conn, f"Order {order_id} -> {status.value}: {note}")
+            msg = f"Order {order_id} -> {status.value}" + (f": {note}" if note else "")
+            await self._log_event(conn, msg)
         await conn.commit()
 
-    async def complete_order_delivery(
-        self, driver_id: str, order_id: str
-    ) -> tuple[bool, int]:
+    async def complete_order_delivery(self, driver_id: str, order_id: str) -> tuple[bool, int]:
         """Mark an order delivered and remove it from the driver's active queue.
 
         Returns (delivered, remaining_count). delivered=False when cancel won
@@ -493,8 +493,12 @@ class FleetState:
         # Atomic: only set DELIVERED if not already terminal
         cursor = await conn.execute(
             "UPDATE orders SET status=? WHERE order_id=? AND status NOT IN (?, ?)",
-            (OrderStatus.DELIVERED.value, order_id,
-             OrderStatus.CANCELLED.value, OrderStatus.DELIVERED.value),
+            (
+                OrderStatus.DELIVERED.value,
+                order_id,
+                OrderStatus.CANCELLED.value,
+                OrderStatus.DELIVERED.value,
+            ),
         )
         delivered = cursor.rowcount > 0
         if delivered:
@@ -517,6 +521,22 @@ class FleetState:
         ) as cursor:
             row = await cursor.fetchone()
             return delivered, row["cnt"]
+
+    async def is_order_terminal(self, order_id: str) -> bool:
+        """Return True if the order is in a terminal state (DELIVERED/CANCELLED).
+
+        Used by deliver_order to detect retries after a successful DB commit —
+        skips re-setting DELIVERING status on the already-finished order, which
+        would otherwise overwrite IDLE and leave the driver visibly stuck.
+        """
+        conn = await self._get_conn()
+        async with conn.execute(
+            "SELECT status FROM orders WHERE order_id=?", (order_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return False
+        return row["status"] in self._TERMINAL_STATUSES
 
     async def get_order_driver(self, order_id: str) -> str | None:
         conn = await self._get_conn()
@@ -552,16 +572,28 @@ class FleetState:
                 "UPDATE orders SET delivery_lat=?, delivery_lng=?, hotel=?, "
                 "label=label || ' → ' || ? "
                 "WHERE order_id=? AND status NOT IN (?, ?)",
-                (new_lat, new_lng, new_hotel, new_hotel, order_id,
-                 OrderStatus.CANCELLED.value, OrderStatus.DELIVERED.value),
+                (
+                    new_lat,
+                    new_lng,
+                    new_hotel,
+                    new_hotel,
+                    order_id,
+                    OrderStatus.CANCELLED.value,
+                    OrderStatus.DELIVERED.value,
+                ),
             )
             note = f"Rerouted to {new_hotel}"
         else:
             cursor = await conn.execute(
                 "UPDATE orders SET delivery_lat=?, delivery_lng=? "
                 "WHERE order_id=? AND status NOT IN (?, ?)",
-                (new_lat, new_lng, order_id,
-                 OrderStatus.CANCELLED.value, OrderStatus.DELIVERED.value),
+                (
+                    new_lat,
+                    new_lng,
+                    order_id,
+                    OrderStatus.CANCELLED.value,
+                    OrderStatus.DELIVERED.value,
+                ),
             )
             note = f"Delivery address updated to ({new_lat:.4f}, {new_lng:.4f})"
         if cursor.rowcount > 0:
@@ -576,8 +608,12 @@ class FleetState:
         # Atomic: only cancel if not already terminal (idempotent on retry)
         cursor = await conn.execute(
             "UPDATE orders SET status=? WHERE order_id=? AND status NOT IN (?, ?)",
-            (OrderStatus.CANCELLED.value, order_id,
-             OrderStatus.DELIVERED.value, OrderStatus.CANCELLED.value),
+            (
+                OrderStatus.CANCELLED.value,
+                order_id,
+                OrderStatus.DELIVERED.value,
+                OrderStatus.CANCELLED.value,
+            ),
         )
         if cursor.rowcount > 0:
             await conn.execute(
@@ -615,9 +651,7 @@ class FleetState:
 
         # Drivers (skip warmup-hidden so frontend doesn't render D/E early)
         drivers: dict[str, Any] = {}
-        async with conn.execute(
-            "SELECT * FROM drivers WHERE warmup_hidden=0"
-        ) as cursor:
+        async with conn.execute("SELECT * FROM drivers WHERE warmup_hidden=0") as cursor:
             async for row in cursor:
                 did = row["driver_id"]
                 # Get current orders
@@ -722,9 +756,7 @@ class FleetState:
         conn = await self._get_conn()
         lines = ["=== Fleet Status ==="]
 
-        async with conn.execute(
-            "SELECT * FROM drivers WHERE warmup_hidden=0"
-        ) as cursor:
+        async with conn.execute("SELECT * FROM drivers WHERE warmup_hidden=0") as cursor:
             async for row in cursor:
                 did = row["driver_id"]
                 # Get current orders for this driver

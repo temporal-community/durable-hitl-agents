@@ -54,6 +54,18 @@ Use this framing at the start of the talk before any demo:
 - ADK manages the multi-turn reasoning loop — the developer just defines the agents and wires them together
 
 
+## Architecture Talking Points
+
+Optional drop-ins for mid-demo — when the conversation turns to scale, or to what "production Temporal" actually looks like. Open the Temporal UI alongside the demo dashboard.
+
+- **"Open the event history."** Click into any `route-driver-*` workflow and scroll. You'll see ~50–100 events per order: each Gemini call, each tool call, each navigation leg, each delivery. That's **per-call durability** — every one of those is an independent retry unit. Crash the worker mid-Dispatch-Agent and the Fleet Agent's earlier assessment is replayed from history, not re-called. The alternative (one big `reason_about_assignment` activity) would be ~3 events per order but restart the entire agent pipeline on any failure.
+- **"Where are driver positions in the event log?"** They're not. `navigate_to` heartbeats position to shared state (SQLite here, Redis or Postgres in prod) every 400ms. None of those writes hit Temporal. If we'd signaled position instead, a single delivery in prod (15 min × 1 ping/sec) would be ~900 permanent events per driver per delivery. The pattern: signals for milestones (delivery complete, new order), shared state for continuous telemetry.
+- **"What about queries between workflows?"** Temporal doesn't support workflow-to-workflow queries — by design, because workflows have to replay deterministically. Cross-workflow coordination uses signals (durable async events). If the parent needs to "read" child state, the child pushes milestone events to the parent; the parent tracks the bookkeeping it decides on and doesn't try to mirror every field the child owns.
+
+Full breakdown — including the per-order event table — lives in [HOW_IT_WORKS.md — Communication patterns](HOW_IT_WORKS.md#communication-patterns--what-goes-where-and-why) and [What's in the event log](HOW_IT_WORKS.md#whats-in-the-event-log--and-why-its-bigger-than-youd-guess).
+
+---
+
 ## Demo Scenarios
 
 ---
