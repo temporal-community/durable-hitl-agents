@@ -529,14 +529,26 @@ class FleetState:
         skips re-setting DELIVERING status on the already-finished order, which
         would otherwise overwrite IDLE and leave the driver visibly stuck.
         """
+        status = await self.get_order_status(order_id)
+        if status is None:
+            return False
+        return status in self._TERMINAL_STATUSES
+
+    async def get_order_status(self, order_id: str) -> str | None:
+        """Return the order's current status string, or None if not found.
+
+        deliver_order uses this to distinguish DELIVERED (return success so
+        the workflow replays the parent signal) from CANCELLED (return
+        failure so the workflow skips the order_delivered signal).
+        """
         conn = await self._get_conn()
         async with conn.execute(
             "SELECT status FROM orders WHERE order_id=?", (order_id,)
         ) as cursor:
             row = await cursor.fetchone()
         if row is None:
-            return False
-        return row["status"] in self._TERMINAL_STATUSES
+            return None
+        return row["status"]
 
     async def get_order_driver(self, order_id: str) -> str | None:
         conn = await self._get_conn()

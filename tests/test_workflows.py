@@ -160,3 +160,100 @@ async def test_driver_route_handles_multiple_orders(env: WorkflowEnvironment):
 
         result = await handle.result()
         assert "2 deliveries" in result
+
+
+async def test_driver_route_per_order_hitl_holds(env: WorkflowEnvironment):
+    """Two update_pending signals for different orders on the same driver
+    must each keep their own hold slot — no overwrite, no cross-contamination
+    when resolve_update fills in one decision then the other.
+
+    Regression guard for the single-slot _update_pending_order bug: under
+    the old single-slot design, the second update_pending would overwrite
+    the first and the first order's resolve_update would be silently dropped.
+    """
+    from agent_fleet.models import OrderUpdateInput
+    from agent_fleet.workflows import DriverRouteWorkflow
+
+    async with run_delivery_workers(env):
+        handle = await env.client.start_workflow(
+            DriverRouteWorkflow.run,
+            DriverRouteInput(driver_id="driver-a"),
+            id="test-route-holds",
+            task_queue=WORKFLOWS_QUEUE,
+        )
+
+        try:
+            # Two holds, two different orders — both should coexist.
+            await handle.signal(
+                DriverRouteWorkflow.update_pending,
+                OrderUpdateInput(order_id="order-A", change_type="cancel"),
+            )
+            await handle.signal(
+                DriverRouteWorkflow.update_pending,
+                OrderUpdateInput(order_id="order-B", change_type="address_change"),
+            )
+
+            status = await handle.query(DriverRouteWorkflow.get_status)
+            held = set(status["pending_hold_order_ids"])
+            assert held == {"order-A", "order-B"}, f"expected both holds, got {held}"
+
+            # Resolve order-A only. order-B's hold must remain intact.
+            await handle.signal(
+                DriverRouteWorkflow.resolve_update,
+                OrderUpdateInput(order_id="order-A", change_type="cancel"),
+            )
+            status = await handle.query(DriverRouteWorkflow.get_status)
+            held = set(status["pending_hold_order_ids"])
+            assert held == {"order-A", "order-B"}, (
+                f"resolve_update shouldn't drop holds — got {held}"
+            )
+
+            # Stale resolve_update for an unknown order_id must be a no-op
+            # (drops without affecting existing holds — replaces the
+            # fragile single-slot guard).
+            await handle.signal(
+                DriverRouteWorkflow.resolve_update,
+                OrderUpdateInput(order_id="order-NONEXISTENT", change_type="cancel"),
+            )
+            status = await handle.query(DriverRouteWorkflow.get_status)
+            held = set(status["pending_hold_order_ids"])
+            assert held == {"order-A", "order-B"}
+        finally:
+            await handle.signal(DriverRouteWorkflow.stop)
+            await handle.result()
+
+
+async def test_deliver_order_cancel_race():
+    """If an order was cancelled before deliver_order fires, the activity
+    reports success=False so the workflow skips the parent order_delivered
+    signal. Direct FleetState + activity test — no workflow env needed.
+    """
+    from agent_fleet.activities import deliver_order as deliver_order_activity
+    from agent_fleet.models import Coords, DeliverInput
+
+    await fleet.reset()
+    await fleet.register_order(
+        order_id="order-cancel-race",
+        hotel="MGM Grand",
+        label="MGM — will be cancelled",
+        priority="standard",
+        servings=10,
+        delivery_coords=Coords(lat=36.1024, lng=-115.1725),
+        deadline_minutes=30,
+    )
+    await fleet.assign_order_to_driver("driver-a", "order-cancel-race")
+    await fleet.cancel_order("order-cancel-race")
+
+    # deliver_order is an @activity.defn but it's still a plain async
+    # function; invoke directly. The CANCELLED-status short-circuit at the
+    # top returns without calling any Temporal activity APIs, so no
+    # activity-context is needed for this code path.
+    result = await deliver_order_activity(
+        DeliverInput(driver_id="driver-a", order_id="order-cancel-race")
+    )
+
+    assert result.success is False, (
+        "deliver_order must report success=False for a cancelled order — "
+        "otherwise the workflow signals the parent order_delivered for a "
+        "cancelled order and corrupts bookkeeping"
+    )

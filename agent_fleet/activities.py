@@ -336,6 +336,17 @@ async def navigate_to(inp: NavigateInput) -> NavigateOutput:
         await fleet.update_driver_position(inp.driver_id, new_lat, new_lng)
         await asyncio.sleep(0.4)
 
+    # Snap to exact target coords at end of leg. Google polylines end
+    # *near* but not exactly at the requested destination (the last
+    # waypoint is the closest road point to the target), which could
+    # leave the driver 20-50m short of inp.target_lat/lng. Without this
+    # snap, a retry after disconnect reads the slightly-off position
+    # from FleetState, fails the `dist_to_target < 0.001` skip check,
+    # and re-drives the entire polyline from its first waypoint (back
+    # at the origin) — the "teleport to origin + redo the drive"
+    # symptom.
+    await fleet.update_driver_position(inp.driver_id, inp.target_lat, inp.target_lng)
+
     # Driver arrived — but if disconnected, can't report back.
     # This simulates "delivery complete but comms lost."
     # Temporal sees the failure and retries until reconnected.
@@ -383,21 +394,47 @@ async def deliver_order(inp: DeliverInput) -> DeliverOutput:
 
     Driver physically delivers, then checks connection to report.
     If disconnected, Temporal retries until reconnected.
-    CANCELLED is a terminal state — update_order_status and
-    complete_order_delivery both refuse to overwrite it.
+
+    success meaning:
+      - True: this order was actually marked DELIVERED (either by this
+        call or by a prior successful run that we're replaying after a
+        retry). Workflow signals parent `order_delivered`.
+      - False: the order was cancelled before delivery could commit.
+        Workflow skips the `order_delivered` signal and moves on.
+
+    CANCELLED and DELIVERED are both terminal; update_order_status and
+    complete_order_delivery refuse to overwrite either.
     """
-    # Idempotency guard: if the order already reached a terminal state on a
-    # prior run (this call is a Temporal retry after the final disconnect
-    # check fired post-commit), don't re-set DELIVERING — that would stomp
-    # the IDLE status from the prior successful run and leave the driver
-    # visibly stuck as DELIVERING during return-to-base.
-    if await fleet.is_order_terminal(inp.order_id):
+    # Inspect the order's terminal state up-front. Two cases matter:
+    #   - DELIVERED: this is a retry of a prior successful run. Skip the
+    #     driver-status mutation (it would stomp the IDLE we already set
+    #     and leave the driver visibly stuck) and return success=True so
+    #     the workflow replays the parent signal.
+    #   - CANCELLED: a cancel won the race with our delivery attempt.
+    #     Skip the work and return success=False so the workflow doesn't
+    #     tell the parent we delivered a cancelled order.
+    status = await fleet.get_order_status(inp.order_id)
+    if status == OrderStatus.DELIVERED.value:
         if await fleet.is_driver_disconnected(inp.driver_id):
             raise RuntimeError(f"Driver {inp.driver_id} disconnected — cannot report")
         activity.logger.info(
-            f"{inp.driver_id} deliver_order retry for {inp.order_id} — already terminal, no-op"
+            f"{inp.driver_id} deliver_order retry for {inp.order_id} — already DELIVERED, no-op"
         )
         return DeliverOutput(driver_id=inp.driver_id, order_id=inp.order_id, success=True)
+    if status == OrderStatus.CANCELLED.value:
+        # Same reasoning as the mid-activity cancel path below: if this
+        # cancelled order was the driver's last active order, the driver's
+        # FleetState status stays on EN_ROUTE_DELIVERY (set by the nav that
+        # just completed) through the return-to-base trip until
+        # set_driver_idle finally fires. Transition to IDLE here so the UI
+        # updates immediately when nothing else is in the queue.
+        remaining = await fleet.get_driver_orders(inp.driver_id)
+        if len(remaining) == 0:
+            await fleet.set_driver_status(inp.driver_id, DriverStatus.IDLE)
+        activity.logger.info(
+            f"{inp.driver_id} deliver_order skipped — {inp.order_id} CANCELLED before delivery"
+        )
+        return DeliverOutput(driver_id=inp.driver_id, order_id=inp.order_id, success=False)
 
     # Fail-fast if disconnected — don't mutate visible state before checking
     if await fleet.is_driver_disconnected(inp.driver_id):
@@ -408,9 +445,25 @@ async def deliver_order(inp: DeliverInput) -> DeliverOutput:
 
     await asyncio.sleep(1.5)
 
-    # Mark delivered (atomic: won't overwrite CANCELLED)
+    # Mark delivered (atomic: won't overwrite CANCELLED).
+    # If `delivered` is False, a cancel won the race after our up-front
+    # status check — report failure so the workflow skips the parent signal.
+    # complete_order_delivery unconditionally removes the driver_orders row
+    # regardless of the delivered flag, so remaining_count is accurate for
+    # the cancel-race path too. We still need to set IDLE if this was the
+    # driver's last order — otherwise the driver's status sticks on
+    # DELIVERING (set at line 434) through the return-to-base navigation.
     delivered, remaining_count = await fleet.complete_order_delivery(inp.driver_id, inp.order_id)
-    if delivered and remaining_count == 0:
+    if not delivered:
+        if remaining_count == 0:
+            await fleet.set_driver_status(inp.driver_id, DriverStatus.IDLE)
+        activity.logger.info(
+            f"{inp.driver_id} deliver_order — cancel won race mid-activity, "
+            f"{inp.order_id} will not be signaled as delivered"
+        )
+        return DeliverOutput(driver_id=inp.driver_id, order_id=inp.order_id, success=False)
+
+    if remaining_count == 0:
         await fleet.set_driver_status(inp.driver_id, DriverStatus.IDLE)
 
     # Final disconnect check — delivery committed but can't report

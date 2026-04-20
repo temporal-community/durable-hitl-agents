@@ -16,6 +16,7 @@ Uses cancellation scopes for workflow-driven disconnect handling.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio import workflow
@@ -84,6 +85,25 @@ DRIVER_CAPACITY = 3
 DRIVER_IDS = ["driver-a", "driver-b", "driver-c", "driver-d", "driver-e"]
 
 
+@dataclass
+class PendingHold:
+    """Per-order HITL hold state on a DriverRouteWorkflow.
+
+    Replaces the prior single-slot fields (`_update_pending_order`,
+    `_update_decision`, `_update_new_*`). Those collapsed any concurrent
+    hold onto one slot, so a second `update_pending` for a different
+    order on the same driver would overwrite the first — dropping the
+    first order's approved decision silently. Keying holds by order_id
+    prevents that entirely: each order has its own slot, and signals
+    (update_pending, resolve_update) target a specific order.
+    """
+
+    decision: str | None = None  # "cancel", "address_change", "release"
+    new_lat: float | None = None
+    new_lng: float | None = None
+    new_hotel: str | None = None
+
+
 # --- Per-driver continuous delivery workflow ---
 
 
@@ -114,13 +134,14 @@ class DriverRouteWorkflow:
         self._path_history: list[dict] = []
         self._is_recovering: bool = False
         self._position_sync_needed: bool = False
-        # HITL: update pending + decision tracking (order-specific)
+        # HITL state: one hold per order_id. Each entry is created when
+        # update_pending arrives for that order and populated when
+        # resolve_update arrives. Removed when the hold is processed by the
+        # delivery loop (or when cancel_order removes the order from the
+        # queue). See PendingHold docstring for why this replaced the prior
+        # single-slot design.
         self._active_order_id: str | None = None
-        self._update_pending_order: str | None = None  # order_id with pending change
-        self._update_decision: str | None = None  # "cancel", "address_change", "release"
-        self._update_new_lat: float | None = None
-        self._update_new_lng: float | None = None
-        self._update_new_hotel: str | None = None
+        self._pending_holds: dict[str, PendingHold] = {}
         self._cancel_pending: bool = False
         self._batch_orders: list[DriverRouteOrder] = []
 
@@ -151,39 +172,49 @@ class DriverRouteWorkflow:
 
     @workflow.signal
     async def update_pending(self, inp: OrderUpdateInput) -> None:
-        """Signal that a customer change is submitted — driver should hold before delivery."""
-        self._update_pending_order = inp.order_id
+        """Register a HITL hold for this order. Idempotent — multiple sends
+        for the same order are a no-op. Each order gets its own slot in
+        _pending_holds so concurrent holds for different orders on the same
+        driver don't collide.
+        """
+        if inp.order_id not in self._pending_holds:
+            self._pending_holds[inp.order_id] = PendingHold()
         workflow.logger.info(f"Order {inp.order_id} — update pending, will hold before delivery")
 
     @workflow.signal
     async def resolve_update(self, inp: OrderUpdateInput) -> None:
-        """Signal the decision after HITL approval — cancel, reroute, or release.
+        """Fill in the HITL decision for a specific order's hold.
 
-        Guarded: only applies if this resolution is for the order that
-        currently has an active HITL hold. Protects against stale sends —
-        e.g. parent cancels an order via cancel_order (which clears hold
-        state) and then fires a trailing resolve_update("cancel") that,
-        without the guard, would re-pollute _update_decision='cancel' and
-        silently cancel the NEXT order that reached a HITL hold.
+        Drops if there's no matching hold (stale resolution, e.g. the order
+        was cancelled out of the queue by cancel_order before this arrived,
+        or the parent is sending resolve_update for a different change than
+        the child is tracking). With per-order holds the drop is strictly
+        "no hold to resolve"; it can never accidentally clobber another
+        order's decision.
         """
-        if self._update_pending_order != inp.order_id:
+        hold = self._pending_holds.get(inp.order_id)
+        if hold is None:
             workflow.logger.info(
-                f"Order {inp.order_id} — resolve_update ignored "
-                f"(no matching hold: pending={self._update_pending_order})"
+                f"Order {inp.order_id} — resolve_update ignored (no matching hold)"
             )
             return
-        self._update_decision = inp.change_type  # "cancel", "address_change", "release"
+        hold.decision = inp.change_type  # "cancel", "address_change", "release"
         if inp.new_lat is not None:
-            self._update_new_lat = inp.new_lat
+            hold.new_lat = inp.new_lat
         if inp.new_lng is not None:
-            self._update_new_lng = inp.new_lng
+            hold.new_lng = inp.new_lng
         if inp.new_hotel is not None:
-            self._update_new_hotel = inp.new_hotel
+            hold.new_hotel = inp.new_hotel
         workflow.logger.info(f"Order {inp.order_id} — update resolved: {inp.change_type}")
 
     @workflow.signal
     async def cancel_order(self, inp: OrderUpdateInput) -> None:
-        """Cancel an order — works for pending and batched orders."""
+        """Cancel an order — works for pending and batched orders.
+
+        Also removes any HITL hold tracked for this order, so a later
+        delivery loop iteration doesn't wait on a hold for an order that
+        no longer exists in the queue.
+        """
         # Check pending orders
         before = len(self._pending_orders)
         self._pending_orders = [o for o in self._pending_orders if o.order_id != inp.order_id]
@@ -193,7 +224,7 @@ class DriverRouteWorkflow:
                 self._current_orders.remove(inp.order_id)
             except ValueError:
                 pass
-            self._clear_hitl_state_if(inp.order_id)
+            self._pending_holds.pop(inp.order_id, None)
             return
         # Check batched orders
         before = len(self._batch_orders)
@@ -204,23 +235,10 @@ class DriverRouteWorkflow:
                 self._current_orders.remove(inp.order_id)
             except ValueError:
                 pass
-            self._clear_hitl_state_if(inp.order_id)
+            self._pending_holds.pop(inp.order_id, None)
             return
         # Active order cancel is now handled by resolve_update("cancel")
         workflow.logger.info(f"Order {inp.order_id} not in pending/batch — handled by HITL flow")
-
-    def _clear_hitl_state_if(self, order_id: str) -> None:
-        """Clear any HITL hold state that targets the given order_id.
-
-        Prevents stale _update_pending_order / _update_decision from silently
-        firing against the NEXT order that reaches the HITL hold block.
-        """
-        if self._update_pending_order == order_id:
-            self._update_pending_order = None
-            self._update_decision = None
-            self._update_new_lat = None
-            self._update_new_lng = None
-            self._update_new_hotel = None
 
     @workflow.signal
     async def update_order(self, inp: OrderUpdateInput) -> None:
@@ -257,6 +275,7 @@ class DriverRouteWorkflow:
             "active_order_id": self._active_order_id,
             "path_history": list(self._path_history),
             "pending_orders": len(self._pending_orders),
+            "pending_hold_order_ids": list(self._pending_holds.keys()),
         }
 
     # --- Helpers ---
@@ -467,7 +486,7 @@ class DriverRouteWorkflow:
                         start_lat=self._current_lat,
                         start_lng=self._current_lng,
                     ),
-                    summary=f"[#{onum}] Delivering to {order.hotel}",
+                    summary=f"[#{onum}] Driving to {order.hotel}",
                 )
                 self._current_lat = nav_result.final_lat
                 self._current_lng = nav_result.final_lng
@@ -479,7 +498,7 @@ class DriverRouteWorkflow:
                 # Server signals update_pending directly (same pattern as
                 # disconnect). No grace period needed — signal arrives
                 # before any parent processing delay.
-                if self._update_pending_order == order.order_id:
+                if order.order_id in self._pending_holds:
                     self._status = "awaiting_update"
                     workflow.logger.info(
                         f"[{order.order_id}] Holding at {order.hotel} — awaiting HITL decision"
@@ -491,42 +510,47 @@ class DriverRouteWorkflow:
                     # so without this the child would hang and the parent's
                     # `await handle` join would wait on the child indefinitely.
                     await workflow.wait_condition(
-                        lambda: self._update_decision is not None or self._stop
+                        lambda: (
+                            (
+                                (h := self._pending_holds.get(order.order_id)) is not None
+                                and h.decision is not None
+                            )
+                            or self._stop
+                        )
                     )
                     if self._stop:
                         break
 
-                # Process decision if one was made FOR THIS ORDER only
-                if (
-                    self._update_decision is not None
-                    and self._update_pending_order == order.order_id
-                ):
-                    decision = self._update_decision
-                    self._update_pending_order = None
-                    self._update_decision = None
+                # Process decision if one was made FOR THIS ORDER
+                hold = self._pending_holds.get(order.order_id)
+                if hold is not None and hold.decision is not None:
+                    decision = hold.decision
+                    new_lat = hold.new_lat
+                    new_lng = hold.new_lng
+                    new_hotel = hold.new_hotel
+                    # Pop AFTER capturing so no other coroutine can see a
+                    # half-cleared hold.
+                    self._pending_holds.pop(order.order_id, None)
 
                     if decision == "cancel":
                         workflow.logger.info(f"[{order.order_id}] HITL cancel approved")
                         self._cancel_pending = True
                     elif decision == "address_change":
                         # Reroute: update destination and re-navigate
-                        if self._update_new_lat is not None and self._update_new_lng is not None:
+                        if new_lat is not None and new_lng is not None:
                             # If the order was still in pending/batch when the
                             # change was approved, update_order already applied
                             # the new coords — the batch loop navigated to the
                             # new destination on its first trip. Skip the
                             # otherwise-redundant re-navigation here.
                             already_at_new_destination = (
-                                abs(order.delivery_lat - self._update_new_lat) < 0.0001
-                                and abs(order.delivery_lng - self._update_new_lng) < 0.0001
+                                abs(order.delivery_lat - new_lat) < 0.0001
+                                and abs(order.delivery_lng - new_lng) < 0.0001
                             )
-                            order.delivery_lat = self._update_new_lat
-                            order.delivery_lng = self._update_new_lng
-                            if self._update_new_hotel is not None:
-                                order.hotel = self._update_new_hotel
-                            self._update_new_lat = None
-                            self._update_new_lng = None
-                            self._update_new_hotel = None
+                            order.delivery_lat = new_lat
+                            order.delivery_lng = new_lng
+                            if new_hotel is not None:
+                                order.hotel = new_hotel
                             if already_at_new_destination:
                                 workflow.logger.info(
                                     f"[{order.order_id}] HITL reroute approved — "
@@ -577,7 +601,7 @@ class DriverRouteWorkflow:
                 # Deliver (skip if cancelled)
                 if not self._cancel_pending:
                     self._status = "delivering"
-                    await workflow.execute_activity(
+                    deliver_result = await workflow.execute_activity(
                         deliver_order,
                         DeliverInput(
                             driver_id=driver_id,
@@ -589,39 +613,56 @@ class DriverRouteWorkflow:
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=NAV_RETRY,
                     )
-                    delivered.append(order.order_id)
 
-                    # Signal parent — guarded so a terminated parent (e.g. during
-                    # demo reset) doesn't raise and fail this child mid-delivery.
-                    # info().parent.workflow_id avoids coupling to a hardcoded id.
-                    try:
-                        parent_info = workflow.info().parent
-                        if parent_info is not None:
-                            parent = workflow.get_external_workflow_handle(parent_info.workflow_id)
-                            await parent.signal(
-                                "order_delivered",
-                                OrderDeliveredInput(
-                                    driver_id=driver_id,
-                                    order_id=order.order_id,
-                                    delivery_lat=order.delivery_lat,
-                                    delivery_lng=order.delivery_lng,
-                                ),
+                    if deliver_result.success:
+                        delivered.append(order.order_id)
+
+                        # Signal parent — guarded so a terminated parent (e.g.
+                        # during demo reset) doesn't raise and fail this child
+                        # mid-delivery. info().parent.workflow_id avoids
+                        # coupling to a hardcoded id.
+                        try:
+                            parent_info = workflow.info().parent
+                            if parent_info is not None:
+                                parent = workflow.get_external_workflow_handle(
+                                    parent_info.workflow_id
+                                )
+                                await parent.signal(
+                                    "order_delivered",
+                                    OrderDeliveredInput(
+                                        driver_id=driver_id,
+                                        order_id=order.order_id,
+                                        delivery_lat=order.delivery_lat,
+                                        delivery_lng=order.delivery_lng,
+                                    ),
+                                )
+                        except Exception as e:
+                            workflow.logger.warning(
+                                f"Could not signal parent with order_delivered for "
+                                f"{order.order_id}: {e}"
                             )
-                    except Exception as e:
-                        workflow.logger.warning(
-                            f"Could not signal parent with order_delivered for "
-                            f"{order.order_id}: {e}"
+                    else:
+                        # deliver_order returned success=False, meaning a
+                        # cancel beat us to it. Don't tell the parent we
+                        # delivered — the order is CANCELLED, not DELIVERED.
+                        workflow.logger.info(
+                            f"[{order.order_id}] Delivery did not commit "
+                            f"(cancelled before/during activity) — skipping parent signal"
                         )
                 else:
                     workflow.logger.info(f"[{order.order_id}] Delivery skipped — cancelled")
 
                 self._active_order_id = None
                 self._cancel_pending = False
-                # Only clear HITL state if it was for THIS order —
-                # a pending update for a later batched order must survive
-                if self._update_pending_order == order.order_id:
-                    self._update_decision = None
-                    self._update_pending_order = None
+                # Clean up any hold tied to this order. Usually the hold was
+                # already popped when its decision was processed inside the
+                # HITL block above — but there's a race where update_pending
+                # arrives AFTER the HITL gate evaluated False (no hold yet)
+                # but BEFORE deliver_order completed. That creates a late
+                # PendingHold(decision=None) that nothing else clears,
+                # leaking the order_id into pending_hold_order_ids for the
+                # lifetime of the workflow. Popping here closes the race.
+                self._pending_holds.pop(order.order_id, None)
 
                 # Remove from current_orders tracking
                 try:
@@ -1313,15 +1354,13 @@ class MeltdownDemoWorkflow:
             await self._drain_pending_signals()
 
     async def _drain_pending_signals(self) -> None:
-        # Serial processing. Concurrent drain (asyncio.gather) was tried to
-        # avoid freezing driver B while driver A's change awaits human
-        # approval, but the child has a single-slot _update_pending_order
-        # and driver assignments can change mid-process — both same-driver
-        # groups and unassigned-order groups could race and overwrite that
-        # slot, dropping resolve_update sends against the stale guard. Serial
-        # is correct; the "different-driver freeze" becomes a UX limitation
-        # (at most one HITL change in flight at a time) which is fine given
-        # the demo presents changes one at a time.
+        # Serial processing. With the child's HITL state now keyed per-order
+        # (self._pending_holds), concurrent drain would be safe from the
+        # overwrite bug that motivated the original serial revert. Keeping
+        # serial anyway because it's simpler and matches the demo flow
+        # (changes submitted one at a time); the only cost is that driver B
+        # stays parked at its HITL hold while driver A's change awaits human
+        # approval, which is a minor UX delay in practice.
         while self._pending_changes:
             change = self._pending_changes.pop(0)
             await self._process_customer_change(change)
@@ -1406,9 +1445,10 @@ class MeltdownDemoWorkflow:
             # Signal child with the approved decision.
             # Send update_pending again ONLY if the driver changed during the
             # approval wait (order was unassigned at submission and got
-            # assigned while the human was deciding). Re-sending for orders
-            # whose driver was already known at submission is a duplicate —
-            # the child already has _update_pending_order set.
+            # assigned while the human was deciding). With per-order holds
+            # this send is always safe — it creates a new hold entry for
+            # this specific order on the new driver without touching any
+            # other order's hold state.
             if driver_id and driver_id in self._route_handles:
                 if driver_id != driver_id_before_wait:
                     await self._route_handles[driver_id].signal(

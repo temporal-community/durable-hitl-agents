@@ -35,11 +35,17 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
   normally. Two `wait_condition` patterns: parent waits for human, child waits for parent.
   For pending/batched orders, changes apply directly without hold.
   Customer changes process serially in the parent (`_drain_pending_signals`) —
-  submitting a second change before approving the first queues it behind, since
-  each `DriverRouteWorkflow`'s `_update_pending_order` is a single slot and
-  concurrent changes for the same driver would race/overwrite it.
-  The child's HITL hold also escapes on `self._stop` so demo shutdown can't
-  leave a parked child hanging the parent's `await handle` join.
+  it's simpler and matches the demo flow (changes submitted one at a time).
+  The child's HITL state is a **per-order dict** (`_pending_holds: dict[str,
+  PendingHold]`): `update_pending` creates an entry, `resolve_update` fills
+  in the decision for that specific order, and the delivery loop waits on
+  the hold for the order it's currently processing. No single-slot overwrite
+  — two changes for different orders on the same driver each get their own
+  slot. `deliver_order` now returns `success=False` when a cancel wins the
+  race, so the workflow skips the `order_delivered` parent signal for
+  cancelled orders. The child's HITL hold also escapes on `self._stop` so
+  demo shutdown can't leave a parked child hanging the parent's
+  `await handle` join.
   `OrderGenerationWorkflow` is a child workflow that generates orders on a randomized timer and
   signals the parent. Parent handles assignment.
 - **Server reads FleetState** (`server.py`): WebSocket data comes from `fleet.snapshot()` (SQLite).
