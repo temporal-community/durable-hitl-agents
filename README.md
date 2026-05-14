@@ -16,7 +16,7 @@ Built with **Google ADK** for multi-agent reasoning and **Temporal** for durable
 |----------|-------------|---------------|
 | **Tool Degradation** | Take Fleet Agent offline | Fleet Agent's tools fail fast (2 retries), error returned to LLM — Dispatch Agent assigns with Customer Agent data only. Reconnect → tools succeed → full assessment resumes. Temporal shows retry attempts in the UI. |
 | **Service Disruption & Recovery** | Take a delivery actor offline mid-delivery | Delivery actor completes current delivery but can't report back. Temporal retries with backoff until reconnected. Stays at hotel on the map — no teleporting. Reconnect → next retry succeeds → navigates home for next order. |
-| **Human-in-the-Loop (HITL)** | Submit an address change or cancellation | Driver navigates to hotel but holds before delivering (`awaiting_update`). Parent waits for human approval, child waits for parent's decision. Approve cancel → delivery skipped. Approve reroute → driver navigates to new destination. Two `wait_condition` patterns, cross-workflow signals. |
+| **Human-in-the-Loop (HITL)** | Submit an address change or cancellation | **Operator-initiated** (not agent-initiated — the gate lives in the workflow, not in any LLM tool). Driver navigates to hotel but holds before delivering (`awaiting_update`). Parent waits for human approval, child waits for parent's decision. Approve cancel → delivery skipped. Approve reroute → driver navigates to new destination. Two `wait_condition` patterns, cross-workflow signals. |
 
 ## Quick Start
 

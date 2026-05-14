@@ -31,12 +31,17 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
   reconnected. Driver completes delivery, stays at hotel, can't report back until reconnected.
   On reconnect, `sync_driver_position` activity reads actual position from FleetState — no
   teleporting. Completed deliveries are not repeated; batch continues from next pending order.
-  HITL hold pattern: when a customer change is submitted, parent signals child with
-  `update_pending` — driver navigates to hotel but holds before delivering (`awaiting_update`
-  status, `wait_condition`). On approval, parent signals `resolve_update` with the decision:
-  cancel → skip delivery, address_change → reroute to new destination, release → deliver
-  normally. Two `wait_condition` patterns: parent waits for human, child waits for parent.
-  For pending/batched orders, changes apply directly without hold.
+  HITL hold pattern: this is **operator-in-the-loop**, not agent-in-the-loop —
+  the change is initiated externally (operator submits a customer change via REST)
+  and a human supervisor approves it. The ADK agents never see the change; the
+  gate lives in the workflow, not in any agent tool (contrast: an `ask_user`-style
+  `@function_tool` where the LLM itself pauses for clarification). When the change
+  is submitted, parent signals child with `update_pending` — driver navigates to
+  hotel but holds before delivering (`awaiting_update` status, `wait_condition`).
+  On approval, parent signals `resolve_update` with the decision: cancel → skip
+  delivery, address_change → reroute to new destination, release → deliver
+  normally. Two `wait_condition` patterns: parent waits for human, child waits for
+  parent. For pending/batched orders, changes apply directly without hold.
   Customer changes process serially in the parent (`_drain_pending_signals`) —
   it's simpler and matches the demo flow (changes submitted one at a time).
   The child's HITL state is a **per-order dict** (`_pending_holds: dict[str,
