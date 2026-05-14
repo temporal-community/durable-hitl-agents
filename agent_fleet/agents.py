@@ -24,7 +24,8 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.tools import ToolContext
 from google.adk.tools.google_search_tool import GoogleSearchTool
 from temporalio.common import RetryPolicy
-from temporalio.contrib.google_adk_agents import AdkActivityConfig, TemporalModel
+from temporalio.contrib.google_adk_agents import TemporalModel
+from temporalio.workflow import ActivityConfig
 
 from agent_fleet._activity_tool import activity_tool
 from agent_fleet.activities import (
@@ -210,10 +211,8 @@ def create_assignment_fleet_agent() -> Agent:
         name="assignment_fleet_agent",
         model=TemporalModel(
             DEFAULT_MODEL,
-            activity_config=AdkActivityConfig(
-                task_queue=AGENTS_QUEUE,
-                summary_fn=_build_summary,
-            ),
+            activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),
+            summary_fn=_build_summary,
         ),
         description=(
             "Operational fleet specialist for order assignment. Assesses Driver "
@@ -250,10 +249,8 @@ def create_assignment_customer_agent() -> Agent:
         name="assignment_customer_agent",
         model=TemporalModel(
             DEFAULT_MODEL,
-            activity_config=AdkActivityConfig(
-                task_queue=AGENTS_QUEUE,
-                summary_fn=_build_summary,
-            ),
+            activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),
+            summary_fn=_build_summary,
         ),
         description=(
             "Customer priority specialist for order assignment. Evaluates order "
@@ -287,10 +284,8 @@ def create_assignment_dispatch_agent() -> Agent:
         name="assignment_dispatch_agent",
         model=TemporalModel(
             DEFAULT_MODEL,
-            activity_config=AdkActivityConfig(
-                task_queue=AGENTS_QUEUE,
-                summary_fn=_build_summary,
-            ),
+            activity_config=ActivityConfig(task_queue=AGENTS_QUEUE),
+            summary_fn=_build_summary,
         ),
         description=(
             "Dispatch Agent. Synthesizes fleet and customer assessments "

@@ -67,7 +67,7 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
 - **3-queue workers** (`worker.py`): workflows + local activities, delivery, agents.
   `GoogleAdkPlugin` is on both workflow and agents workers (sandbox + determinism on
   workflow side, `invoke_model` activity on agents side). Agents use the upstream
-  `TemporalModel` with `AdkActivityConfig(summary_fn=_build_summary)` — `_build_summary`
+  `TemporalModel` with `summary_fn=_build_summary` — `_build_summary`
   in `agents.py` generates context-aware summaries (agent name, order, phase) shown
   in the Temporal UI per invoke_model activity. `_activity_tool.py` builds its own
   dynamic summaries for tool-call activities from the bound arguments.
@@ -104,12 +104,16 @@ and FastAPI server (`python -m agent_fleet.server`). No manual Temporal setup ne
 
 ## Commands
 
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) — `uv sync --all-extras`
+creates `.venv/` and installs runtime + dev deps. `uv run <cmd>` runs in that env.
+
 ```bash
-ruff check .      # lint
-ruff format .     # format
-pytest            # run tests
-make lint         # ruff check + format check
-make fmt          # ruff format (write)
-make test         # pytest
-make run          # start the demo
+uv sync --all-extras   # install / refresh deps (creates .venv/)
+uv run ruff check .    # lint
+uv run ruff format .   # format
+uv run pytest          # run tests
+make lint              # ruff check + format check (via uv)
+make fmt               # ruff format (via uv)
+make test              # pytest (via uv)
+make run               # start the demo
 ```

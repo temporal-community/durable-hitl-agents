@@ -1,13 +1,16 @@
-.PHONY: lint fmt test run
+.PHONY: install lint fmt test run
+
+install:
+	uv sync --all-extras
 
 lint:
-	ruff check . && ruff format --check .
+	uv run ruff check . && uv run ruff format --check .
 
 fmt:
-	ruff check --fix . && ruff format .
+	uv run ruff check --fix . && uv run ruff format .
 
 test:
-	pytest
+	uv run pytest
 
 run:
 	./run.sh

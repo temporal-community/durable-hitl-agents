@@ -6,6 +6,14 @@ Ziggy's Ice Cream runs its Las Vegas Strip delivery fleet on Temporal. When orde
   <img src=".github/assets/meltdown-screenshot-3.png" alt="Meltdown demo dashboard" width="900">
 </p>
 
+<p align="center">
+  <a href="https://youtube.com/shorts/Wq7hiN2KYnk">
+    <img src="https://img.youtube.com/vi/Wq7hiN2KYnk/hqdefault.jpg" alt="Watch the Meltdown demo on YouTube" width="280">
+  </a>
+  <br>
+  <em>▶ <a href="https://youtube.com/shorts/Wq7hiN2KYnk">Watch the demo on YouTube</a></em>
+</p>
+
 Built with **Google ADK** for multi-agent reasoning and **Temporal** for durable execution. Orders auto-generate on a timer. AI agents (Fleet, Customer, Dispatch) evaluate positions, capacity, ETAs, and priority — then assign each order to the best driver. Drivers batch-pickup at Ziggy's and deliver sequentially. When failures hit, Temporal's event log holds every step — nothing is lost, nothing repeats.
 
 > **Terminology:** AI agents **reason** (LLM + tools, run inline via ADK). Delivery actors **execute** (child workflows that carry out routes). They are not Temporal workers.
@@ -45,10 +53,10 @@ echo 'export GOOGLE_MAPS_API_KEY="your-maps-key"' >> .env  # optional, must be M
 ```
 
 ### 2. Run
-The `run.sh` script sets up your Python environment, installs dependencies, and gets Temporal running.
+The `run.sh` script syncs dependencies via [uv](https://docs.astral.sh/uv/) (install once with `brew install uv`) and starts everything.
 
 ```bash
-./run.sh    # starts Temporal dev server + worker process + server process
+./run.sh    # uv sync + Temporal dev server + worker process + server process
 ```
 
 ### 3. Open the dashboard
@@ -159,7 +167,7 @@ The plugin turns each Gemini inference and each tool invocation into a **separat
 
 **Two processes**: `run.sh` starts a worker process and a server process (plus Temporal dev server). The server queries Temporal workflows for state (`_build_snapshot_from_queries()`) and sends signals only — no workers, no FleetState reads. Workers run three Temporal workers on three task queues.
 
-**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs workflows plus `publish_agent_event` as a local activity (UI projection with minimal history). `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). Agents use the upstream `TemporalModel` with `AdkActivityConfig(summary_fn=_build_summary)` — `_build_summary` in `agents.py` generates context-aware Temporal UI summaries per LLM call.
+**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs workflows plus `publish_agent_event` as a local activity (UI projection with minimal history). `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). Agents use the upstream `TemporalModel` with `summary_fn=_build_summary` — `_build_summary` in `agents.py` generates context-aware Temporal UI summaries per LLM call.
 
 ### What each agent reasons about
 
@@ -184,6 +192,7 @@ Mock mode is completely separate from live code. The `agent_fleet/mock/` folder 
 ## Prerequisites
 
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (`brew install uv`) — Python package + venv manager used to install dependencies
 - [Temporal CLI](https://docs.temporal.io/cli) (`brew install temporal`)
 - Google Gemini API key (`GOOGLE_API_KEY`) — required for live mode; without it the entire demo runs in mock mode. Restricted to **Generative Language API**.
 - Google Maps API key (`GOOGLE_MAPS_API_KEY`) — used for route polylines and ETAs. Restricted to **Directions API**. This must be a separate key from `GOOGLE_API_KEY` because the Generative Language API cannot share a key with standard Google Cloud APIs.

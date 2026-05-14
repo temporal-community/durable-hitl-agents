@@ -11,16 +11,13 @@ if [ -f .env ]; then
     set +a
 fi
 
-# Create venv if it doesn't exist
-if [ ! -d venv ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
-    source venv/bin/activate
-    echo "Installing dependencies..."
-    pip install -e ".[dev]"
-else
-    source venv/bin/activate
+if ! command -v uv >/dev/null 2>&1; then
+    echo "Error: uv is required. Install with 'brew install uv' or see https://docs.astral.sh/uv/" >&2
+    exit 1
 fi
+
+echo "Syncing dependencies with uv..."
+uv sync --all-extras
 
 cleanup() {
     echo ""
@@ -52,12 +49,12 @@ until temporal operator cluster health 2>/dev/null | grep -q "SERVING"; do
 done
 
 echo "Starting workers..."
-python3 -m agent_fleet.worker &
+uv run python -m agent_fleet.worker &
 WORKER_PID=$!
 sleep 2
 
 echo "Starting server..."
-python3 -m agent_fleet.server &
+uv run python -m agent_fleet.server &
 SERVER_PID=$!
 
 echo ""
