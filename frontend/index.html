@@ -1303,7 +1303,7 @@ function switchTab(tabName) {
   const brand = document.getElementById('framework-brand');
   if (brand && tabName === 'agent') {
     brand.href = 'https://langchain-ai.github.io/langgraph/';
-    brand.innerHTML = '<span class="brand-name" style="font-size:20px;">🦜🔗 LangGraph</span>';
+    brand.innerHTML = '<img src="/static/img/langgraph-logo.svg" alt="LangGraph" title="LangGraph" style="height:30px;" />';
   } else if (brand) {
     brand.href = 'https://adk.dev';
     brand.innerHTML = '<img src="/static/img/google_adk.png" alt="Google ADK" title="Google Agent Development Kit" style="height:40px;" /><span class="brand-name">Google ADK</span>';
@@ -1480,7 +1480,20 @@ const DRIVER_COLORS = {
 
 // --- Sign tooltips ---
 // Clean labeled markers for SF venues (no more Vegas neon signs).
+const VENUE_SIGNS = {
+  'Moscone Center': '/static/img/sign-mosconecenter.svg',
+  'Chinatown': '/static/img/sign-chinatown.svg',
+  "Fisherman's Wharf": '/static/img/sigh-fishermanswharf.svg',
+  'Oracle Park': '/static/img/sign-oraclepark.svg',
+};
 function venueLabel(name, sub) {
+  const sign = VENUE_SIGNS[name];
+  if (sign) {
+    return `<div style="text-align:center;">
+      <img src="${sign}" alt="${name}" style="height:38px;width:auto;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.55));" />
+      ${sub ? `<div style="color:#9fb4c7;font-size:10px;margin-top:2px;">${sub}</div>` : ''}
+    </div>`;
+  }
   return `<div style="text-align:center;padding:4px 10px;background:rgba(11,18,32,0.85);border:1px solid rgba(0,255,255,0.4);border-radius:6px;">
     <div style="color:#e5f6ff;font-size:13px;font-weight:700;letter-spacing:.5px;">${name}</div>
     ${sub ? `<div style="color:#9fb4c7;font-size:10px;">${sub}</div>` : ''}
