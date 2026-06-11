@@ -8,6 +8,64 @@ Companion demo for the AI Engineer World's Fair talk **"The Human Is an Async AP
   <img src=".github/assets/meltdown-screenshot-3.png" alt="Meltdown demo dashboard" width="900">
 </p>
 
+## The two patterns, in code
+
+Both human-in-the-loop patterns reduce to the **same durable Temporal primitive** — a `wait_condition` that pauses the workflow and a `@workflow.signal` that resumes it. The only difference is *who initiates*.
+
+### Pattern A — The Human Calls the Agent (Google ADK)
+
+An operator interrupts a delivery mid-flight; the driver **halts gracefully at the venue** and waits for a human decision, then continues. *Human-initiated interrupt with graceful halt and resumption.*
+
+```python
+# DriverRouteWorkflow (workflows.py) — driver reaches the venue, then PAUSES until a human resolves it
+if order.order_id in self._pending_holds:
+    self._status = "awaiting_update"
+    await workflow.wait_condition(            # ⏸ durable pause on a signal
+        lambda: self._pending_holds[order.order_id].decision is not None or self._stop
+    )
+    # decision: "cancel" | "address_change" | "release"  → skip / reroute / deliver
+
+@workflow.signal
+async def update_pending(self, inp):   # operator submits the change   (human → agent)
+    self._pending_holds.setdefault(inp.order_id, PendingHold())
+
+@workflow.signal
+async def resolve_update(self, inp):   # the human's decision resumes the driver
+    self._pending_holds[inp.order_id].decision = inp.change_type
+```
+
+### Pattern B — The Agent Calls the Human (LangGraph)
+
+A high-value order routes to a multi-agent LangGraph gate; the dispatch agent decides — **by calling a tool** — that it needs a human, and the workflow turns that human into a durable signal that **survives a worker crash**. *Agent-initiated approval gate with timeout and escalation.*
+
+```python
+# dispatch_gate.py — the agent decides, by calling a tool, that it needs a human
+@tool
+def request_human_approval(reason: str, recommendation: str) -> str:
+    """Escalate before committing scarce fleet capacity."""
+
+model = init_chat_model(DEFAULT_MODEL, model_provider=provider).bind_tools([request_human_approval])
+resp = await model.ainvoke(prompt)            # ← the agent's tool-call decision
+
+# The WORKFLOW performs the HITL — the human is a durable Temporal signal
+async def _await_human(self, escalation_seconds):
+    try:
+        await workflow.wait_condition(         # ⏸ pause, survives worker death
+            lambda: self._decision is not None,
+            timeout=timedelta(seconds=escalation_seconds),
+        )
+    except TimeoutError:                        # timeout → escalate to a backup approver
+        self._approver_tier = "backup"
+        await workflow.wait_condition(lambda: self._decision is not None)
+    return self._decision
+
+@workflow.signal
+def approve(self, decision: str):              # the human responds → the async endpoint resolves
+    self._decision = decision
+```
+
+> **Two frameworks, one durable contract — the human is a signal.** (LangGraph's native `interrupt()` is first-class too; here it's behind the `HITL_MODE=interrupt` toggle.)
+
 <p align="center">
   <a href="https://youtube.com/shorts/Wq7hiN2KYnk">
     <img src="https://img.youtube.com/vi/Wq7hiN2KYnk/hqdefault.jpg" alt="Watch the Meltdown demo on YouTube" width="280">
