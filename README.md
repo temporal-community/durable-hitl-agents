@@ -1,4 +1,6 @@
-# Meltdown — Ice Cream Delivery Fleet Demo <img src="https://github.com/google/adk-docs/raw/main/docs/assets/agent-development-kit.png" alt="Google ADK" height="28">
+# Durable Human-in-the-Loop Agents 🍦 — Ice Cream Fleet Demo <img src="https://github.com/google/adk-docs/raw/main/docs/assets/agent-development-kit.png" alt="Google ADK" height="28">
+
+> **A durable human-in-the-loop (HITL) example for AI agents** — framework-agnostic, built on Temporal (Google ADK + LangGraph). Adapted from the original **Meltdown** ice cream delivery fleet demo.
 
 Companion demo for the AI Engineer World's Fair talk **"The Human Is an Async API: Designing Durable Human-in-the-Loop Agents."** Ziggy's Ice Cream runs its downtown San Francisco catering fleet on Temporal. Orders flow in from Moscone Center, Fisherman's Wharf, and Chinatown; AI agents reason about which driver to send; and Temporal guarantees every decision and delivery runs to completion. The demo shows **two durable human-in-the-loop patterns** side by side — one where a human interrupts the agents, one where an agent calls a human — both built on Temporal's durable signals and `wait_condition`.
 
