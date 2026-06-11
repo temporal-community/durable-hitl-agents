@@ -1,7 +1,8 @@
 """
-Single source of truth for all map locations — Las Vegas Strip.
+Single source of truth for all map locations — downtown San Francisco.
 
-Ice cream shop (off-Strip) + hotel/venue delivery destinations.
+Ice cream shop (Ferry Building) + prominent downtown delivery destinations.
+The "hotel" key is a historical field name; values are SF venue names.
 """
 
 from __future__ import annotations
@@ -10,44 +11,48 @@ import random
 
 from agent_fleet.models import Coords
 
-# Ziggy's Ice Cream — midway between Caesars (36.1162) and Mandalay (36.0919),
-# east of the Strip on Paradise Rd
-WAREHOUSE = Coords(lat=36.1040, lng=-115.1530)
+# Ziggy's Ice Cream — the Ferry Building, an iconic SF food hall on the
+# Embarcadero, central to the downtown delivery spread.
+WAREHOUSE = Coords(lat=37.7956, lng=-122.3934)
 WAREHOUSE_LABEL = "Ziggy's Ice Cream"
 
-# Delivery destinations — 3 hotels on the Strip
+# Delivery destinations — prominent downtown San Francisco venues.
+# Moscone Center is the platinum tier: premium conference-catering orders that
+# trip the agent-initiated approval gate.
 VENUES: list[dict] = [
     {
-        "hotel": "MGM Grand",
-        "coords": Coords(lat=36.1024, lng=-115.1725),
-        "map_label": "MGM Grand",
-        "events": ["pool party", "Grand Garden Arena concert", "celebrity chef dinner"],
-        "vip_tier": "gold",
+        "hotel": "Moscone Center",
+        "coords": Coords(lat=37.7841, lng=-122.4017),
+        "map_label": "Moscone Center",
+        "events": ["keynote reception", "expo hall social", "conference catering"],
+        "vip_tier": "platinum",
     },
     {
-        "hotel": "Caesars Palace",
-        "coords": Coords(lat=36.1162, lng=-115.1745),
-        "map_label": "Caesars",
-        "events": ["corporate gala", "Colosseum show afterparty", "Forum Shops VIP event"],
+        "hotel": "Fisherman's Wharf",
+        "coords": Coords(lat=37.8080, lng=-122.4170),
+        "map_label": "Fisherman's Wharf",
+        "events": ["pier festival", "seafood fair afterparty", "waterfront gathering"],
         "vip_tier": "silver",
     },
     {
-        "hotel": "Mandalay Bay",
-        "coords": Coords(lat=36.0919, lng=-115.1761),
-        "map_label": "Mandalay Bay",
-        "events": ["tech conference", "Shark Reef fundraiser", "convention center lunch"],
-        "vip_tier": "platinum",
+        "hotel": "Chinatown",
+        "coords": Coords(lat=37.7946, lng=-122.4059),
+        "map_label": "Chinatown",
+        "events": ["lantern festival", "night market", "banquet hall event"],
+        "vip_tier": "gold",
     },
 ]
 
-# Venues indexed by hotel name for quick lookup
+# Venues indexed by name for quick lookup
 VENUES_BY_HOTEL: dict[str, dict] = {v["hotel"]: v for v in VENUES}
 
-# Reroute-only destination — only appears on the map during customer change demos
+# Reroute-only destination — only appears on the map during customer change demos.
+# Oracle Park, on the waterfront south of downtown (a visible reroute distance).
 COSMOPOLITAN = {
-    "hotel": "The Cosmopolitan",
-    "coords": Coords(lat=36.1098, lng=-115.1743),
-    "map_label": "Cosmopolitan",
+    "hotel": "Oracle Park",
+    "coords": Coords(lat=37.7786, lng=-122.3893),
+    "map_label": "Oracle Park",
+    "vip_tier": "standard",
 }
 
 
@@ -65,6 +70,11 @@ def generate_random_order(order_number: int) -> dict:
     else:
         deadline = random.choice([30, 40, 50])
 
+    # Routine orders stay below the gate's review threshold ($2,000). Only the
+    # deliberately injected premium order (/api/inject-order) trips the agent gate,
+    # so the agent-in-the-loop demo fires when you choose — not at random.
+    order_value = servings * random.choice([9, 11, 13])
+
     return {
         "order_id": f"order-{order_number}",
         "hotel": venue["hotel"],
@@ -75,4 +85,5 @@ def generate_random_order(order_number: int) -> dict:
         "servings": servings,
         "deadline_minutes": deadline,
         "event": event,
+        "order_value": order_value,
     }

@@ -264,7 +264,7 @@ def create_assignment_customer_agent() -> Agent:
             "Assess: VIP or standard? Deadline tight? Hotel events increasing urgency? "
             "How many servings?\n\n"
             "Respond with ONLY: priority level and key urgency factor. "
-            "Example: 'VIP, tight deadline (25min), Caesars gala tonight.' "
+            "Example: 'VIP, tight deadline (25min), Westin St. Francis gala tonight.' "
             "No preamble, no full analysis."
         ),
         tools=[

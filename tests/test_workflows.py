@@ -12,6 +12,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
+from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -29,13 +30,23 @@ from agent_fleet.activities import (
     sync_driver_position,
 )
 from agent_fleet.locations import VENUES
-from agent_fleet.mock.activities import mock_get_route_polyline
 from agent_fleet.models import (
     DriverRouteInput,
     DriverRouteOrder,
 )
 from agent_fleet.queues import DELIVERY_QUEUE, WORKFLOWS_QUEUE
 from agent_fleet.simulation import fleet
+
+
+@activity.defn(name="get_route_polyline")
+async def _fake_route_polyline(
+    origin_lat: float, origin_lng: float, dest_lat: float, dest_lng: float
+) -> list[dict[str, float]]:
+    """Test stand-in for the Maps Directions activity (no live API call)."""
+    return [
+        {"lat": origin_lat, "lng": origin_lng},
+        {"lat": dest_lat, "lng": dest_lng},
+    ]
 
 
 @pytest.fixture
@@ -63,7 +74,7 @@ async def run_delivery_workers(env: WorkflowEnvironment):
             pickup_orders,
             deliver_order,
             execute_customer_change,
-            mock_get_route_polyline,
+            _fake_route_polyline,
             get_fleet_status,
             get_order_priorities,
             publish_agent_event,

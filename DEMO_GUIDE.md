@@ -1,6 +1,10 @@
 # Meltdown Demo Delivery Guide
 
-This guide is for anyone presenting the Meltdown demo. It covers setup, the one-minute pitch on each technology, and step-by-step scripts for each demo scenario (~2–5 min each).
+Talk track and presenter notes for the AI Engineer World's Fair session
+**"The Human Is an Async API: Designing Durable Human-in-the-Loop Agents"**
+(Moscone West, San Francisco). The demo shows **two** human-in-the-loop patterns
+on Temporal durable execution, visualized as Ziggy's Ice Cream catering fleet in
+downtown San Francisco.
 
 ---
 
@@ -9,196 +13,156 @@ This guide is for anyone presenting the Meltdown demo. It covers setup, the one-
 
 **Requirements:**
 - `.env` with two API keys (Google requires separate keys for Gemini vs Cloud APIs):
-  - `GOOGLE_API_KEY` — Gemini key, restricted to Generative Language API. Without it, the demo runs in mock mode.
+  - `GOOGLE_API_KEY` — Gemini key, restricted to Generative Language API. Required; the worker is live-only.
   - `GOOGLE_MAPS_API_KEY` — Maps key, restricted to Directions API.
 - `./run.sh` (or `make run`) started — this starts the Temporal dev server, worker process, and server process automatically.
+  - **Note:** the worker does **not** load `.env` itself. If you ever start it by hand, use `uv run --env-file .env python -m agent_fleet.worker`. `GOOGLE_API_KEY` is required; without it the worker logs a warning and LLM calls fail (no mock fallback).
 - Browser open at http://localhost:8080 for the web app
-- Temporal UI open at http://localhost:8233 (optional but great for showing workflow history)
-
-If completed successfully, the web app should look like the following:
-
-![Meltdown Demo](.github/assets/meltdown-screenshot-3.png)
+- Temporal UI open at http://localhost:8233 (optional but great for showing workflow history and the worker-kill recovery)
 
 ## How it works
 See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" information.
 
 ## Pre-flight check
-- Map shows the Las Vegas Strip with 3 hotels (MGM Grand, Caesars, Mandalay Bay) and Ziggy's Ice Cream
+- Map shows **downtown San Francisco** with three delivery venues — **Moscone Center**, **Fisherman's Wharf**, **Chinatown** — and Ziggy's Ice Cream at the **Ferry Building**
 - All 5 drivers (A–E) are parked at Ziggy's, status idle
-- "Start Deliveries" button is active
+- Two tabs at the top: **Human-in-the-loop** (Operator interrupt) and **Agent-in-the-loop** (Approval gate)
+- "Start Deliveries" button is active on both tabs
 - If you see a stale state from a prior run, click **Reset** first
 
-**Tip:** Do a dry run of each [scenario](#demo-scenarios) before presenting to get familiar with the agent reasoning panel timing.
+**Tip:** Do a dry run of each pattern before presenting to get familiar with the agent reasoning panel timing and the approval-card flow.
 
 ---
 
-## The One-Minute Pitch
+## The Thesis (say this up front)
 
-Use this framing at the start of the talk before any demo:
-
-> "Ziggy's Ice Cream delivers to hotels on the Las Vegas Strip. They built their delivery intelligence on Temporal with Google ADK agents handling dispatch decisions. What we're showing today is their system under stress — what happens when an agent goes offline, a driver loses connection, or a customer changes their order mid-delivery. Every failure is recoverable because Temporal holds the state. Ice cream delivery can't afford lost state."
+> "We keep designing human-in-the-loop as a special case — a pause, a webhook, a polling loop someone has to babysit. But there are really only two shapes. Sometimes a **human calls the agent**: they reach in and change something while the work is in flight. And sometimes the **agent calls the human**: it hits a decision it shouldn't make alone, and it asks. The trick is that the human is just another tool your agent calls — but a *durable, async* one. On Temporal, that tool call is a signal. Let me show you both, running on an ice cream fleet here in downtown San Francisco."
 
 ---
 
-## What is Google ADK?
+## Two technologies, one runtime
 
-**The 30-second version:**
+The demo deliberately uses **two different agent frameworks** on the **same** Temporal runtime, to make the point that the durable-HITL pattern is framework-agnostic.
 
-> "Google ADK is an open-source framework for building multi-agent AI systems. You compose agents — each with their own tools and model — into pipelines: run them sequentially, in parallel, or nested. In this demo, a Fleet Agent assesses delivery actor positions and capacity, a Customer Agent evaluates order priority and hotel context, and a Dispatch Agent synthesizes their output into a delivery assignment."
+- **Pattern A (Human-in-the-loop)** is built on **Google ADK** — a multi-agent assignment pipeline (Fleet + Customer Agents in parallel → Dispatch Agent). It runs on **routine** orders.
+- **Pattern B (Agent-in-the-loop)** is built on **LangGraph** via Temporal's `temporalio.contrib.langgraph` integration — a multi-agent team (Fleet + Customer → Dispatch) where the Dispatch agent decides whether to escalate. High-value orders bypass ADK and route here instead.
 
-**Key points to land:**
-- ADK has two agent types: **LLM Agents** (`Agent` with a model) call Gemini to reason and use tools; **Orchestrator Agents** (`SequentialAgent`, `ParallelAgent`) coordinate sub-agents without calling an LLM themselves
-- In this demo: Fleet Agent, Customer Agent, and Dispatch Agent are all LLM Agents — each calls Gemini. The outer pipeline (`create_order_assignment_agent`) is an Orchestrator Agent — it sequences them with no LLM of its own
-- Each agent can use tools (Maps, Search, custom functions)
-- ADK supports multiple model providers — this demo uses Gemini, but you can swap to other models by changing the config
-- ADK manages the multi-turn reasoning loop — the developer just defines the agents and wires them together
+### What is Google ADK? (30 seconds)
 
+> "Google ADK is an open-source framework for composing multi-agent systems. You wire agents — each with their own tools and model — into pipelines that run sequentially or in parallel. In this demo a Fleet Agent assesses driver positions and capacity, a Customer Agent evaluates order priority and venue context, and a Dispatch Agent synthesizes both into an assignment. Each Gemini call and each tool call becomes its own Temporal activity — individually durable and replayable."
+
+### What is the LangGraph integration? (30 seconds)
+
+> "Pattern B uses LangGraph — a graph of nodes — running *inside* a Temporal workflow via `temporalio.contrib.langgraph`. It's a multi-agent team that mirrors the ADK side: a Fleet node and a Customer node assess in parallel, then a Dispatch node decides. Each node is a real Gemini call, run as its own Temporal activity. When the Dispatch agent decides an order needs sign-off, it calls a `request_human_approval` tool — and on Temporal, that tool call becomes a durable **signal**: the graph hands the escalation back to the workflow, which parks on a `wait_condition` until a human answers (or a timeout escalates to a backup approver). The draft they're approving is exposed through a query. Same durable primitive, completely different framework. LangGraph's own `interrupt()` can drive the pause instead — it's a back-pocket toggle (`HITL_MODE=interrupt`), but the talk leads with the Temporal-signal version."
+
+---
 
 ## Architecture Talking Points
 
-Optional drop-ins for mid-demo — when the conversation turns to scale, or to what "production Temporal" actually looks like. Open the Temporal UI alongside the demo dashboard.
+Optional drop-ins for mid-demo — when the conversation turns to scale or to what "production Temporal" actually looks like. Open the Temporal UI alongside the dashboard.
 
-- **"Open the event history."** Click into any `route-driver-*` workflow and scroll. You'll see ~50–100 events per order: each Gemini call, each tool call, each navigation leg, each delivery. That's **per-call durability** — every one of those is an independent retry unit. Crash the worker mid-Dispatch-Agent and the Fleet Agent's earlier assessment is replayed from history, not re-called. The alternative (one big `reason_about_assignment` activity) would be ~3 events per order but restart the entire agent pipeline on any failure.
-- **"Where are driver positions in the event log?"** They're not. `navigate_to` heartbeats position to shared state (SQLite here, Redis or Postgres in prod) every 400ms. None of those writes hit Temporal. If we'd signaled position instead, a single delivery in prod (15 min × 1 ping/sec) would be ~900 permanent events per driver per delivery. The pattern: signals for milestones (delivery complete, new order), shared state for continuous telemetry.
-- **"What about queries between workflows?"** Temporal doesn't support workflow-to-workflow queries — by design, because workflows have to replay deterministically. Cross-workflow coordination uses signals (durable async events). If the parent needs to "read" child state, the child pushes milestone events to the parent; the parent tracks the bookkeeping it decides on and doesn't try to mirror every field the child owns.
+- **"Open the event history."** Click into any `route-driver-*` workflow and scroll. You'll see ~50–100 events per order: each Gemini call, each tool call, each navigation leg, each delivery. That's **per-call durability** — every one of those is an independent retry unit. Crash the worker mid-Dispatch-Agent and the Fleet Agent's earlier assessment is replayed from history, not re-called.
+- **"Where are driver positions in the event log?"** They're not. `navigate_to` heartbeats position to shared state (SQLite here, Redis or Postgres in prod) every ~400ms. None of those writes hit Temporal. The pattern: signals for milestones (delivery complete, new order, human approval), shared state for continuous telemetry.
+- **"What about the approval gate?"** Open the `gate-<order-id>` workflow while the approval card is up. You'll see the LangGraph agent-team activities (Fleet, Customer, Dispatch), then the workflow parked on a `wait_condition` waiting for the `approve` signal. The brief the human sees is surfaced via `/api/pending-dispatch`, which reads the parent workflow's `pending_dispatch` dict (the gate signals it up via `dispatch_gate_awaiting`) — not from any database the UI polls blindly. The gate also exposes its own `pending_brief` query.
 
-Full breakdown — including the per-order event table — lives in [HOW_IT_WORKS.md — Communication patterns](HOW_IT_WORKS.md#communication-patterns--what-goes-where-and-why) and [What's in the event log](HOW_IT_WORKS.md#whats-in-the-event-log--and-why-its-bigger-than-youd-guess).
-
----
-
-## Demo Scenarios
+Full breakdown lives in [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
 
 ---
 
-### Opening: Ziggy's Opens for Business
-**Time: 1–2 min | Best for: opening with the "living system" feel before the 3 demos**
+## Opening: Ziggy's Opens for Business
+**Time: 1–2 min | Run this first on either tab**
 
-**Setup:** Click **Start Deliveries**. Ziggy's kitchen starts taking orders. Hotels on the Strip place orders every few seconds — MGM Grand, Caesars Palace, Mandalay Bay.
+**Setup:** Click **Start Deliveries**. Ziggy's kitchen starts taking orders. Venues around downtown place orders every few seconds — Moscone Center, Fisherman's Wharf, Chinatown.
 
 **What happens automatically:**
-1. Each order triggers multi-agent reasoning — watch the ADK Agent Team panel
-2. Fleet Agent calls `tool_get_fleet_status` for driver positions and capacity, then `tool_get_route_info` for the 1–3 closest drivers to get driving ETAs from Google Maps. Each ETA call is a separate Temporal activity — individually durable.
-3. Customer Agent calls `tool_get_order_priorities` and uses `google_search` (Gemini grounding) — evaluates VIP tier, deadline pressure, hotel events (conferences, galas), and guest count. Mandalay Bay orders are always VIP.
-4. Dispatch Agent synthesizes both assessments and calls `tool_submit_assignment` — picks the best driver and explains why
-5. Drivers batch-pickup at Ziggy's (up to 3 orders per trip) and deliver sequentially to hotels
+1. Each order triggers multi-agent reasoning — watch the ADK Agent Team panel.
+2. Fleet Agent calls `tool_get_fleet_status` for driver positions and capacity, then `tool_get_route_info` for the closest drivers to get driving ETAs from Google Maps. Each ETA call is a separate Temporal activity.
+3. Customer Agent calls `tool_get_order_priorities` and uses `google_search` (Gemini grounding) — evaluates VIP tier, deadline pressure, venue events, and guest count.
+4. Dispatch Agent synthesizes both assessments and calls `tool_submit_assignment` — picks a driver and explains why.
+5. The workflow **spreads load across the fleet** (least-loaded driver) so all five drivers stay active.
+6. Drivers batch-pickup at Ziggy's (up to 3 orders per trip) and deliver sequentially to the venues.
 
 **What to say:**
-> "This is Ziggy's delivery system running live. Orders keep flooding in from the Strip, and three AI agents reason about every single one. Fleet Agent checks who's closest — those are real Google Maps API calls, each one a separate Temporal activity. Customer Agent evaluates priority. Dispatch Agent weighs both and assigns. The drivers run in their own child workflows — batch-picking up orders and delivering them in sequence. Everything you see in the Temporal UI is individually durable and replayable."
+> "This is Ziggy's delivery system running live. Orders keep flooding in from downtown, and three AI agents reason about every single one. Fleet Agent checks who's closest — those are real Google Maps calls, each its own Temporal activity. Customer Agent evaluates priority. Dispatch Agent weighs both and assigns. Everything you see in the Temporal UI is individually durable and replayable."
 
-**Before you demo, set up the Temporal UI:**
-- Open http://localhost:8233 in a separate browser tab
-- Search for `meltdown-demo` — this is the parent workflow
-- Also open `route-driver-a` in another tab — this shows a delivery actor's child workflow
-- After starting deliveries, you'll see activities streaming in: `generate_order`, `invoke_model` (LLM calls), `tool_get_fleet_status`, `tool_submit_assignment`, etc.
-- Point out how each agent's LLM call and tool call shows up as a separate activity with a summary label — *"Every reasoning step is individually durable and visible"*
-
-**Temporal concept to highlight:** Child workflow isolation, continuous workflows with signals, per-call visibility in the event log
+**Temporal concept to highlight:** Child workflow isolation, continuous workflows with signals, per-call visibility in the event log.
 
 ---
 
-### Demo 1: Tool Degradation — Agent Tools Fail, System Adapts
-**Time: 2–3 min | Best for: showing Temporal retry at the tool-call level and LLM adaptation**
+## Pattern A — Human-in-the-Loop: "The Human Calls the Agent"
+**Time: 2–3 min | Tab: Human-in-the-loop | Best for: signals, `wait_condition`, cross-workflow coordination**
 
-**Setup:** Start deliveries. Let a few orders get assigned so the audience sees the normal flow first.
+This is **operator-initiated**: the change is submitted externally (an operator acting for the customer), and a human supervisor approves it. The ADK agents never see the change — the gate lives in the workflow, not in any agent tool. Contrast that with Pattern B, where the *agent* initiates the escalation.
 
-**Before disconnecting, set up the Temporal UI:**
-- Open the `meltdown-demo` workflow in the Temporal UI → History tab
-- Scroll to the latest activities — you should see clusters of `invoke_model` and `tool_get_fleet_status` for recent assignments
-- This is where the retry attempts will appear after you disconnect
+**Setup:** On the **Human-in-the-loop** tab, click **Start Deliveries** and wait for a driver to be en route to a venue.
 
 **Steps:**
-1. Click **Agent Disconnect** (Fleet Agent)
-2. Wait for the next order to trigger the ADK pipeline
-3. **Show the Temporal UI**: `tool_get_fleet_status` shows `ActivityTaskFailed` → retry → `ActivityTaskFailed` (2 attempts exhausted). Point out: *"Temporal tried the tool twice — you can see both attempts here"*
-4. The pipeline continues — `invoke_model` for the Dispatch Agent runs with the error context
-5. `tool_submit_assignment` succeeds — but notice the order card shows a **DEGRADED** badge (orange). The Dispatch Agent assigned the order without fleet visibility — it doesn't know which driver is closest, available, or has capacity.
-6. If Dispatch assigns to a driver that's already full (3 orders), the system automatically reassigns to the next available driver — visible in the workflow log.
-7. Orders keep getting assigned — but quality degrades. You may see one driver overloaded while another sits idle.
-8. Click **Reconnect Agent**
-9. **Show the Temporal UI**: next order's `tool_get_fleet_status` shows `ActivityTaskCompleted` — tools work again. New orders no longer show the DEGRADED badge. *"Full fleet visibility restored — assignments are optimal again."*
+1. In the order dropdown, pick an active order being delivered.
+2. Select **Address Change** or **Cancel Order** and click **Submit Change**.
+3. Watch the driver: it **arrives at the venue but holds before delivering** — status shows `awaiting_update`. The parent workflow is waiting for your approval; the child workflow is waiting for the parent's decision. Two `wait_condition` pauses, both durable.
+4. Meanwhile, everything else keeps running — other orders still come in, other drivers still deliver.
+5. Click **Approve** (or **Reject**):
+   - **Cancel:** the driver skips delivery entirely and moves to its next order (or returns to Ziggy's).
+   - **Address change:** the driver reroutes from the venue to **Oracle Park** — a new marker appears on the map, the order card updates.
+   - **Reject:** the driver delivers normally to the original venue.
 
 **What to say:**
-> "Without the Fleet Agent, the Dispatch Agent is flying blind. It can still assign orders — the system doesn't break — but look at the quality. That order went to Driver-A even though Driver-C was right next door and idle. See the orange 'Degraded' badge? That means no fleet data was available for that decision. The system gracefully degrades: Temporal retries the tool, the LLM adapts, but the decisions are measurably worse. When we reconnect, assignments go back to optimal — closest driver, most capacity."
+> "An operator just changed this order, and look — the driver arrived but it's holding. It won't deliver until we decide. That's two `wait_condition` pauses working together: the parent waits for the human, the child waits for the parent. Meanwhile the rest of the fleet keeps running, unaffected. We approve the cancel — and the driver skips delivery, no race, because delivery never started. Temporal held both workflows in that waiting state, fully durable. No polling, no timeout hacks."
 
-**Temporal concept to highlight:** Per-tool-call retry (Temporal), LLM reasoning about tool failure (ADK), graceful degradation with visible quality impact, automatic capacity-based reassignment
+**What you'll see in the Temporal UI:**
+- `meltdown-demo`: `WorkflowExecutionSignaled` (`customer_change`) → `update_pending` to child → `WorkflowExecutionSignaled` (`change_approved`) → `execute_customer_change` activity → `resolve_update` to child
+- `route-driver-X`: `WorkflowExecutionSignaled` (`update_pending`) → driver holds `awaiting_update` → `WorkflowExecutionSignaled` (`resolve_update`) → cancel skips `deliver_order` / reroute triggers a new `navigate_to`
+
+**Temporal concept to highlight:** Dual `wait_condition` (parent + child), cross-workflow signals, durable pause without polling.
 
 ---
 
-### Demo 2: Service Disruption & Recovery — Delivery Actor Loses Connection
-**Time: 2–3 min | Best for: showing Temporal activity retry and durable state**
+## Pattern B — Agent-in-the-Loop: "The Agent Calls the Human"
+**Time: 3–4 min | Tab: Agent-in-the-loop | Best for: the headline — the human as a durable async tool call, surviving worker death**
 
-**Setup:** Start deliveries. Wait until a delivery actor has **multiple orders queued** (visible in the fleet panel — drivers batch-pickup up to 3 orders at Ziggy's and deliver them sequentially).
+A high-value order **bypasses the ADK pipeline entirely** and routes to a per-order `DispatchGateWorkflow`. Inside it runs a **multi-agent LangGraph team** that mirrors the ADK side — Fleet and Customer nodes assess in parallel, then a Dispatch node decides — each node a real Gemini call run as a Temporal activity. The Dispatch agent **decides for itself** whether to escalate, the way agents naturally express decisions: by calling a tool, `request_human_approval`. By default, that tool call surfaces an escalate flag + brief, and the **workflow** does the human-in-the-loop with a durable Temporal **signal** + `wait_condition`; the draft brief is exposed via a **query**, and a timeout escalates to a backup approver. (LangGraph's own `interrupt()` can drive the pause instead — a back-pocket toggle via `HITL_MODE=interrupt`.) Routine auto-generated orders stay under the $2,000 review threshold and never trip the gate — so this fires only when you choose.
 
-**Before disconnecting, set up the Temporal UI:**
-- Open the child workflow for the delivery actor you'll disconnect (e.g., `route-driver-a`) in a Temporal UI tab
-- Position it side by side with the demo dashboard so the audience can see both
-- Also open another delivery actor's workflow (e.g., `route-driver-b`) to show it's unaffected
+**Setup:** On the **Agent-in-the-loop** tab, click **Start Deliveries** so the fleet is moving.
 
 **Steps:**
-1. In the Fleet Disconnect panel, select a delivery actor with multiple orders and click **Service Lost**
-2. The delivery actor **finishes its current delivery** (truck keeps moving — it's already on the road)
-3. After arriving at the hotel, it can't report back — status shows `DISCONNECTED`
-4. The delivery actor stays at the hotel on the map. Other drivers keep delivering normally.
-5. **Show the Temporal UI**: point to the `ActivityTaskFailed` → `ActivityTaskScheduled` retry cycles in the child workflow. Each failed attempt shows the error: "delivered but cannot report — disconnected." The backoff intervals grow between retries.
-6. Wait 10–15 seconds, then click **Reconnect**
-7. **Show the Temporal UI**: the next retry shows `ActivityTaskCompleted` — the workflow continues
-8. On the map, the delivery actor **drives from the hotel to its next delivery** — it doesn't repeat the delivery it already completed, and it doesn't teleport. The workflow knew exactly where it left off.
+1. Click **Drop high-value order**. This injects a premium **Moscone Center** catering order (well above $2,000) via `POST /api/inject-order`.
+2. The order **bypasses ADK** and routes to a `DispatchGateWorkflow`. Its multi-agent LangGraph team (Fleet + Customer → Dispatch) reasons about the value and fleet impact; the Dispatch agent **decides to call `request_human_approval`**, and the workflow parks on a durable Temporal signal.
+3. An **approval card appears over the map** — "Agent is requesting human approval" — with the agent's reasoning, recommendation, order value, and fleet impact. The brief is surfaced via `GET /api/pending-dispatch`, which reads the parent workflow's `pending_dispatch` dict (populated when the gate child signals `dispatch_gate_awaiting`).
+4. **The durability moment — kill the worker now.** While the card is up, stop the worker process (Ctrl-C in its terminal, or kill the `python -m agent_fleet.worker` process). The fleet freezes — but the *pending approval state is in Temporal, not in the worker's memory.*
+5. **Restart the worker.** The fleet resumes and the approval card is still there, waiting. Nothing was lost. (Optionally show the parked `gate-<order-id>` workflow in the Temporal UI before and after — same `wait_condition`, resumed from history.)
+6. Click **Approve dispatch** or **Reject** (`POST /api/approve-dispatch` signals `DispatchGateWorkflow.approve`):
+   - **Approve:** the order commits to the proposed driver and the fleet delivers it.
+   - **Reject:** the order is not dispatched — fleet capacity is preserved, the order shows as cancelled.
 
 **What to say:**
-> "This driver had 3 orders queued. It completed the first delivery but lost connection before reporting back. Look at the Temporal UI — retry attempts with backoff. When we reconnect, the workflow picks up exactly where it left off: the first delivery is already done, so the driver heads to the second hotel. No repeated work, no lost state. Temporal held the entire execution history — every step is durable."
->
-> Point to the other delivery actor's workflow: *"Meanwhile, this one has a clean stream of completed activities — completely unaffected. That's child workflow isolation."*
+> "Routine orders, the agents just dispatch. But this one's a big-ticket Moscone catering order — committing the fleet to it bumps other customers and it's costly to get wrong. So the agent does what agents do when they're unsure: it calls a tool. That tool is `request_human_approval`. Here's the thing — that's not a blocking function call. On Temporal it becomes a durable **signal**: the workflow parks on a `wait_condition` and waits for a human, for as long as it takes. Watch: I kill the worker. The agent's 'tool call' is still outstanding — but it's parked in Temporal's event log, not in a process that just died. I restart the worker… and the approval is still right here, waiting for me. The human is just another tool the agent calls — a durable, async one. Now I approve, and the fleet commits."
 
-**Temporal concept to highlight:** Activity retry policies with backoff, child workflow isolation, durable state across failures, no repeated work on recovery
-
----
-
-### Demo 3: Human-in-the-Loop (HITL) — Customer Change with Delivery Hold
-**Time: 2–3 min | Best for: showing signals, wait_condition, and cross-workflow coordination**
-
-**Setup:** Start deliveries. Wait for a driver to be en route to a hotel.
-
-**Steps:**
-1. In the Customer Change panel, pick an active order being delivered
-2. Select "Cancel Order" or "Address Change" and click **Submit Change**
-3. Watch the driver: it **arrives at the hotel but holds before delivering** — status shows `awaiting_update`. The parent workflow is waiting for your approval. The child workflow is waiting for the parent's decision. Two `wait_condition` pauses, both durable.
-4. Meanwhile, everything else keeps running — other orders still come in, other drivers still deliver
-5. Click **Approve**
-6. **For cancel:** the driver skips delivery entirely and moves to its next order (or returns to Ziggy's)
-7. **For address change:** the driver reroutes from the hotel to **The Cosmopolitan** — a new marker appears on the map, the order card updates
-8. **For reject:** driver delivers normally to the original hotel
-
-**What to say:**
-> "The customer submitted a change, and look — the driver arrived at the hotel but it's holding. It won't deliver until we decide. That's two `wait_condition` pauses working together: the parent workflow is waiting for the human to approve, and the child workflow is waiting for the parent to tell it what to do. Meanwhile, the rest of Ziggy's system keeps running — other orders, other drivers, unaffected. Now we approve the cancel — and the driver skips delivery, no race condition, because delivery never started. Temporal held both workflows in that waiting state, fully durable."
-
-**What you'll see in Temporal UI:**
-- `meltdown-demo` workflow: `WorkflowExecutionSignaled` (`customer_change`) → `update_pending` signal sent to child → `WorkflowExecutionSignaled` (`change_approved`) → `execute_customer_change` activity → `resolve_update` signal sent to child
-- `route-driver-X` workflow: `WorkflowExecutionSignaled` (`update_pending`) → driver holds with `awaiting_update` → `WorkflowExecutionSignaled` (`resolve_update`) → cancel skips `deliver_order` / reroute triggers new `navigate_to`
-- Point out: *"Two workflows, both paused on wait_condition, both durable. The parent waits for the human. The child waits for the parent. No polling, no database checks, no timeout hacks."*
-
-**Temporal concept to highlight:** Dual `wait_condition` (parent + child), cross-workflow signals, durable pause without polling
+**Temporal concept to highlight:** Agent-initiated escalation mapped to a durable Temporal signal + `wait_condition` (default; `interrupt()` is the back-pocket toggle), query-backed draft, timeout → backup-approver escalation, **survives worker death**.
 
 ---
 
 ## Handling Questions
 
 **"How is this different from just using a queue?"**
-> "A queue gives you one retry per message. Temporal gives you a complete execution model — retries, timeouts, timeouts-per-retry, backoff, heartbeating, child workflows, signals, queries. And it's all in code, not config."
+> "A queue gives you one retry per message. Temporal gives you a full execution model — retries, timeouts, backoff, heartbeating, child workflows, signals, queries — all in code, not config. The human pause in both patterns is just a `wait_condition` on a signal; the runtime holds it durably for as long as it takes."
+
+**"Why two frameworks?"**
+> "To show the pattern isn't tied to one. Pattern A is Google ADK, Pattern B is LangGraph. Different agent frameworks, same Temporal primitive: a human decision arrives as a durable async signal. The dispatch gate's model provider is even swappable via env — the pattern is model- and framework-agnostic."
 
 **"What if Gemini returns something unexpected?"**
-> "The agents use structured tool calls to submit their output — `tool_submit_assignment` writes a typed object to ADK session state. The workflow reads that object. If the agent produces garbage or skips the tool call, the activity fails and Temporal retries it with backoff. There's a clear contract."
+> "The ADK agents submit output via structured tool calls — `tool_submit_assignment` writes a typed object the workflow reads. The LangGraph agent's escalation is a tool call too. If a step produces garbage or fails, it's a Temporal activity, so it retries with backoff. There's a clear contract."
+
+**"What happens if nobody approves the gate?"**
+> "There's a timeout. The primary approver window elapses, the gate escalates to a backup approver tier, and it keeps waiting durably. The order isn't lost and the fleet isn't blocked — the gate runs concurrently while the rest of the fleet keeps delivering."
 
 **"Is this production-ready?"**
-> "The pattern is production-ready — Temporal runs at Stripe, Netflix, Uber. ADK is Google's framework for building agents at scale. The integration shown here (`TemporalModel`, `activity_tool`, `GoogleAdkPlugin`) is the `temporalio[google-adk]` package, which is the official integration."
-
-**"Why does the Fleet Agent sometimes fail on the ETA assessment?"**
-> "That's the Google Maps Directions API — `tool_get_route_info` makes a real API call for driving ETAs. It can fail from rate limiting, quota exhaustion, or transient network errors. But watch what happens: the error is returned to the LLM, not swallowed. The Fleet Agent reasons about the failure, and the Dispatch Agent assigns based on whatever data it has. That's the graceful degradation pattern — every tool call is a Temporal activity with its own retry policy. If it exhausts retries, the error flows back to the agent as context."
+> "The pattern is. Temporal runs at Stripe, Netflix, Uber. The integrations shown — `temporalio[google-adk]` and `temporalio.contrib.langgraph` — are the official ones."
 
 ---
 
 ## Reset Between Demos
 
-1. Click **Reset** on the dashboard
-2. Verify all delivery actors return to idle at Ziggy's Ice Cream
-3. If any workflows are stuck, run: `temporal workflow list` and cancel manually
-4. Refresh the browser before the next run
+1. Click **Reset** on the dashboard.
+2. Verify all delivery actors return to idle at Ziggy's Ice Cream (Ferry Building).
+3. If any workflows are stuck, run `temporal workflow list` and cancel manually (including any `gate-*` workflows).
+4. Refresh the browser before the next run.

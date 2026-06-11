@@ -158,7 +158,7 @@ async def tool_get_route_info(
         origin_lng: Starting longitude
         destination_lat: Destination latitude
         destination_lng: Destination longitude
-        destination_name: Human-readable name of the destination (e.g. "MGM Grand")
+        destination_name: Human-readable name of the destination (e.g. "Fairmont San Francisco")
         origin_name: Human-readable name of the origin (e.g. "driver-c")
     """
     if await fleet.is_agent_disconnected("fleet_agent"):
@@ -236,6 +236,7 @@ async def generate_order(inp: GenerateOrderInput) -> GenerateOrderOutput:
         delivery_lng=order_data["coords"].lng,
         deadline_minutes=order_data["deadline_minutes"],
         event=order_data["event"],
+        order_value=order_data["order_value"],
     )
 
 

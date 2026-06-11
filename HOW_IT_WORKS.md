@@ -1,20 +1,64 @@
-## Terminology
+# How It Works — Under the Hood
 
-This demo has two distinct actor types:
-- **AI Agents** (Fleet Agent, Customer Agent, Dispatch Agent) — these **reason**. They call LLMs, use tools, and make decisions about order assignment. Each runs inline in the workflow via ADK.
-- **Delivery actors** (Driver-A through Driver-E) — these **execute**. They receive orders via signals and batch-pickup at Ziggy's, then deliver sequentially to multiple hotels before returning. Each runs in its own child workflow (`DriverRouteWorkflow`). They don't reason — they carry out the agents' decisions.
+Presenter-facing deep dive for **"The Human Is an Async API: Designing Durable
+Human-in-the-Loop Agents."** This is the architectural grounding to answer
+"how does that actually work?" questions confidently. Not for reading aloud —
+see [DEMO_GUIDE.md](DEMO_GUIDE.md) for the talk track.
 
-In Temporal terms, the delivery actors are **child workflows**. They are not Temporal workers (infrastructure) and not AI agents (reasoning).
+The demo is Ziggy's Ice Cream catering fleet running on **downtown San
+Francisco** (the Ferry Building is the shop; orders come from Moscone Center,
+Fisherman's Wharf, and Chinatown). It shows **two durable human-in-the-loop
+patterns** on Temporal, each built on a **different agent framework**, to make
+the point that the durable-HITL pattern is framework-agnostic.
 
 ---
 
-**What each agent specifically reasons about:**
+## The two use cases, the two frameworks
 
-| Agent | What it evaluates | Tools it calls |
-|-------|-------------------|----------------|
-| **Fleet Agent** | Delivery actor positions, free capacity slots, driving ETAs to destination, disconnect status | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps Directions) |
-| **Customer Agent** | VIP vs standard priority, deadline tightness, hotel events (conferences, galas, pool parties), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
-| **Dispatch Agent** | Synthesizes both assessments, compensates if either agent is offline, picks final delivery actor and submits structured assignment | `tool_submit_assignment` |
+| | Pattern A — Human-in-the-loop | Pattern B — Agent-in-the-loop |
+|---|---|---|
+| "The Human…" | …calls the agent | …gets called by the agent |
+| Framework | **Google ADK** (`temporalio[google-adk]`) | **LangGraph** (`temporalio.contrib.langgraph`) |
+| Who initiates | An **operator**, externally, mid-delivery | The **agent**, when it hits a decision it shouldn't make alone |
+| Triggers on | **Routine** orders (every auto-generated order) | A **high-value** order (`order_value >= GATE_REVIEW_VALUE` = $2,000), injected on demand |
+| Agents involved | Fleet + Customer (parallel) → Dispatch (sequential) | Fleet + Customer (parallel) → Dispatch (sequential) — a separate LangGraph team |
+| The HITL gate lives in | the **workflow**, not any agent tool | the **workflow** (default), via the agent's tool call |
+| Durable primitive | signal → `wait_condition` hold → resolve | signal → `wait_condition` hold → resolve (timeout → backup approver) |
+
+**The key routing fact:** routine and high-value orders take *different* paths.
+
+- **Routine orders → ADK.** The ADK multi-agent pipeline reasons about every
+  routine order and assigns it to a driver.
+- **High-value orders → LangGraph gate, bypassing ADK entirely.** When
+  `order_value >= GATE_REVIEW_VALUE`, `_assign_order` returns early into
+  `_spawn_gate` *before* ADK ever runs. The LangGraph dispatch gate — its own
+  multi-agent team — handles that order. ADK never sees it.
+
+This split is deliberate: each framework owns one use case, on the same Temporal
+runtime, with the same durable-signal HITL primitive underneath both.
+
+The disconnect/recovery scenarios (agent disconnect, driver disconnect, tool
+degradation) are **dormant code**, not demo features — the UI no longer surfaces
+disconnect controls. The signals, retry logic, and `degraded` flag still exist
+and are documented below as mechanism, not as something you'd show on stage.
+
+---
+
+## Terminology
+
+This demo has two distinct actor types:
+
+- **AI Agents** — these **reason**. They call LLMs, use tools, and make
+  decisions. Pattern A's agents (Fleet, Customer, Dispatch) run inline in the
+  workflow via ADK. Pattern B's agents (Fleet, Customer, Dispatch) are LangGraph
+  nodes that run as Temporal activities.
+- **Delivery actors** (Driver-A through Driver-E) — these **execute**. They
+  receive orders via signals, batch-pickup at Ziggy's (the Ferry Building), then
+  deliver sequentially to multiple venues before returning. Each runs in its own
+  child workflow (`DriverRouteWorkflow`). They don't reason.
+
+In Temporal terms, the delivery actors are **child workflows**. They are not
+Temporal workers (infrastructure) and not AI agents (reasoning).
 
 ---
 
@@ -22,166 +66,279 @@ In Temporal terms, the delivery actors are **child workflows**. They are not Tem
 
 **The 30-second version:**
 
-> "Temporal is a durable execution platform. You write your business logic as code — workflows and activities — and Temporal guarantees it runs to completion even if the service crashes, times out, or gets disconnected. Every step is recorded in an event log. If the worker dies mid-execution, Temporal replays the history, and your code resumes exactly where it left off."
+> "Temporal is a durable execution platform. You write your business logic as
+> code — workflows and activities — and Temporal guarantees it runs to
+> completion even if the service crashes, times out, or gets disconnected. Every
+> step is recorded in an event log. If the worker dies mid-execution, Temporal
+> replays the history, and your code resumes exactly where it left off."
 
 **Key points to land:**
-- Workflows are durable — crashes don't lose state
-- Activities are retryable by default — transient failures self-heal
-- Signals let you inject events into a running workflow (driver disconnect, agent disconnect, customer change)
-- The Temporal UI shows the full event history for every workflow run — nothing is a black box
+- Workflows are durable — crashes don't lose state.
+- Activities are retryable by default — transient failures self-heal.
+- Signals let you inject events into a running workflow (new order, delivery
+  complete, human approval).
+- The Temporal UI shows the full event history for every workflow run — nothing
+  is a black box. This is what makes the **worker-kill durability** demo land:
+  kill the worker mid-approval, restart it, and the pending state is still there.
 
 ---
 
-## The Integration: Why It Matters
+## How Temporal replay works
 
-> "Here's the key insight: ADK agents run **inline in the Temporal workflow**, not inside an activity. That's a deliberate design choice. Every LLM call that an agent makes becomes its own Temporal activity via `TemporalModel`. Every tool call (Maps, search, fleet status) is also its own Temporal activity via `activity_tool`. If the worker crashes mid-reasoning — say the Fleet Agent already called Gemini but the Customer Agent hasn't yet — Temporal replays the Fleet Agent's result from the event log and only retries what was interrupted. No re-calling Gemini for steps that already completed. No lost context."
+Temporal records every activity result in an append-only event log on the
+Temporal server. When the worker crashes and restarts, it re-executes your
+workflow function from the top — but when it hits an `execute_activity()` call
+that already completed, Temporal intercepts it and returns the cached result from
+the log instead of running the activity again. The workflow code runs again; the
+side effects don't.
 
-This is the "aha" moment. The alternative — running ADK inside a single activity — would make the entire agent pipeline one retry unit. If it fails halfway through, everything restarts from scratch. The inline pattern gives you **per-call durability**: each LLM call and each tool call is independently durable, retryable, and visible in the Temporal UI. This is what `TemporalModel` and `activity_tool` from the `temporalio[google-adk]` package were built for.
-
-Return to this when showing the Temporal UI event history — each `invoke_model` and tool call has a summary showing which agent is acting.
-
----
-
-## Deeper Background (for technical questions)
-
-This section is for the presenter — not for reading aloud. It gives you the architectural grounding to answer "how does that actually work?" questions confidently.
-
-### How Temporal replay works
-
-Temporal records every activity result in an append-only event log on the Temporal server. When the worker crashes and restarts, it re-executes your workflow function from the top — but when it hits an `execute_activity()` call that already completed, Temporal intercepts it and returns the cached result from the log instead of running the activity again. The workflow code runs again; the side effects don't.
-
-This means workflow code has one strict rule: **it must be deterministic**. No real I/O, no `random`, no `datetime.now()`, no `asyncio.sleep()` directly. Temporal provides sandboxed equivalents for all of these:
+This means workflow code has one strict rule: **it must be deterministic**. No
+real I/O, no `random`, no `datetime.now()`, no `asyncio.sleep()` directly.
+Temporal provides sandboxed equivalents:
 
 | Don't use in a workflow | Use instead |
 |------------------------|-------------|
-| `logging.info()` | `workflow.logger.info()` — suppressed during replay to avoid duplicate logs |
-| `asyncio.sleep()` | `workflow.sleep()` — returns immediately if already completed in history |
-| `datetime.now()` | `workflow.now()` — returns the deterministic time from the event log |
-| Any real I/O | `workflow.execute_activity()` — returns cached result during replay |
+| `logging.info()` | `workflow.logger.info()` — suppressed during replay |
+| `asyncio.sleep()` | `workflow.sleep()` — returns immediately if already completed |
+| `datetime.now()` | `workflow.now()` — deterministic time from the event log |
+| Any real I/O | `workflow.execute_activity()` — cached result during replay |
 
-If you break determinism, Temporal raises a non-determinism error on replay. This is a feature — it catches bugs that would otherwise silently corrupt workflow state.
+If you break determinism, Temporal raises a non-determinism error on replay.
+This is a feature — it catches bugs that would otherwise silently corrupt state.
 
-### Why three workflow classes?
+> **Why LangGraph nodes are `async`:** any callable that runs *inline in the
+> workflow* (the interrupt node, conditional edges) is `async`, because LangGraph
+> offloads *sync* callables to a thread executor, which Temporal's deterministic
+> event loop forbids.
 
-**`MeltdownDemoWorkflow`** is the brain. It owns the fleet state — driver positions, order assignments, disconnect/reconnect status. It runs assignment agents (ADK inline via `_run_adk_assignment()` in live mode), builds `DriverSnapshot`s from its own state and passes them to activities as inputs, and handles customer changes. It never does delivery work directly — it delegates to child workflows.
+---
 
-**`DriverRouteWorkflow`** is the legs. One instance per driver, it batches pending orders: navigate to Ziggy's → batch-pickup all orders → deliver sequentially (hotel A → hotel B → ...) → signal parent after each delivery → return to base → loop. It owns its own disconnect state (status, is_disconnected, is_recovering, path_history, current_orders). Disconnect uses **Temporal-native retry**: activities check FleetState for disconnect status and fail if disconnected. Temporal retries with backoff (`NAV_RETRY`, unlimited attempts). The driver finishes its current delivery, stays at the hotel (can't report back), and resumes when reconnected — a `sync_driver_position` activity reads the actual position from FleetState so the workflow never teleports. No workflow-side cancellation needed.
+## The workflow classes
 
-**`OrderGenerationWorkflow`** is a child workflow that generates orders on a timer and signals the parent with each new order. The first 3 orders fire in a quick burst (2s apart) to get multiple drivers on the road immediately, then settles into a normal cadence (±30% jitter around 10s base). The parent handles assignment.
+**`MeltdownDemoWorkflow`** is the brain. It owns the fleet state — driver
+positions, order assignments, disconnect/reconnect status. It routes each new
+order: **routine → ADK inline** (`_run_adk_assignment()` in live mode), or
+**high-value → the LangGraph dispatch gate** (`_spawn_gate`). It builds
+`DriverSnapshot`s from its own state, applies the capacity guardrail and
+least-loaded balancing, and handles customer changes. It never does delivery
+work directly — it delegates to child workflows.
+
+**`DriverRouteWorkflow`** is the legs. One instance per driver, it batches
+pending orders: navigate to Ziggy's → batch-pickup all orders → deliver
+sequentially (venue A → venue B → …) → signal parent after each delivery →
+return to base → loop. It owns its own state (status, is_disconnected,
+is_recovering, path_history, current_orders). The Pattern A HITL hold lives here:
+on `update_pending` the driver navigates to the venue but holds before delivering
+(`awaiting_update`, `wait_condition`); on `resolve_update` it cancels, reroutes
+(to Oracle Park), or releases. Its HITL state is a **per-order dict**
+(`_pending_holds`), so two changes on the same driver for different orders each
+get their own slot.
+
+**`OrderGenerationWorkflow`** is a child workflow that generates orders on a
+timer and signals the parent with each new order. The first 3 orders fire in a
+quick burst (2s apart) to get multiple drivers on the road, then it settles into
+a normal cadence (±30% jitter around a 10s base). Auto-generated orders stay
+*below* `GATE_REVIEW_VALUE`, so they never trip Pattern B — only the deliberately
+injected premium order does.
+
+**`DispatchGateWorkflow`** is Pattern B, one instance per high-value order
+(`id=gate-<order_id>`). It runs concurrently with the rest of the fleet — the
+fleet keeps moving while the agent (and possibly a human) decides. Covered in
+detail below.
 
 The workflows connect through signals in both directions:
-- **Parent → child:** `add_order` (new delivery), `driver_disconnected` / `driver_reconnected`, `update_pending` (HITL hold before delivery), `resolve_update` (HITL decision: cancel/reroute/release), `cancel_order` (pending/batched order cancellation)
-- **Child → parent:** `order_delivered` (updates parent's driver state — position and order count)
+- **Parent → child:** `add_order`, `update_pending` (HITL hold), `resolve_update`
+  (HITL decision), `cancel_order`, plus dormant `driver_disconnected` /
+  `driver_reconnected`.
+- **Child → parent:** `order_delivered` (driver state), `new_order` (from the
+  order generator), `dispatch_gate_awaiting` (from the gate — see Pattern B).
 
-```
-OrderGenerationWorkflow fires on timer
-  → signals parent MeltdownDemoWorkflow with new order
-  → MeltdownDemoWorkflow builds DriverSnapshots from workflow state
-  → runs ADK inline (_run_adk_assignment) → "give this to Driver-B"
-  → updates self._driver_orders, sends add_order signal to DriverRouteWorkflow
-  → DriverRouteWorkflow executes the delivery
-  → on completion, signals parent with order_delivered
-```
+Both child → parent signals are **guarded with try/except** so a terminated
+parent (e.g. during demo reset) can't crash the child mid-delivery.
 
-The key design principles:
-- **Child workflows give you fault isolation.** Each delivery actor runs independently. If Driver-A hits an error, the others keep running.
-- **Workflows own state, activities are pure.** Activities receive everything they need as inputs — they never read shared state for decision-making. The server queries workflows directly for the frontend.
-- **Disconnect uses Temporal retry.** Activities check FleetState for disconnect (simulates network unreachability), fail, and Temporal retries with backoff. The delivery actor finishes its delivery but can't report back. On reconnect, a `sync_driver_position` activity reads the actual position from FleetState so the workflow resumes from where the driver actually is — no teleporting. Completed deliveries are not repeated; the batch continues from the next pending order.
+---
 
-### Communication patterns — what goes where, and why
+## Pattern A — Human-in-the-loop (Google ADK)
 
-The demo deliberately routes different kinds of data through different mechanisms. This is the part new Temporal users most often get wrong: they put everything in signals or in workflow state, and the event log blows up. Getting this boundary right is what keeps histories clean at scale.
+**The human calls the agent.** An operator submits a customer change (address
+change / cancel) mid-delivery; the driver holds at the venue; a human supervisor
+approves or rejects.
 
-**Which mechanism for which data:**
+This is **operator-in-the-loop**, not agent-in-the-loop. The change is initiated
+*externally* (operator submits via REST) and the gate lives in the **workflow**,
+not in any agent tool. The ADK agents never see the change. (Contrast an
+`ask_user`-style `@function_tool` where the LLM itself pauses for clarification —
+that's Pattern B's shape, not this one.)
 
-| Data flow | Mechanism | Why |
-|-----------|-----------|-----|
-| Driver position (updates every ~400ms during navigation) | Shared state (FleetState / SQLite) | High-frequency telemetry. No workflow decision depends on sub-second position. Routing this through signals would bloat the event log by ~100× for no benefit. |
-| Delivery completed | Child → parent signal (`order_delivered`) | Milestone event. Parent needs it for bookkeeping (`_driver_orders`, `_driver_last_position`) and as input to the next ADK assignment. One signal per delivery. |
-| New order generated | Child → parent signal (`new_order`) | Milestone. Low frequency (one per order, ~10s cadence). Parent's assignment loop waits on it. |
-| Order assignment | Parent → child signal (`add_order`) | Parent decides, child executes. Signal is the durable handoff. |
-| Customer change (address or cancel) | External → parent → child signal chain | Preserves replay + audit trail. Every approval/rejection is in the event log. Parent processes changes serially (simpler, matches the demo flow of one change at a time). The child's HITL state is a per-order dict (`_pending_holds`), so concurrent holds on the same driver for different orders each get their own slot — no overwrite. |
-| Driver snapshot for ADK reasoning | Read from parent's in-memory workflow state | Pure workflow-local read — no cross-workflow access needed because the parent already tracks the bookkeeping it decides on. |
+The flow:
+1. `POST /api/customer-change` → signals the parent `customer_change` *and*
+   signals the child `update_pending` to hold.
+2. The driver navigates to the venue but holds before delivering
+   (`awaiting_update`, `wait_condition`). The parent waits for the human; the
+   child waits for the parent — **two `wait_condition` pauses, both durable**.
+3. `POST /api/approve-change` → signals `change_approved` → `execute_customer_change`
+   activity → parent signals `resolve_update` to the child with the decision:
+   cancel → skip delivery; address_change → reroute to **Oracle Park**; release →
+   deliver normally.
 
-Both child → parent signals are **guarded with try/except** so a terminated parent (e.g. during demo reset) can't crash the child mid-delivery. `workflow.info().parent.workflow_id` supplies the parent id dynamically — no hardcoded string coupling.
-
-**Temporal event log vs shared state — two different questions:**
-
-| Temporal event log | Shared state (SQLite/FleetState) |
-|---|---|
-| Durable, append-only, replayable | Mutable, last-writer-wins, disposable |
-| Answers *"how did we get here?"* | Answers *"where are we now?"* |
-| Every activity + signal + timer is recorded | Whatever you choose to write goes in |
-| Indexed by workflow ID, searchable forever | Overwritten on next tick |
-| Bloats linearly with workflow complexity | Doesn't affect Temporal at all |
-| Source of truth for workflow replay | Source of truth for the UI's live view |
-
-Both are "state" in a loose sense, but they answer different questions. Your event log is the *audit trail of decisions*. Shared state is the *current view for rendering*. A production Temporal system typically pairs Temporal with Redis or Postgres for exactly this split — in the demo, SQLite is the toy stand-in for that side store.
-
-### What's in the event log — and why it's bigger than you'd guess
-
-If you open the Temporal UI mid-demo and scroll through the `meltdown-demo` parent and any `route-driver-*` child, you'll see the histories fill up fast — ~100+ events per order in live mode. That's not over-logging. It's what **per-call durability** costs and buys you. Here's the breakdown per order:
-
-| Source | Activities | ≈ Events (×3: Scheduled + Started + Completed) |
-|---|---|---|
-| Fleet Agent (Gemini + tools `tool_get_fleet_status`, `tool_get_route_info`) | 3–5 | 9–15 |
-| Customer Agent (Gemini + tools `tool_get_order_priorities`, `google_search`) | 2–4 | 6–12 |
-| Dispatch Agent (Gemini + `tool_submit_assignment`) | 2 | 6 |
-| Assignment bookkeeping (`register_assignment`, `publish_agent_events_batch`) | 2–3 | 6–9 |
-| Delivery (`get_route_polyline`, `navigate_to` × 2–3 legs, `pickup_orders`, `deliver_order`, `set_driver_idle`) | 6–8 | 18–24 |
-| Signals between workflows (`add_order`, `order_delivered`, `new_order`) | — | 3 |
-| **Total per order** | **~15–25** | **~50–70** (mock), **~100+** (live) |
-
-Every one of those events is a durable checkpoint. Crash the worker mid-way through Dispatch Agent reasoning and Temporal replays what already completed (Fleet Agent's assessment, Customer Agent's assessment) from history — it doesn't re-call Gemini for the parts that already succeeded. That's the point of running ADK inline with `TemporalModel` and `activity_tool`: each LLM call and each tool call is its own retry unit.
-
-The alternative — wrapping the whole ADK pipeline in a single `reason_about_assignment` activity — would be ~3 events per order instead of ~100. But any mid-pipeline crash restarts the entire agent sequence from scratch, including the expensive Gemini calls that already succeeded. The demo deliberately takes the more-events-for-more-durability side of that tradeoff, and the Temporal UI shows you exactly what survived a crash.
-
-**Driver position updates don't go through the event log at all.** `navigate_to` heartbeats position to FleetState every 400ms during a drive. None of those writes are Temporal events — they're shared-state updates. At production scale (GPS pings every second across a 15-minute delivery), this is where the volume lives: thousands of position writes per delivery against ~100 durable orchestration events. The demo compresses the driving phase so the ratio isn't visually dramatic, but the architectural shape is the same: Temporal carries the decisions, shared state carries the telemetry.
-
-**What about queries between workflows?** Not a thing in Temporal Python (or any Temporal SDK, by design). Queries have to be deterministic-safe, and a synchronous cross-workflow query would break that — what if the other workflow isn't loaded on any worker? What if its state changes between replays? So queries are always *client-initiated*, from outside the cluster. From within a workflow you have three tools for cross-workflow coordination: signals (async events), `start_child_workflow` / awaiting child results (lifecycle), and activities that use the client to query a workflow (adds an activity round-trip — possible but rarely worth it). For the demo's needs, signal-based push is the idiomatic answer.
+`deliver_order` returns `success=False` when a cancel wins the race, so the
+workflow skips the `order_delivered` signal for cancelled orders. The child's
+HITL hold also escapes on `self._stop` so demo shutdown can't leave a parked
+child hanging the parent's `await handle` join.
 
 ### Where the ADK agents fit
 
-In **live mode**, the agents run **inline in the workflow** via `_run_adk_assignment()` in `MeltdownDemoWorkflow`. The workflow builds `DriverSnapshot`s from its own state and passes them to the ADK pipeline. Each LLM call and tool call becomes a Temporal activity via `TemporalModel` and `activity_tool` — the workflow code never calls an explicit `reason_about_assignment` activity. If an activity fails, Temporal retries. There is no fallback to mock.
+The ADK agents run **inline in the workflow** via
+`_run_adk_assignment()` in `MeltdownDemoWorkflow`. The workflow builds
+`DriverSnapshot`s from its own state and passes them to the ADK pipeline. Each
+LLM call becomes an `invoke_model` Temporal activity via `TemporalModel`; each
+tool call becomes a Temporal activity via `activity_tool`. If an activity fails,
+Temporal retries.
 
-In **mock mode**, `mock_reason_about_assignment` in `agent_fleet/mock/activities.py` is registered as a single activity with `@activity.defn(name="reason_about_assignment")`. The workflow calls this activity instead of running ADK inline. The live workflow code has zero awareness of this — the mock worker registers the activity with the same name.
-
-Fleet Agent, Customer Agent, and Dispatch Agent are all **LLM Agents** — each is an `Agent` with `model=TemporalModel(DEFAULT_MODEL, activity_config=ActivityConfig(task_queue=AGENTS_QUEUE))`, meaning every Gemini call they make becomes an `invoke_model` Temporal activity routed to the agents worker. The `create_order_assignment_agent()` function returns an **Orchestrator Agent** (`SequentialAgent`) — it has no model, makes no LLM calls, and has no corresponding Temporal activity. It purely sequences the sub-agents.
-
-The full agent pipeline is composed in [`agent_fleet/agents.py`](agent_fleet/agents.py) using ADK's `ParallelAgent` and `SequentialAgent`:
+The pipeline is composed in `agent_fleet/agents.py` with ADK's `ParallelAgent`
+and `SequentialAgent`:
 
 ```python
 def create_order_assignment_agent() -> SequentialAgent:
     parallel_assessment = ParallelAgent(
         name="assignment_parallel",
         sub_agents=[
-            create_assignment_fleet_agent(),    # checks positions, capacity, ETAs
-            create_assignment_customer_agent(), # checks priority, deadline, hotel context
+            create_assignment_fleet_agent(),    # positions, capacity, ETAs
+            create_assignment_customer_agent(), # priority, deadline, venue context
         ],
     )
-    dispatch_agent = create_assignment_dispatch_agent()  # synthesizes → calls tool_submit_assignment
-
+    dispatch_agent = create_assignment_dispatch_agent()  # synthesizes → tool_submit_assignment
     return SequentialAgent(
         name="order_assignment",
         sub_agents=[parallel_assessment, dispatch_agent],
     )
 ```
 
-Fleet Agent and Customer Agent run in parallel (ADK handles that). Then the Dispatch Agent runs sequentially after both complete. In live mode, the workflow runs ADK inline via `_run_adk_assignment()`. In mock mode, the workflow calls the `reason_about_assignment` activity (which the mock worker registers).
+**What each agent reasons about:**
 
-### How `TemporalModel` and `activity_tool` work — and why you don't define agent activities explicitly
+| Agent | What it evaluates | Tools |
+|-------|-------------------|-------|
+| **Fleet Agent** | Delivery actor positions, free capacity slots, driving ETAs to destination | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps Directions) |
+| **Customer Agent** | VIP vs standard tier, deadline tightness, venue events (conference catering, receptions, festivals), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
+| **Dispatch Agent** | Synthesizes both assessments, picks the final delivery actor, submits a structured assignment | `tool_submit_assignment` |
 
-A common question from engineers: "where are the Temporal activities defined for each agent's LLM call and tool call?" The answer is they aren't — they're injected automatically by two wrappers:
+Fleet Agent and Customer Agent run in parallel; the Dispatch Agent runs
+sequentially after both complete. Fleet, Customer, and Dispatch are all **LLM
+Agents** (`Agent` + `TemporalModel(...)`). `create_order_assignment_agent()`
+returns an **Orchestrator Agent** (`SequentialAgent`) — no model, no LLM call, no
+Temporal activity. It purely sequences the sub-agents.
 
-- **`TemporalModel(DEFAULT_MODEL, activity_config=...)`** — when you set this as an agent's model, every LLM call that agent makes is automatically executed as a Temporal `invoke_model` activity routed to the agents queue. You don't write the activity. The wrapper does it. ADK supports other models too — swap `DEFAULT_MODEL` for any supported provider.
-- **`activity_tool(tool_get_fleet_status, ...)`** — when you wrap a tool function this way, every time an agent calls that tool it executes as a Temporal activity. Again, no explicit activity definition needed. Our local [`_activity_tool.py`](agent_fleet/_activity_tool.py) adds two fixes over the upstream version: correct multi-arg handling, and **graceful failure** — when an activity exhausts its retry policy, the error is returned as a string to the LLM instead of crashing the pipeline. This is how Fleet Agent disconnect works: tools fail fast (2 retries), the LLM sees the error, and the Dispatch Agent assigns without fleet data. The same graceful degradation applies to real API failures — `tool_get_route_info` calls the Google Maps Directions API for driving ETAs, which can fail from rate limiting, quota exhaustion, or transient network errors. These are not bugs — the error flows back to the LLM as context, the Fleet Agent notes the missing ETA, and the Dispatch Agent compensates. Orders assigned during these failures are flagged as `degraded` in the UI.
+After ADK returns an assignment, the parent applies a **capacity guardrail** (if
+ADK picks a full or disconnected driver, reassign to the next available) and then
+**spreads load across the fleet**: among eligible drivers it prefers the
+least-loaded one, so all five stay active. The agents still reason and publish
+their assessment; this only rebalances the final destination.
 
-So when Fleet Agent calls Gemini and then calls `tool_get_fleet_status`, both of those are Temporal activities — durable, retryable, and recorded in the event log — purely by inheritance from the wrappers. This is the `temporalio[google-adk]` integration doing its job.
+---
 
-Here's exactly what this looks like in [`agent_fleet/agents.py`](agent_fleet/agents.py):
+## Pattern B — Agent-in-the-loop (LangGraph dispatch gate)
+
+**The agent calls the human.** A high-value order bypasses ADK and routes to a
+per-order `DispatchGateWorkflow`. Inside it runs a **multi-agent LangGraph team**
+that mirrors the ADK side, and the Dispatch agent decides for itself whether to
+escalate to a human.
+
+### Routing
+
+In `MeltdownDemoWorkflow._assign_order`:
 
 ```python
-# Each agent gets TemporalModel — LLM calls become invoke_model activities automatically
+# High-value orders bypass ADK entirely and route to the LangGraph gate.
+if order.order_value >= GATE_REVIEW_VALUE:
+    self._spawn_gate(order, self._least_loaded_driver(), False, onum)
+    return
+# ...otherwise, routine: run ADK inline.
+```
+
+`GATE_REVIEW_VALUE` is $2,000. Routine auto-generated orders stay under it; the
+gate fires only on the deliberately injected premium Moscone order
+(`POST /api/inject-order`).
+
+### The multi-agent gate graph
+
+`build_gate_graph` (in `dispatch_gate.py`) compiles a LangGraph graph via
+`temporalio.contrib.langgraph`. It mirrors the ADK team — Fleet and Customer
+assess in parallel, then Dispatch decides:
+
+```
+START → fleet_agent  ─┐
+START → customer_agent ┴→ dispatch_agent → (END | request_human → finalize → END)
+```
+
+Each of `fleet_agent`, `customer_agent`, and `dispatch_agent` is a **real Gemini
+call** (through `init_chat_model`, provider-swappable via `MODEL_PROVIDER`)
+executed as a **Temporal activity** — this is how you'd build the ADK team's
+equivalent in LangGraph on the integration. The Dispatch agent weighs both
+assessments and decides whether to call the `request_human_approval` tool before
+committing scarce fleet capacity.
+
+### Two HITL implementations — default is the Temporal signal
+
+The gate has two HITL implementations, chosen per-order via
+`DispatchGateInput.use_interrupt` (wired from `config.INTERRUPT_MODE`, set by the
+`HITL_MODE` env var, default `"temporal"`):
+
+- **Temporal-signal (default, `HITL_MODE=temporal`):** the Dispatch agent's
+  `request_human_approval` tool call surfaces an `escalate` flag + a brief; the
+  LangGraph graph **ends there**, and the **workflow** performs the HITL. It
+  signals the parent (`dispatch_gate_awaiting`), then parks on `wait_condition`
+  for the human decision (arriving via the `approve` signal), with a timeout
+  (`GATE_ESCALATION_SECONDS`, 3600s) that escalates to a `backup` approver tier.
+  The human decision is a durable Temporal signal — **no LangGraph interrupt
+  involved.** This is the version the talk leads with.
+- **Interrupt (back-pocket toggle, `HITL_MODE=interrupt`):** a workflow-resident
+  node calls LangGraph `interrupt(brief)` to park the workflow; resume via
+  `Command(resume=...)`. Same durability, LangGraph's own mechanism.
+
+On resume: approve → `_commit_assignment` (dispatch to the proposed driver);
+reject → `_reject_order` (cancel the order, preserve fleet capacity). Gate
+failures **fail open** — `_run_gate` commits the assignment with a warning rather
+than losing the order.
+
+### How the UI sees the pending approval
+
+When the gate escalates, it signals the parent `dispatch_gate_awaiting`, which
+stores the brief in the parent's `pending_dispatch` dict (keyed by order_id).
+`GET /api/pending-dispatch` queries the **parent's** `get_status` and reads that
+`pending_dispatch` dict — *not* the gate's query directly. (The gate also exposes
+its own `pending_brief` query for inspection in the Temporal UI.)
+`POST /api/approve-dispatch` signals the per-order `gate-<order_id>`
+`DispatchGateWorkflow.approve`.
+
+### The durability moment
+
+Kill the worker while the approval card is up. The fleet freezes — but the
+pending-approval state lives in **Temporal's event log, not the worker's memory**.
+Restart the worker: the workflow replays from history, the gate is still parked on
+its `wait_condition`, and the approval card is still there. Nothing was lost.
+
+---
+
+## How `TemporalModel` and `activity_tool` work (Pattern A's ADK side)
+
+A common question: "where are the Temporal activities defined for each agent's
+LLM call and tool call?" They aren't — they're injected automatically by two
+wrappers:
+
+- **`TemporalModel(DEFAULT_MODEL, activity_config=...)`** — set as an agent's
+  model, every LLM call that agent makes runs as a Temporal `invoke_model`
+  activity routed to the agents queue. You don't write the activity. ADK supports
+  other providers too — swap `DEFAULT_MODEL`.
+- **`activity_tool(tool_get_fleet_status, ...)`** — wrap a tool function this way
+  and every call runs as a Temporal activity. Our local `_activity_tool.py` adds
+  two fixes over upstream: correct multi-arg handling, and **graceful failure** —
+  when an activity exhausts its retry policy, the error is returned as a string to
+  the LLM instead of crashing the pipeline. (This is also how the dormant
+  disconnect path degrades: Fleet Agent tools fail fast, the LLM sees the error,
+  the Dispatch Agent assigns with available data, and the order is flagged
+  `degraded`. The same path handles real Maps API failures gracefully.)
+
+```python
 fleet_agent = Agent(
     name="assignment_fleet_agent",
     model=TemporalModel(
@@ -192,7 +349,6 @@ fleet_agent = Agent(
     ...
 )
 
-# Each tool is wrapped with activity_tool — tool calls become Temporal activities automatically
 _fleet_status_tool = activity_tool(
     tool_get_fleet_status,
     task_queue=AGENTS_QUEUE,
@@ -201,133 +357,117 @@ _fleet_status_tool = activity_tool(
 )
 ```
 
-No activity `@activity.defn` decorator, no explicit registration — the wrappers handle it.
+No `@activity.defn` decorator, no explicit registration. **ADK composes and
+sequences agents; Temporal makes every external call durable.** This is the
+recommended pattern for `temporalio[google-adk]`.
 
-**The division of responsibility:**
+---
 
-ADK owns the agent orchestration — the sequencing of Fleet → Customer → Dispatch Agent via `SequentialAgent` and `ParallelAgent`, the multi-turn reasoning loop, passing context between agents. Temporal owns the durability of every external call those agents make.
+## Communication patterns — what goes where, and why
 
-An alternative "more Temporal-native" design would be to put the Fleet → Customer → Dispatch Agent sequencing directly in the workflow and only push the raw LLM calls into activities. That gives you more explicit visibility in the Temporal UI — each agent step shows up as a named workflow step. The tradeoff is you'd be rewriting ADK's orchestration in Temporal workflow code, giving up ADK's agent composition primitives.
+The demo routes different kinds of data through different mechanisms. This is the
+part new Temporal users most often get wrong — they put everything in signals or
+workflow state and the event log blows up.
 
-The current design keeps both frameworks doing what they're best at: **ADK composes and sequences agents, Temporal makes every external call durable.** This is the recommended pattern for the `temporalio[google-adk]` integration — `TemporalModel` and `activity_tool` exist specifically to enable ADK agents running inline in workflows with per-call durability.
+| Data flow | Mechanism | Why |
+|-----------|-----------|-----|
+| Driver position (updates every ~400ms during navigation) | Shared state (FleetState / SQLite) | High-frequency telemetry. No workflow decision depends on sub-second position. Routing it through signals would bloat the event log ~100× for no benefit. |
+| Delivery completed | Child → parent signal (`order_delivered`) | Milestone event. Parent needs it for bookkeeping and as input to the next ADK assignment. |
+| New order generated | Child → parent signal (`new_order`) | Milestone, low frequency. The assignment loop waits on it. |
+| Order assignment | Parent → child signal (`add_order`) | Parent decides, child executes. The signal is the durable handoff. |
+| Customer change (Pattern A) | External → parent → child signal chain | Preserves replay + audit. Every approval/rejection is in the event log. |
+| Gate escalation (Pattern B) | Child → parent signal (`dispatch_gate_awaiting`) + human → gate signal (`approve`) | The human decision is a durable async signal; the brief flows up to the parent's `pending_dispatch` for the UI. |
+| Driver snapshot for reasoning | Read from parent's in-memory workflow state | Pure workflow-local read — the parent already tracks the bookkeeping it decides on. |
 
-### The 3-queue worker architecture
+**Temporal event log vs shared state — two different questions:**
 
-The demo runs three Temporal workers in a **separate worker process** (`python -m agent_fleet.worker`), each on a dedicated task queue. The FastAPI server runs in its own process — it queries Temporal workflows for state and sends signals only.
+| Temporal event log | Shared state (SQLite / FleetState) |
+|---|---|
+| Durable, append-only, replayable | Mutable, last-writer-wins, disposable |
+| *"How did we get here?"* | *"Where are we now?"* |
+| Source of truth for workflow replay | Source of truth for the UI's live view |
+
+A production system pairs Temporal with Redis or Postgres for exactly this split;
+in the demo, SQLite (`fleet_state.db`, WAL-backed, shared across processes) is the
+toy stand-in.
+
+**Driver position updates don't go through the event log at all.**
+`navigate_to` heartbeats position to FleetState every ~400ms during a drive —
+none of those are Temporal events. At production scale (GPS pings per second
+across a 15-minute delivery) that's where the volume lives, against ~100 durable
+orchestration events per order. Temporal carries the decisions; shared state
+carries the telemetry.
+
+---
+
+## The 3-queue worker architecture
+
+The demo runs three Temporal workers in a **separate worker process**
+(`python -m agent_fleet.worker`), each on a dedicated task queue. The FastAPI
+server runs in its own process.
 
 | Queue | Worker | What it runs |
 |---|---|---|
-| `meltdown-workflows` | Workflows only | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow` — no activities, dedicated to replay |
-| `meltdown-delivery` | Delivery | `navigate_to`, `pickup_orders`, `deliver_order`, `generate_order`, `execute_customer_change`, `get_route_polyline`, `get_fleet_status`, `get_order_priorities`, `publish_agent_event`, `sync_driver_position` |
-| `meltdown-agents` | Agents | `register_assignment`, `tool_get_fleet_status`, `tool_get_order_priorities`, `tool_get_route_info` + `google_search` (Gemini grounding) |
+| `meltdown-workflows` | Workflows + minimal local activities | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow`, `DispatchGateWorkflow`; `publish_agent_event` / `publish_agent_events_batch` (local activities); the Pattern B gate's node activities (Fleet/Customer/Dispatch Gemini calls, via `LangGraphPlugin`) |
+| `meltdown-delivery` | Delivery | `generate_order`, `navigate_to`, `pickup_orders`, `deliver_order`, `execute_customer_change`, `get_route_polyline`, `get_fleet_status`, `get_order_priorities`, `set_driver_idle`, `set_warmup_hidden`, `sync_driver_position` (max 20 concurrent) |
+| `meltdown-agents` | ADK/LLM activities | `register_assignment`, `tool_get_fleet_status`, `tool_get_order_priorities`, `tool_get_route_info`, plus the ADK `invoke_model` activity + `google_search` grounding (max 5 concurrent) |
 
-**Why a workflows-only worker?** Workflows must be deterministic and replayable. Keeping them on a dedicated worker with no activities makes it physically impossible for workflow code to touch `FleetState` (SQLite WAL-backed, `fleet_state.db`) or do I/O. This is the Temporal-idiomatic pattern for production deployments.
+**Why a workflows-only-ish worker?** Workflows must be deterministic and
+replayable. Keeping them off the heavy activity queues makes it physically
+impossible for workflow code to touch `FleetState` or do I/O.
 
-**Why separate activity queues?** LLM calls are slow — a single Gemini call can take 3–5 seconds. Without queue separation, a flood of assignment requests could fill all worker slots and starve navigation activities, causing drivers to miss heartbeat timeouts. The agents queue is rate-limited to 5 concurrent activities; the delivery queue runs 20.
+**Why separate activity queues?** LLM calls are slow (3–5s each). Without queue
+separation, a flood of assignment requests could starve navigation activities and
+cause drivers to miss heartbeat timeouts. The agents queue caps at 5 concurrent;
+delivery at 20.
 
-**Why separate processes?** The server does not run workers. It queries Temporal workflows directly via `_build_snapshot_from_queries()` — calling `MeltdownDemoWorkflow.get_status` and `DriverRouteWorkflow.get_status` for every WebSocket push. This means the server process has no FleetState dependency, no activity registration, and no GoogleAdkPlugin. All decision data and UI state lives in workflows, accessible via Temporal queries. The worker process owns all activities and workflow execution.
+**Plugin placement** (in `worker.py`):
+- `GoogleAdkPlugin` is on **both** the workflow worker (sandbox passthroughs for
+  `google.adk` / `google.genai`, deterministic runtime for replay) and the agents
+  worker (hosts the `invoke_model` activity that calls Gemini for Pattern A).
+- `LangGraphPlugin(graphs={GRAPH_NAME: build_gate_graph(use_interrupt=INTERRUPT_MODE)})`
+  is on the **workflow** worker — it runs the Pattern B dispatch-gate graph, and
+  its node activities execute there.
 
-The three workers are set up in [`agent_fleet/worker.py`](agent_fleet/worker.py):
+`TemporalModel` uses `ActivityConfig(task_queue=AGENTS_QUEUE)` to route Pattern
+A's LLM calls from the workflow to the agents queue.
 
-```python
-def create_workflow_worker(client: Client) -> Worker:
-    """Workflow-only worker — no activities, dedicated to replay."""
-    return Worker(client, task_queue=WORKFLOWS_QUEUE,
-                  workflows=[MeltdownDemoWorkflow, DriverRouteWorkflow,
-                             OrderGenerationWorkflow],
-                  plugins=[GoogleAdkPlugin()])  # sandbox + determinism for replay
+---
 
-def create_agents_worker(client: Client) -> Worker:
-    """ADK/LLM activities — rate-limited."""
-    return Worker(client, task_queue=AGENTS_QUEUE,
-                  activities=[register_assignment, tool_get_fleet_status,
-                              tool_get_order_priorities, tool_get_route_info],
-                  max_concurrent_activities=5,
-                  plugins=[GoogleAdkPlugin()])  # invoke_model activity registration
-```
+## Two processes
 
-`GoogleAdkPlugin` is registered on **both** the workflow worker and the agents worker. The workflow worker needs it for sandbox passthroughs (`google.adk`, `google.genai`) and deterministic runtime (`uuid`, `time`) during replay. The agents worker needs it because it hosts the `invoke_model` activity that actually calls Gemini. `TemporalModel` uses `ActivityConfig(task_queue=AGENTS_QUEUE)` to route LLM calls from the workflow to the agents queue.
+`run.sh` starts a worker process and a server process (plus the Temporal dev
+server).
 
-### Mock mode — completely separate
+- **The worker process** owns all activities and workflow execution. It does
+  **not** load `.env` itself — to start it by hand, pass the env
+  file: `uv run --env-file .env python -m agent_fleet.worker`. The worker is
+  live-only and requires `GOOGLE_API_KEY`; there is no mock mode.
+- **The server process** runs no workers. Its WebSocket snapshot is built from
+  **FleetState (SQLite)** — `_build_snapshot()` → `fleet.snapshot()` — not from
+  Temporal queries. Activities (in the worker) write positions, statuses, and
+  agent events to FleetState; the server reads them for the frontend. The server
+  otherwise sends **signals** and runs **queries** only (e.g. `get_status` for
+  `/api/pending-dispatch`). It has no GoogleAdkPlugin and no activity
+  registration.
 
-Mock mode lives in `agent_fleet/mock/` — its own `activities.py` and `worker.py`. The decision happens once at startup in `agent_fleet/worker.py`: if `GOOGLE_API_KEY` is set, live workers run; if not, mock workers from `agent_fleet/mock/worker.py` run instead. There is no `MOCK_MODE` flag in config, no `_get_api_activities()`, no per-key selection, and no inline try/except fallbacks in live code.
+---
 
-Mock activities use `@activity.defn(name=...)` overrides to match live activity names (e.g., `mock_get_route_polyline` is registered as `"get_route_polyline"`, `mock_reason_about_assignment` as `"reason_about_assignment"`). Workflows don't know or care which version is running. The mock worker also skips `GoogleAdkPlugin` since there are no LLM calls.
-
-This matters for the demo narrative: real activities let failures propagate to Temporal's retry mechanism. If the Google Maps API returns an error, it shows up as a failed activity in the Temporal UI — retried with unlimited attempts and exponential backoff until the issue resolves, exactly as it would in production. Mock mode is an explicit configuration choice, not a hidden fallback that masks failures.
-
-### What this would look like without Temporal
+## What this would look like without Temporal
 
 Without Temporal, the same orchestration would require:
-- A state machine in a database (enum column per driver tracking route phase)
-- Manual retry loops with custom backoff for every activity
-- A polling loop to implement "wait for human approval" (`while not db.get("approved"): sleep(1)`)
-- Defensive DB writes before every step so a crash doesn't lose position
-- Manual reconstruction of in-flight state on worker restart
-- A shared state store (Redis, Postgres) for cross-service coordination
-- Custom cancellation logic for mid-activity interruption
+- A state machine in a database (enum column per driver tracking route phase).
+- Manual retry loops with custom backoff for every activity.
+- A polling loop to implement "wait for human approval"
+  (`while not db.get("approved"): sleep(1)`) — for *both* patterns.
+- Defensive DB writes before every step so a crash doesn't lose position.
+- Manual reconstruction of in-flight state on worker restart.
+- A shared state store for cross-service coordination.
+- Custom cancellation logic for mid-activity interruption.
 
-Temporal collapses all of that into the workflow execution model. The event log *is* the state persistence. `execute_activity` *is* the retry logic. Signals *are* the message passing. Cancellation scopes *are* the interrupt mechanism. The workflow code reads like a straightforward sequential program because Temporal handles everything else.
-
-In this demo, the workflows are the source of truth for all operational state — driver positions, order assignments, disconnect status. Activities receive this state as inputs and return results. The server queries workflows directly for the frontend WebSocket via `_build_snapshot_from_queries()` — no intermediate FleetState needed. If the worker process restarts, Temporal replays the workflows, activities re-execute, and the server's queries return fresh state.
-
-### Live mode execution pipeline (end-to-end)
-
-This traces a single order from button click to delivery — every function and file in sequence.
-
-**1. Browser → Server** — User clicks "Start Deliveries"
-- [`server.py`](agent_fleet/server.py) `start_demo()` → starts `MeltdownDemoWorkflow` on `WORKFLOWS_QUEUE`
-
-**2. Main workflow initializes**
-- [`workflows.py`](agent_fleet/workflows.py) `MeltdownDemoWorkflow.run()` → starts 5 `DriverRouteWorkflow` children + `OrderGenerationWorkflow` child
-
-**3. Order generates on timer**
-- [`workflows.py`](agent_fleet/workflows.py) `OrderGenerationWorkflow.run()` → calls `generate_order` activity every 10s → signals parent with `new_order`
-- [`activities.py`](agent_fleet/activities.py) `generate_order()` → picks random venue, registers in FleetState
-
-**4. Parent runs ADK agents inline**
-- [`workflows.py`](agent_fleet/workflows.py) `_assign_order()` → builds `DriverSnapshot`s from workflow state → calls `_run_adk_assignment()`
-- `_run_adk_assignment()` → creates ADK `Runner`, calls `runner.run_async()` — agents execute **inline in the workflow**
-
-**5. ADK agent pipeline**
-- [`agents.py`](agent_fleet/agents.py) `create_order_assignment_agent()` → `SequentialAgent`:
-  - `ParallelAgent` runs **Fleet Agent** + **Customer Agent** simultaneously
-  - Then **Dispatch Agent** runs sequentially
-- Each agent uses `TemporalModel` → every Gemini call becomes an `invoke_model` activity on `AGENTS_QUEUE`
-
-**6. Tool calls → Temporal activities**
-- [`agents.py`](agent_fleet/agents.py) — tools wrapped via `activity_tool()` from [`_activity_tool.py`](agent_fleet/_activity_tool.py)
-- Fleet Agent calls: `tool_get_fleet_status`, `tool_get_route_info` (Google Maps)
-- Customer Agent calls: `tool_get_order_priorities`, `google_search` (Gemini grounding)
-- Each tool call → `workflow.execute_activity()` → recorded in Temporal event log
-
-**7. Dispatch Agent decides**
-- [`agents.py`](agent_fleet/agents.py) `tool_submit_assignment()` → writes `{driver_id, reasoning_summary}` to ADK session state (in-memory, not a Temporal activity)
-
-**8. Result flows back**
-- [`workflows.py`](agent_fleet/workflows.py) `_run_adk_assignment()` → reads `session.state["assignment"]` → returns `ReasonAboutAssignmentOutput`
-
-**9. Assignment registered, delivery actor signaled**
-- [`workflows.py`](agent_fleet/workflows.py) `_assign_order()` → checks if chosen driver has capacity (max 3 orders) and isn't disconnected — reassigns to next available driver if not → calls `register_assignment` activity (FleetState write, marks `degraded` if Fleet Agent was offline) → signals chosen `DriverRouteWorkflow` with `add_order`
-
-**10. Delivery actor executes (batch pickup → sequential delivery)**
-- [`workflows.py`](agent_fleet/workflows.py) `DriverRouteWorkflow.run()`:
-  - Collects all pending orders into a batch
-  - If reconnecting: `sync_driver_position` activity reads actual position from FleetState
-  - Drives to Ziggy's (skipped if already there)
-  - `pickup_orders` activity → batch-picks all orders at once
-  - For each order in the batch:
-    - `get_route_polyline` activity → Google Maps polyline to hotel
-    - `navigate_to` activity → drives to hotel with heartbeats (0.4s/step)
-    - HITL hold: if `update_pending` signal received → `wait_condition` pauses before delivery (`awaiting_update` status). On `resolve_update`: cancel → skip delivery, address_change → reroute to new destination, release → deliver normally
-    - `deliver_order` activity → marks delivered (skipped if cancelled)
-    - Signals parent with `order_delivered` after each delivery
-- [`activities.py`](agent_fleet/activities.py) — all activities on `DELIVERY_QUEUE`
-
-**11. Delivery actor returns to base**
-- [`workflows.py`](agent_fleet/workflows.py) → after all orders in batch delivered, delivery actor navigates back to Ziggy's (visible on map) → idle, waits for next batch
-- On disconnect mid-batch: driver finishes current delivery, stays at hotel, Temporal retries. On reconnect, resumes from next order in batch — completed deliveries are not repeated
-
-**Key difference in live vs mock:** In live mode, ADK runs inline in the workflow — every LLM call and tool call is a separate Temporal activity visible in the event log. In mock mode, the entire reasoning is a single `reason_about_assignment` activity.
-
-
+Temporal collapses all of that into the workflow execution model. The event log
+*is* the state persistence. `execute_activity` *is* the retry logic. Signals
+*are* the message passing. `wait_condition` *is* the durable human pause. The
+workflow code reads like a straightforward sequential program because Temporal
+handles everything else — and the worker-kill demo proves it: kill the process
+mid-approval, restart, and the pending state replays from history intact.

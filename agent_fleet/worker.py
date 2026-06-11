@@ -19,6 +19,7 @@ import signal
 
 from temporalio.client import Client
 from temporalio.contrib.google_adk_agents import GoogleAdkPlugin
+from temporalio.contrib.langgraph import LangGraphPlugin
 from temporalio.contrib.pydantic import PydanticPayloadConverter
 from temporalio.converter import DataConverter
 from temporalio.worker import Worker
@@ -43,6 +44,12 @@ from agent_fleet.activities import (
     tool_get_route_info,
 )
 from agent_fleet.config import TEMPORAL_ADDRESS
+from agent_fleet.dispatch_gate import (
+    GRAPH_NAME,
+    GRAPH_NAME_INTERRUPT,
+    DispatchGateWorkflow,
+    build_gate_graph,
+)
 from agent_fleet.queues import AGENTS_QUEUE, DELIVERY_QUEUE, WORKFLOWS_QUEUE
 from agent_fleet.workflows import DriverRouteWorkflow, MeltdownDemoWorkflow, OrderGenerationWorkflow
 
@@ -65,9 +72,26 @@ def create_workflow_worker(client: Client) -> Worker:
     return Worker(
         client,
         task_queue=WORKFLOWS_QUEUE,
-        workflows=[MeltdownDemoWorkflow, DriverRouteWorkflow, OrderGenerationWorkflow],
+        workflows=[
+            MeltdownDemoWorkflow,
+            DriverRouteWorkflow,
+            OrderGenerationWorkflow,
+            DispatchGateWorkflow,
+        ],
         activities=[publish_agent_event, publish_agent_events_batch],
-        plugins=[GoogleAdkPlugin()],
+        # LangGraphPlugin runs the Pattern B dispatch-gate graph; its node
+        # activities (incl. the Gemini assess call) execute on this worker.
+        # Both gate variants are registered so the UI toggle can pick the HITL impl
+        # per dropped order: Temporal-signal (default) or LangGraph interrupt().
+        plugins=[
+            GoogleAdkPlugin(),
+            LangGraphPlugin(
+                graphs={
+                    GRAPH_NAME: build_gate_graph(use_interrupt=False),
+                    GRAPH_NAME_INTERRUPT: build_gate_graph(use_interrupt=True),
+                }
+            ),
+        ],
     )
 
 
@@ -128,13 +152,10 @@ async def run_worker() -> None:
     """Connect to Temporal and run all workers until interrupted."""
     from agent_fleet.config import GOOGLE_API_KEY, GOOGLE_MAPS_API_KEY
 
-    if GOOGLE_API_KEY:
-        _create = create_worker  # live workers from this module
-        mode = "LIVE"
-    else:
-        from agent_fleet.mock.worker import create_worker as _create
-
-        mode = "MOCK"
+    if not GOOGLE_API_KEY:
+        logger.warning("GOOGLE_API_KEY not set — live mode requires it (mock mode removed).")
+    _create = create_worker
+    mode = "LIVE"
 
     maps_key = "SET" if GOOGLE_MAPS_API_KEY else "NOT SET"
     gemini_key = "SET" if GOOGLE_API_KEY else "NOT SET"

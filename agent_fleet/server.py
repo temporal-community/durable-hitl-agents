@@ -31,13 +31,15 @@ from temporalio.service import RPCError
 
 load_dotenv()
 
-from agent_fleet.config import GOOGLE_API_KEY, TEMPORAL_ADDRESS
+from agent_fleet.config import INTERRUPT_MODE, TEMPORAL_ADDRESS
+from agent_fleet.dispatch_gate import DispatchGateWorkflow
 from agent_fleet.locations import COSMOPOLITAN, VENUES, WAREHOUSE, WAREHOUSE_LABEL
 from agent_fleet.models import (
     AgentDisconnectInput,
     CustomerChangeInput,
     DriverDisconnectInput,
     MeltdownDemoInput,
+    OrderAssignmentResult,
     OrderUpdateInput,
 )
 from agent_fleet.queues import WORKFLOWS_QUEUE
@@ -109,7 +111,7 @@ async def start_demo():
                 MeltdownDemoWorkflow.run,
                 MeltdownDemoInput(
                     escalation_enabled=_escalation_enabled,
-                    use_mock_assignment=not bool(GOOGLE_API_KEY),
+                    use_interrupt=INTERRUPT_MODE,
                 ),
                 id="meltdown-demo",
                 task_queue=WORKFLOWS_QUEUE,
@@ -350,6 +352,110 @@ async def approve_change(body: ChangeDecisionRequest):
 
     decision = "approved" if body.approved else "rejected"
     return {"status": f"change_{decision}"}
+
+
+# --- Pattern B: agent-initiated dispatch approval gate ---
+
+
+class DispatchDecisionRequest(BaseModel):
+    order_id: str
+    approved: bool
+
+
+@app.get("/api/pending-dispatch")
+async def pending_dispatch():
+    """Orders the dispatch agent escalated that are awaiting a human decision."""
+    if _temporal_client is None:
+        return {"error": "Temporal client not connected"}
+    try:
+        handle = _temporal_client.get_workflow_handle("meltdown-demo")
+        status = await handle.query(MeltdownDemoWorkflow.get_status)
+    except RPCError as e:
+        return {"error": f"Failed to query workflow: {e}"}
+    return {"pending_dispatch": status.get("pending_dispatch", {})}
+
+
+@app.post("/api/approve-dispatch")
+async def approve_dispatch(body: DispatchDecisionRequest):
+    """Approve or reject an agent-escalated high-value dispatch.
+
+    Signals the per-order DispatchGateWorkflow child — the durable async endpoint
+    the agent's request_human_approval tool is parked on.
+    """
+    if _temporal_client is None:
+        return {"error": "Temporal client not connected"}
+    decision = "approve" if body.approved else "reject"
+    try:
+        gate = _temporal_client.get_workflow_handle(f"gate-{body.order_id}")
+        await gate.signal(DispatchGateWorkflow.approve, decision)
+    except RPCError as e:
+        return {"error": f"Failed to signal dispatch gate: {e}"}
+    return {
+        "status": "dispatch_approved" if body.approved else "dispatch_rejected",
+        "order_id": body.order_id,
+    }
+
+
+class InjectOrderRequest(BaseModel):
+    use_interrupt: bool = False  # which HITL impl the gate uses (UI toggle)
+
+
+_injected_order_count = 0
+
+
+@app.post("/api/inject-order")
+async def inject_high_value_order(body: InjectOrderRequest | None = None):
+    """Drop a premium Moscone catering order on demand — the agent will escalate it.
+
+    This is the deliberate trigger for the agent-in-the-loop (Pattern B) demo:
+    registers the order in FleetState (so it shows on the map) and signals the
+    workflow, which routes it to the dispatch gate because of its value. The
+    `use_interrupt` toggle picks the gate's HITL impl (Temporal signal vs interrupt).
+    """
+    global _injected_order_count
+    if _temporal_client is None:
+        return {"error": "Temporal client not connected"}
+    use_interrupt = bool(body and body.use_interrupt)
+    _injected_order_count += 1
+    oid = f"order-vip-{_injected_order_count}"
+    venue = next((v for v in VENUES if v["vip_tier"] == "platinum"), VENUES[0])
+    servings, value, deadline, event = 120, 5400, 30, "conference catering"
+    await fleet.register_order(
+        order_id=oid,
+        hotel=venue["hotel"],
+        label=f"{venue['hotel']} {event} — {servings} servings",
+        priority="vip",
+        servings=servings,
+        delivery_coords=venue["coords"],
+        deadline_minutes=deadline,
+    )
+    try:
+        handle = _temporal_client.get_workflow_handle("meltdown-demo")
+        await handle.signal(
+            MeltdownDemoWorkflow.new_order,
+            OrderAssignmentResult(
+                order_id=oid,
+                hotel=venue["hotel"],
+                delivery_lat=venue["coords"].lat,
+                delivery_lng=venue["coords"].lng,
+                driver_id="",
+                reasoning_summary="",
+                priority="vip",
+                servings=servings,
+                deadline_minutes=deadline,
+                event=event,
+                order_value=value,
+                use_interrupt=use_interrupt,
+            ),
+        )
+    except RPCError as e:
+        return {"error": f"Failed to signal workflow: {e}"}
+    return {
+        "status": "injected",
+        "order_id": oid,
+        "order_value": value,
+        "use_interrupt": use_interrupt,
+    }
 
 
 # --- Demo config endpoints ---

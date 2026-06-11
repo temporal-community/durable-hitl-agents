@@ -141,6 +141,7 @@ class GenerateOrderOutput:
     delivery_lng: float
     deadline_minutes: int
     event: str
+    order_value: int = 0
 
 
 @dataclass
@@ -348,7 +349,7 @@ class AgentDisconnectInput:
 class MeltdownDemoInput:
     escalation_enabled: bool = False
     max_orders: int = 50
-    use_mock_assignment: bool = False
+    use_interrupt: bool = False  # Pattern B HITL: False=Temporal signal (default), True=interrupt
 
 
 @dataclass
@@ -372,3 +373,32 @@ class OrderAssignmentResult:
     servings: int = 1
     deadline_minutes: int = 45
     event: str = ""
+    order_value: int = 0  # USD; high values route through the agent-initiated approval gate
+    use_interrupt: bool = False  # per-order HITL impl for the gate (set by the UI toggle)
+
+
+@dataclass
+class DispatchGateInput:
+    """Input to DispatchGateWorkflow (Pattern B: the agent calls the human)."""
+
+    order_id: str
+    venue: str
+    order_value: int
+    servings: int
+    deadline_minutes: int
+    proposed_driver_id: str
+    drivers_available: int
+    drivers_total: int
+    pending_orders: int
+    escalation_seconds: int = 3600
+    use_interrupt: bool = False  # False=Temporal-signal HITL (default); True=LangGraph interrupt
+
+
+@dataclass
+class DispatchGateResult:
+    """Outcome of the gate, returned to the parent workflow."""
+
+    order_id: str
+    approved: bool
+    decision: str  # "approve" | "reject"
+    timed_out: bool = False

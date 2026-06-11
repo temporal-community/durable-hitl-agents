@@ -10,3 +10,9 @@ fleet_state.db-shm
 
 *.egg-info/
 fleet_state.*
+
+# local / work-in-progress (not for the public repo yet)
+.claude/
+spikes/
+SLIDES.md
+*.log

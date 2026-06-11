@@ -42,11 +42,13 @@ with workflow.unsafe.imports_passed_through():
         sync_driver_position,
     )
     from agent_fleet.agents import create_order_assignment_agent
+    from agent_fleet.dispatch_gate import DispatchGateWorkflow
     from agent_fleet.locations import WAREHOUSE
     from agent_fleet.models import (
         AgentDisconnectInput,
         CustomerChangeInput,
         DeliverInput,
+        DispatchGateInput,
         DriverDisconnectInput,
         DriverRouteInput,
         DriverRouteOrder,
@@ -83,6 +85,13 @@ ORDER_INTERVAL_SECONDS = 10
 
 DRIVER_CAPACITY = 3
 DRIVER_IDS = ["driver-a", "driver-b", "driver-c", "driver-d", "driver-e"]
+
+# Pattern B — orders at/above this value are routed to the dispatch agent, which
+# DECIDES whether to escalate to a human. This is a cheap, token-saving routing
+# pre-filter (non-platinum orders top out ~$1,950), NOT the escalation decision —
+# that stays the agent's prompt-driven call.
+GATE_REVIEW_VALUE = 2000
+GATE_ESCALATION_SECONDS = 3600  # primary approver window before escalating to backup
 
 
 @dataclass
@@ -779,6 +788,7 @@ class OrderGenerationWorkflow:
                             servings=order.servings,
                             deadline_minutes=order.deadline_minutes,
                             event=order.event,
+                            order_value=order.order_value,
                         ),
                     )
             except Exception as e:
@@ -826,7 +836,6 @@ class MeltdownDemoWorkflow:
         self._pending_approvals: list[bool] = []
         self._pending_new_orders: list[OrderAssignmentResult] = []
         self._routes_done: bool = False
-        self._use_mock_assignment: bool = False
         self._disconnected_drivers: set[str] = set()
         self._disconnected_agents: set[str] = set()
         # Workflow-owned driver state
@@ -842,6 +851,11 @@ class MeltdownDemoWorkflow:
             "customer_agent": True,
             "resolver": True,
         }
+        # Pattern B — agent-initiated dispatch gate state
+        self._gate_tasks: list = []
+        self._gate_handles: dict = {}
+        self._pending_dispatch: dict[str, dict] = {}  # order_id -> brief (awaiting human)
+        self._gate_use_interrupt: bool = False  # HITL impl for the gate (set from input)
 
     # --- Signals ---
 
@@ -896,6 +910,32 @@ class MeltdownDemoWorkflow:
         """Signaled by OrderGenerationWorkflow with each new order to assign."""
         self._pending_new_orders.append(order)
 
+    @workflow.signal
+    async def dispatch_gate_awaiting(self, brief: dict) -> None:
+        """Signaled by a DispatchGateWorkflow child when its agent escalates to a human.
+
+        Surfaces the pending decision brief so the operator/UI can act on it.
+        """
+        order_id = brief.get("order_id")
+        if not order_id:
+            return
+        self._pending_dispatch[order_id] = brief
+        if order_id in self._orders:
+            self._orders[order_id]["status"] = "awaiting_dispatch_approval"
+        await workflow.execute_local_activity(
+            publish_agent_event,
+            PublishAgentEventInput(
+                agent_name="dispatch_gate",
+                event_type="approval_gate",
+                content=(
+                    f"Agent escalated order {order_id} (${brief.get('order_value', 0):,}) "
+                    f"for human sign-off — {brief.get('reasoning', '')}"
+                ),
+                summary=f"{order_id} awaiting dispatch approval",
+            ),
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+
     # --- Queries ---
 
     @workflow.query
@@ -909,6 +949,7 @@ class MeltdownDemoWorkflow:
             "driver_orders": {cid: list(oids) for cid, oids in self._driver_orders.items()},
             "orders": dict(self._orders),
             "agent_health": dict(self._agent_health),
+            "pending_dispatch": dict(self._pending_dispatch),
         }
 
     # --- Helpers ---
@@ -940,12 +981,31 @@ class MeltdownDemoWorkflow:
             )
         return snapshots
 
+    def _eligible_drivers(self) -> list[str]:
+        """Connected, under-capacity drivers (D-E hidden during warmup)."""
+        warming_up = self._orders_generated <= self._WARMUP_ORDERS
+        return [
+            d
+            for d in DRIVER_IDS
+            if d in self._route_handles
+            and d not in self._disconnected_drivers
+            and len(self._driver_orders.get(d, [])) < DRIVER_CAPACITY
+            and not (warming_up and d in ("driver-d", "driver-e"))
+        ]
+
+    def _least_loaded_driver(self) -> str:
+        """Least-loaded eligible driver (fleet-spread); falls back to driver-a."""
+        eligible = self._eligible_drivers()
+        if eligible:
+            return min(eligible, key=lambda d: len(self._driver_orders.get(d, [])))
+        return DRIVER_IDS[0]
+
     # --- Main entry ---
 
     @workflow.run
     async def run(self, inp: MeltdownDemoInput) -> str:
         workflow.logger.info(f"Meltdown demo starting (escalation={inp.escalation_enabled})")
-        self._use_mock_assignment = inp.use_mock_assignment
+        self._gate_use_interrupt = inp.use_interrupt
 
         # Initialize driver state
         for driver_id in DRIVER_IDS:
@@ -1003,6 +1063,13 @@ class MeltdownDemoWorkflow:
                 await handle.signal(DriverRouteWorkflow.stop)
             except Exception:
                 pass
+
+        # Cancel any in-flight dispatch gates so a parked approval can't hang shutdown,
+        # and clear pending briefs so the UI approval card doesn't get stuck on a
+        # gate that no longer exists (e.g. a high-value order dropped as the demo ends).
+        for task in self._gate_tasks:
+            task.cancel()
+        self._pending_dispatch.clear()
 
         await change_task
         await order_task
@@ -1201,6 +1268,13 @@ class MeltdownDemoWorkflow:
         # Build driver snapshots from workflow state — passed to activity as input
         driver_snapshots = self._build_driver_snapshots()
 
+        # Agent-initiated use case (Pattern B): high-value orders bypass ADK entirely and
+        # route to the LangGraph dispatch gate. ADK runs only for the human-initiated
+        # (routine) path. Mock mode never gates.
+        if order.order_value >= GATE_REVIEW_VALUE:
+            self._spawn_gate(order, self._least_loaded_driver(), False, onum)
+            return
+
         assignment_input = ReasonAboutAssignmentInput(
             order_id=order.order_id,
             hotel=order.hotel,
@@ -1214,17 +1288,7 @@ class MeltdownDemoWorkflow:
             disconnected_agents=list(self._disconnected_agents),
         )
 
-        if self._use_mock_assignment:
-            assignment = await workflow.execute_activity(
-                "reason_about_assignment",
-                assignment_input,
-                task_queue=AGENTS_QUEUE,
-                summary=f"[#{onum}] Dispatch Agent — assign {order.order_id}",
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=FAST_RETRY,
-            )
-        else:
-            assignment = await self._run_adk_assignment(assignment_input)
+        assignment = await self._run_adk_assignment(assignment_input)
         # Determine if this is a degraded assignment (Fleet Agent offline)
         fleet_offline = "fleet_agent" in self._disconnected_agents
 
@@ -1291,6 +1355,24 @@ class MeltdownDemoWorkflow:
                     f"No available drivers — queuing {order.order_id} on {driver_id}"
                 )
 
+        # Spread load across the fleet: prefer the least-loaded eligible driver so the
+        # whole fleet stays active. The agents still reason and publish their assessment;
+        # this only rebalances the final destination.
+        eligible = self._eligible_drivers()
+        if eligible:
+            least = min(eligible, key=lambda d: len(self._driver_orders.get(d, [])))
+            if len(self._driver_orders.get(least, [])) < len(
+                self._driver_orders.get(driver_id, [])
+            ):
+                driver_id = least
+
+        # Routine (human-initiated path): commit the ADK assignment immediately.
+        await self._commit_assignment(order, driver_id, fleet_offline, onum)
+
+    async def _commit_assignment(
+        self, order: OrderAssignmentResult, driver_id: str, fleet_offline: bool, onum: str
+    ) -> None:
+        """Register the assignment in FleetState and signal the chosen driver."""
         # Register final assignment AFTER capacity check
         assigned = await workflow.execute_activity(
             register_assignment,
@@ -1336,6 +1418,88 @@ class MeltdownDemoWorkflow:
             )
 
         workflow.logger.info(f"Order {self._orders_generated}: {order.order_id} → {driver_id}")
+
+    def _spawn_gate(
+        self, order: OrderAssignmentResult, driver_id: str, fleet_offline: bool, onum: str
+    ) -> None:
+        """Run the agent-initiated approval gate concurrently — the fleet keeps moving
+        while the agent (and possibly a human) decides on this order."""
+        self._gate_tasks.append(
+            asyncio.create_task(self._run_gate(order, driver_id, fleet_offline, onum))
+        )
+
+    async def _run_gate(
+        self, order: OrderAssignmentResult, driver_id: str, fleet_offline: bool, onum: str
+    ) -> None:
+        """Start the DispatchGateWorkflow child; commit on approval, hold on rejection."""
+        available = sum(
+            1
+            for d in DRIVER_IDS
+            if d not in self._disconnected_drivers
+            and len(self._driver_orders.get(d, [])) < DRIVER_CAPACITY
+        )
+        handle = await workflow.start_child_workflow(
+            DispatchGateWorkflow.run,
+            DispatchGateInput(
+                order_id=order.order_id,
+                venue=order.hotel,
+                order_value=order.order_value,
+                servings=order.servings,
+                deadline_minutes=order.deadline_minutes,
+                proposed_driver_id=driver_id,
+                drivers_available=available,
+                drivers_total=len(DRIVER_IDS),
+                pending_orders=len(self._pending_new_orders),
+                escalation_seconds=GATE_ESCALATION_SECONDS,
+                use_interrupt=order.use_interrupt or self._gate_use_interrupt,
+            ),
+            id=f"gate-{order.order_id}",
+            static_summary=f"Dispatch gate — {order.order_id} (${order.order_value:,})",
+        )
+        self._gate_handles[order.order_id] = handle
+        try:
+            result = await handle
+        except Exception as e:
+            # Fail open: a gate failure shouldn't lose the order. Commit with a warning.
+            workflow.logger.warning(
+                f"Dispatch gate failed for {order.order_id}: {e} — committing assignment"
+            )
+            result = None
+        self._gate_handles.pop(order.order_id, None)
+        self._pending_dispatch.pop(order.order_id, None)
+
+        if result is None or result.approved:
+            await self._commit_assignment(order, driver_id, fleet_offline, onum)
+        else:
+            await self._reject_order(order, onum)
+
+    async def _reject_order(self, order: OrderAssignmentResult, onum: str) -> None:
+        """A supervisor rejected the high-value order — don't commit fleet capacity."""
+        if order.order_id in self._orders:
+            self._orders[order.order_id]["status"] = "rejected"
+        # Reflect the rejection in FleetState so the order shows as cancelled in the UI.
+        await workflow.execute_activity(
+            execute_customer_change,
+            ExecuteCustomerChangeInput(order_id=order.order_id, change_type="cancel"),
+            task_queue=DELIVERY_QUEUE,
+            summary=f"[#{onum}] Dispatch rejected — cancel {order.order_id}",
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=FAST_RETRY,
+        )
+        await workflow.execute_local_activity(
+            publish_agent_event,
+            PublishAgentEventInput(
+                agent_name="dispatch_gate",
+                event_type="change_rejected",
+                content=(
+                    f"Supervisor rejected high-value order {order.order_id} "
+                    f"(${order.order_value:,}) — not dispatched, fleet capacity preserved."
+                ),
+                summary=f"{order.order_id} rejected — not dispatched",
+            ),
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        workflow.logger.info(f"[#{onum}] {order.order_id} rejected at dispatch gate")
 
     # --- Signal processing loop ---
 

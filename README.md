@@ -1,6 +1,6 @@
 # Meltdown — Ice Cream Delivery Fleet Demo <img src="https://github.com/google/adk-docs/raw/main/docs/assets/agent-development-kit.png" alt="Google ADK" height="28">
 
-Ziggy's Ice Cream runs its Las Vegas Strip delivery fleet on Temporal. When orders flood in from MGM Grand, Caesars Palace, and Mandalay Bay, AI agents reason about which driver to send — and Temporal guarantees every decision, every delivery, and every failure recovery runs to completion. This demo shows what happens when things go wrong: agents lose connectivity, drivers disconnect mid-delivery, customers change orders mid-route — and the system keeps running.
+Companion demo for the AI Engineer World's Fair talk **"The Human Is an Async API: Designing Durable Human-in-the-Loop Agents."** Ziggy's Ice Cream runs its downtown San Francisco catering fleet on Temporal. Orders flow in from Moscone Center, Fisherman's Wharf, and Chinatown; AI agents reason about which driver to send; and Temporal guarantees every decision and delivery runs to completion. The demo shows **two durable human-in-the-loop patterns** side by side — one where a human interrupts the agents, one where an agent calls a human — both built on Temporal's durable signals and `wait_condition`.
 
 <p align="center">
   <img src=".github/assets/meltdown-screenshot-3.png" alt="Meltdown demo dashboard" width="900">
@@ -14,17 +14,18 @@ Ziggy's Ice Cream runs its Las Vegas Strip delivery fleet on Temporal. When orde
   <em>▶ <a href="https://youtube.com/shorts/Wq7hiN2KYnk">Watch the demo on YouTube</a></em>
 </p>
 
-Built with **Google ADK** for multi-agent reasoning and **Temporal** for durable execution. Orders auto-generate on a timer. AI agents (Fleet, Customer, Dispatch) evaluate positions, capacity, ETAs, and priority — then assign each order to the best driver. Drivers batch-pickup at Ziggy's and deliver sequentially. When failures hit, Temporal's event log holds every step — nothing is lost, nothing repeats.
+Built with **Google ADK** (multi-agent reasoning for Pattern A), **LangGraph** via `temporalio.contrib.langgraph` (the agent-initiated gate for Pattern B), and **Temporal** for durable execution. Orders auto-generate on a timer. AI agents (Fleet, Customer, Dispatch) evaluate positions, capacity, ETAs, and priority — then assign each order to the best driver, spreading load across the fleet so all five stay active. Drivers batch-pickup at Ziggy's (the Ferry Building) and deliver sequentially. Both human-in-the-loop pauses are durable Temporal signals — survive worker death, resume exactly where they left off.
 
 > **Terminology:** AI agents **reason** (LLM + tools, run inline via ADK). Delivery actors **execute** (child workflows that carry out routes). They are not Temporal workers.
 
-## What It Demonstrates
+## The Two Patterns
 
-| Scenario | What Happens | What It Shows |
-|----------|-------------|---------------|
-| **Tool Degradation** | Take Fleet Agent offline | Fleet Agent's tools fail fast (2 retries), error returned to LLM — Dispatch Agent assigns with Customer Agent data only. Reconnect → tools succeed → full assessment resumes. Temporal shows retry attempts in the UI. |
-| **Service Disruption & Recovery** | Take a delivery actor offline mid-delivery | Delivery actor completes current delivery but can't report back. Temporal retries with backoff until reconnected. Stays at hotel on the map — no teleporting. Reconnect → next retry succeeds → navigates home for next order. |
-| **Human-in-the-Loop (HITL)** | Submit an address change or cancellation | **Operator-initiated** (not agent-initiated — the gate lives in the workflow, not in any LLM tool). Driver navigates to hotel but holds before delivering (`awaiting_update`). Parent waits for human approval, child waits for parent's decision. Approve cancel → delivery skipped. Approve reroute → driver navigates to new destination. Two `wait_condition` patterns, cross-workflow signals. |
+| Pattern | "The Human..." | Built on | What Happens | Durable primitive |
+|---------|----------------|----------|--------------|-------------------|
+| **A — Human-in-the-loop** | ...calls the agent | **Google ADK** (multi-agent) | An operator submits a customer change (address change / cancel) mid-delivery. The change is **operator-initiated** — the gate lives in the workflow, not in any LLM tool. The driver navigates to the venue but holds before delivering (`awaiting_update`). A human approves or rejects: approve cancel → delivery skipped; approve reroute → driver navigates to Oracle Park; reject → deliver normally. | Signal → `wait_condition` hold → resolve (two `wait_condition`s: parent waits for human, child waits for parent) |
+| **B — Agent-in-the-loop** | ...gets called by the agent | **LangGraph** (`temporalio.contrib.langgraph`) | A high-value order bypasses ADK and routes to a per-order `DispatchGateWorkflow`. A **multi-agent** LangGraph team (Fleet + Customer assess in parallel → Dispatch decides) — each node a real Gemini call run as a Temporal **activity** — decides whether to call `request_human_approval`. By default the tool call surfaces an escalate flag + brief and the **workflow** does the HITL via a durable Temporal **signal** + `wait_condition` (timeout escalates to a backup approver). LangGraph `interrupt()` is an optional back-pocket toggle (`HITL_MODE=interrupt`). Survives worker death. | The human is just another tool the agent calls — but a durable, async one. On Temporal, that tool call is a signal. |
+
+Pattern A's ADK assignment (Fleet + Customer + Dispatch Agents) reasons about every **routine** order. A deliberately injected premium order (above the $2,000 review threshold) **bypasses ADK entirely** and trips Pattern B's gate instead — so the agent-in-the-loop demo fires when you choose, not at random.
 
 ## Quick Start
 
@@ -59,6 +60,12 @@ The `run.sh` script syncs dependencies via [uv](https://docs.astral.sh/uv/) (ins
 ./run.sh    # uv sync + Temporal dev server + worker process + server process
 ```
 
+`run.sh` is the easy path. If you start the worker by hand, note it does **not** load `.env` on its own — pass the env file so live mode picks up your keys:
+
+```bash
+uv run --env-file .env python -m agent_fleet.worker
+```
+
 ### 3. Open the dashboard
 
 | Interface | URL |
@@ -68,10 +75,11 @@ The `run.sh` script syncs dependencies via [uv](https://docs.astral.sh/uv/) (ins
 
 ## Demo Flow
 
-1. **Start Deliveries** — Ziggy's opens for business. Orders flood in from the Strip hotels. AI agents reason per-order and assign to the best driver. Drivers batch-pickup at Ziggy's and deliver sequentially.
-2. **Demo 1: Agent Goes Down** — Fleet Agent loses connectivity → its tools fail fast (2 retries) → Dispatch Agent flies blind, assigns with degraded quality → reconnect → full fleet visibility restored
-3. **Demo 2: Driver Loses Connection** — A driver with multiple orders disconnects mid-delivery → finishes current delivery, stuck at hotel → Temporal retries with backoff → reconnect → resumes from next order, no repeated work
-4. **Demo 3: Customer Changes Mind** — Customer submits a change → parent signals child to hold → driver arrives at hotel but pauses before delivering → human approves → cancel skips delivery, reroute sends driver to The Cosmopolitan
+The dashboard has two tabs — one per pattern. Both start the same way.
+
+1. **Start Deliveries** — Ziggy's (the Ferry Building) opens for business. Orders flow in from Moscone Center, Fisherman's Wharf, and Chinatown. The ADK agents reason per-order and assign to the least-loaded driver. Drivers batch-pickup and deliver sequentially.
+2. **Pattern A — Human-in-the-loop tab:** pick an active order, choose **Address Change** or **Cancel Order**, click **Submit Change**. The driver arrives at the venue but holds (`awaiting_update`) while a human decides. Click **Approve** / **Reject** — cancel skips delivery, address change reroutes to Oracle Park, reject delivers normally.
+3. **Pattern B — Agent-in-the-loop tab:** click **Drop high-value order** to inject a premium Moscone catering order (over the $2,000 threshold). The order bypasses ADK; the LangGraph dispatch team (Fleet + Customer → Dispatch) decides to call `request_human_approval`, and the workflow parks on a durable Temporal signal; an approval card appears over the map. Approve or reject. To show durability, **kill the worker while the card is up** — the gate survives; restart the worker and the pending approval is still there.
 
 
 ## Architecture
@@ -98,31 +106,38 @@ The `run.sh` script syncs dependencies via [uv](https://docs.astral.sh/uv/) (ins
 │  │   in parallel →           sync_driver_position   tool_submit_       │
 │  │   Dispatch Agent          execute_customer_        assignment       │
 │  │                             change                                  │
-│  └─ 5 DriverRouteWorkflows                         TemporalModel      │
-│     (Driver-A … Driver-E)                           routes LLM calls   │
-│     batch pickup → deliver                          + tool calls here  │
-│     sequentially → return                           (max 5 concurrent) │
-│     (max 20 concurrent)                                                │
+│  ├─ 5 DriverRouteWorkflows                         TemporalModel      │
+│  │   (Driver-A … Driver-E)                          routes LLM calls   │
+│  │   batch pickup → deliver                         + tool calls here  │
+│  │   sequentially → return                          (max 5 concurrent) │
+│  │   (max 20 concurrent)                                               │
+│  └─ DispatchGateWorkflow (Pattern B, per high-value order)            │
+│      LangGraph team (Fleet+Customer→Dispatch) decides → workflow      │
+│      does HITL via durable signal (interrupt() = back-pocket toggle)  │
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────┐      ┌───────────────────────────────────────┐
 │    Server Process        │      │           Frontend (SPA)              │
 │    FastAPI + WebSocket   │◄────►│  Leaflet map + WebSocket state feed   │
 │                          │      │  Agent reasoning panels               │
-│  Queries Temporal for    │      │  Fleet / order status cards           │
-│  workflow state          │      │  Demo controls (disconnect, change)   │
+│  Reads FleetState        │      │  Fleet / order status cards           │
+│  (SQLite) for snapshot   │      │  Demo controls (both tabs)            │
 │                          │      └───────────────────────────────────────┘
-│  Sends signals:          │
-│  start, disconnect,      │
-│  reconnect, customer     │
-│  change, reset           │
+│  Sends signals / queries:│
+│  start, reset,           │
+│  customer-change +       │
+│  approve-change (A),     │
+│  inject-order +          │
+│  approve-dispatch (B)    │
 └──────────┬───────────────┘
            │ queries + signals
            ▼
      Temporal Server
 ```
 
-**Order lifecycle:** Order generates on timer → ADK agents reason (Fleet + Customer in parallel → Dispatch) → capacity check + assignment → driver batch-picks up at Ziggy's → delivers sequentially to hotels → signals parent on each completion → returns to base
+**Order lifecycle (routine):** Order generates on timer → ADK agents reason (Fleet + Customer in parallel → Dispatch) → capacity check + least-loaded assignment → driver batch-picks up at Ziggy's → delivers sequentially to venues → signals parent on each completion → returns to base
+
+**Order lifecycle (high-value):** Order injected (≥ $2,000) → **bypasses ADK** → routes to the per-order LangGraph dispatch gate (multi-agent: Fleet + Customer → Dispatch) → agent decides → may pause for a human (durable Temporal signal) → on approve, commits to the least-loaded driver and delivers; on reject, the order is cancelled
 
 **How ADK and Temporal map to each other:**
 
@@ -131,7 +146,7 @@ The `run.sh` script syncs dependencies via [uv](https://docs.astral.sh/uv/) (ins
 | **LLM Agent** (`Agent` + `TemporalModel`) | Each Gemini call → `invoke_model` activity, recorded in event log |
 | **Orchestrator Agent** (`SequentialAgent`, `ParallelAgent`) | Pure Python coordination — no Temporal activity, no LLM |
 | **Tool call** (via `activity_tool`) | Each tool invocation → named Temporal activity, retryable + replayable |
-| **Entire agent pipeline** | Runs inline in the workflow via `_run_adk_assignment()` (live); as a single activity `reason_about_assignment` (mock) |
+| **Entire agent pipeline** | Runs inline in the workflow via `_run_adk_assignment()` |
 
 Fleet Agent, Customer Agent, and Dispatch Agent are LLM Agents. The outer `order_assignment` pipeline is an Orchestrator Agent — it sequences them with no model of its own. Temporal never sees the orchestration logic; it only sees individual LLM calls and tool calls as discrete activities.
 
@@ -165,55 +180,51 @@ Worker(
 
 The plugin turns each Gemini inference and each tool invocation into a **separate Temporal activity** — recorded in the event log, retryable, and replayable. Without it, ADK agents are ephemeral Python; with it, every reasoning step has Temporal's durability guarantees. If the worker crashes mid-reasoning, the workflow replays from the event log and resumes exactly where it left off.
 
-**Two processes**: `run.sh` starts a worker process and a server process (plus Temporal dev server). The server queries Temporal workflows for state (`_build_snapshot_from_queries()`) and sends signals only — no workers, no FleetState reads. Workers run three Temporal workers on three task queues.
+**Two processes**: `run.sh` starts a worker process and a server process (plus Temporal dev server). The server builds the frontend snapshot from FleetState (`_build_snapshot()` → `fleet.snapshot()`, SQLite shared across processes) and otherwise sends signals / runs queries only — it runs no workers. Workers run three Temporal workers on three task queues.
 
-**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs workflows plus `publish_agent_event` as a local activity (UI projection with minimal history). `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). Agents use the upstream `TemporalModel` with `summary_fn=_build_summary` — `_build_summary` in `agents.py` generates context-aware Temporal UI summaries per LLM call.
+**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs workflows plus `publish_agent_event` as a local activity (UI projection with minimal history). `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). `LangGraphPlugin(graphs={...})` is registered on the **workflow** worker — it runs the Pattern B dispatch-gate graph (`build_gate_graph`), whose node activities (the Fleet / Customer / Dispatch agent Gemini calls) execute there; `DispatchGateWorkflow` is registered alongside the other workflows. Agents use the upstream `TemporalModel` with `summary_fn=_build_summary` — `_build_summary` in `agents.py` generates context-aware Temporal UI summaries per LLM call.
 
 ### What each agent reasons about
 
 | Agent | Reasoning | Tools |
 |-------|-----------|-------|
-| **Fleet Agent** (operational) | Delivery actor positions, capacity (free slots), ETAs to destination, disconnect status — excludes unavailable actors | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps) |
-| **Customer Agent** (priority) | VIP vs standard tier, deadline pressure, hotel events (conferences, galas), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
-| **Dispatch Agent** (synthesis) | Weighs Fleet + Customer assessments, compensates if either agent is offline, picks final delivery actor | `tool_submit_assignment` |
+| **Fleet Agent** (operational) | Delivery actor positions, capacity (free slots), ETAs to destination — excludes unavailable actors | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps) |
+| **Customer Agent** (priority) | VIP vs standard tier, deadline pressure, venue events (conference catering, receptions, festivals), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
+| **Dispatch Agent** (synthesis) | Weighs Fleet + Customer assessments, picks final delivery actor | `tool_submit_assignment` |
 
 Fleet and Customer run **in parallel** (`ParallelAgent`), then the Dispatch Agent runs **sequentially** after both complete (`SequentialAgent`). All tools are wrapped with `activity_tool()` — each call is a Temporal activity, recorded in the event log. If the worker restarts mid-call, results replay from the log.
 
 > **Note:** Gemini's built-in `google_search` grounding normally can't be combined with custom function tools in the same request. ADK's `GoogleSearchTool(bypass_multi_tools_limit=True)` enables this — the Customer Agent uses Google Search alongside `tool_get_order_priorities` in a single agent, no sub-agent needed.
 
-> **Agent disconnect resilience:** When Fleet Agent is disconnected, its tool activities (`tool_get_fleet_status`, `tool_get_route_info`) check FleetState and raise `RuntimeError`. Temporal retries (2 attempts, fast backoff via `_FLEET_TOOL_RETRY`). The `_activity_tool.py` wrapper catches the exhausted retry and returns an error string to the LLM — the agent reasons about the failure, and the Dispatch Agent assigns based on Customer Agent data alone. Orders assigned during Fleet Agent outage are flagged as `degraded` in the UI. No pipeline crash.
+> **Note on Maps API errors:** `tool_get_route_info` calls the Google Maps Directions API for driving ETAs. Occasional failures (rate limiting, quota, transient errors) are normal — every tool call is a Temporal activity with its own retry policy. The error is returned to the LLM as context, the Fleet Agent notes the missing ETA, and the Dispatch Agent assigns with available data. This is the system working as designed, not a bug.
 >
-> **Note on Maps API errors:** `tool_get_route_info` calls the Google Maps Directions API for driving ETAs. Occasional failures (rate limiting, quota, transient errors) are normal — the same graceful degradation applies. The error is returned to the LLM as context, the Fleet Agent notes the missing ETA, and the Dispatch Agent assigns with available data. This is the system working as designed, not a bug.
-
-### Mock mode
-
-Mock mode is completely separate from live code. The `agent_fleet/mock/` folder contains its own `activities.py` and `worker.py`. The decision happens once at startup in `worker.py`: if `GOOGLE_API_KEY` is set, live workers run (with `GoogleAdkPlugin`, ADK inline in workflows); if not, mock workers from `agent_fleet/mock/worker.py` run instead. Live code has zero mock awareness — no `MOCK_MODE` flag, no `_get_api_activities()`, no per-key fallback selection. Mock activities use `@activity.defn(name=...)` overrides to match live activity names so workflows don't know or care which version is running. Real activities let failures propagate to Temporal's retry mechanism.
+> **Dormant disconnect path:** The codebase retains agent/driver disconnect logic (tool activities raise on disconnect, Temporal retries, orders flag `degraded`). It is **not** part of the talk's two demos and the UI no longer exposes disconnect controls.
 
 ## Prerequisites
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (`brew install uv`) — Python package + venv manager used to install dependencies
 - [Temporal CLI](https://docs.temporal.io/cli) (`brew install temporal`)
-- Google Gemini API key (`GOOGLE_API_KEY`) — required for live mode; without it the entire demo runs in mock mode. Restricted to **Generative Language API**.
+- Google Gemini API key (`GOOGLE_API_KEY`) — required for the demo. Restricted to **Generative Language API**.
 - Google Maps API key (`GOOGLE_MAPS_API_KEY`) — used for route polylines and ETAs. Restricted to **Directions API**. This must be a separate key from `GOOGLE_API_KEY` because the Generative Language API cannot share a key with standard Google Cloud APIs.
 
-The startup decision is binary: `GOOGLE_API_KEY` set → live workers (ADK + all API activities), not set → mock workers (deterministic data, no LLM calls). Default model is `gemini-2.5-flash` (override with `DEFAULT_MODEL` env var).
+The worker is live-only and requires `GOOGLE_API_KEY` (ADK + all API activities); there is no mock mode. Default model is `gemini-2.5-flash` (override with `DEFAULT_MODEL` env var).
 
 ## Key Files
 
 | File | What it does |
 |------|-------------|
 | `agent_fleet/models.py` | Dataclass models for all Temporal payloads (incl. `DriverSnapshot`) |
-| `agent_fleet/simulation.py` | FleetState — SQLite WAL-backed write-only UI projection (`fleet_state.db`, cross-process; used by mock activities only) |
+| `agent_fleet/simulation.py` | FleetState — SQLite WAL-backed write-only UI projection (`fleet_state.db`, cross-process) |
 | `agent_fleet/activities.py` | Temporal activities — navigation, delivery, Maps API, agent tools |
 | `agent_fleet/workflows.py` | Temporal workflows — owns driver state, signals, queries, Temporal-native retry for disconnect. Includes `OrderGenerationWorkflow` |
-| `agent_fleet/agents.py` | ADK agent composition — Fleet, Customer, Dispatch Agent |
+| `agent_fleet/agents.py` | ADK agent composition (Pattern A) — Fleet, Customer, Dispatch Agent |
+| `agent_fleet/dispatch_gate.py` | Pattern B — multi-agent LangGraph dispatch-gate graph (Fleet + Customer → Dispatch) + `DispatchGateWorkflow`. Agent decides → workflow does HITL via durable Temporal signal (default); `interrupt()` is a back-pocket toggle (`HITL_MODE=interrupt`) |
 | `agent_fleet/config.py` | Centralized env config — `GOOGLE_API_KEY`, `GOOGLE_MAPS_API_KEY`, `DEFAULT_MODEL`, `TEMPORAL_ADDRESS` |
 | `agent_fleet/queues.py` | Task queue name constants (workflows / delivery / agents) |
-| `agent_fleet/worker.py` | Three Temporal workers — workflow-only, delivery, agents. Live/mock decision at startup |
-| `agent_fleet/mock/` | Self-contained mock mode — `activities.py` (deterministic mocks with `name=` overrides) and `worker.py` (3 workers, no GoogleAdkPlugin) |
-| `agent_fleet/server.py` | FastAPI server — queries Temporal for state, signal-only API, WebSocket, frontend |
-| `agent_fleet/locations.py` | Las Vegas Strip venue pool and random order generation |
+| `agent_fleet/worker.py` | Three Temporal workers — workflow-only, delivery, agents. Live-only; requires `GOOGLE_API_KEY` |
+| `agent_fleet/server.py` | FastAPI server — signal/query API (both patterns), WebSocket, frontend |
+| `agent_fleet/locations.py` | Downtown SF venue pool (Moscone, Fisherman's Wharf, Chinatown; Ferry Building shop) and random order generation |
 | `frontend/index.html` | Single-file SPA — Leaflet map, agent panels, overlays |
 
 ## Commands

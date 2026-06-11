@@ -89,7 +89,9 @@
   }
   .header-left {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
   }
   header h1 {
     font-size: 20px;
@@ -246,6 +248,46 @@
   .btn-change { background: black; color: #92a4c3; border: 1px solid #465a78; }
   .btn-change:hover { color: #f8fafc; border-color: #8098f9; }
   .btn-approve { background: #22974c; color: #fff; font-size: 15px; padding: 6px 12px; border: none; }
+  .btn-reject { background: #b3261e; color: #fff; font-size: 15px; padding: 6px 12px; border: none; }
+  /* Pattern B — agent-initiated dispatch approval card */
+  .dispatch-gate-card { position: fixed; top: 96px; left: 50%; transform: translateX(-50%);
+    width: 460px; max-width: 92vw; z-index: 1200; background: #0b1220;
+    border: 1px solid rgba(0,255,255,0.55); border-radius: 12px; padding: 16px 18px;
+    box-shadow: 0 0 44px rgba(0,255,255,0.28); color: #e5f6ff; font-size: 14px; }
+  .dgc-header { font-weight: 700; color: #0ff; letter-spacing: .02em; margin-bottom: 10px; }
+  .dgc-order { font-size: 15px; margin-bottom: 6px; }
+  .dgc-impact { color: #fbbf24; margin-bottom: 8px; }
+  .dgc-rec { margin-bottom: 4px; }
+  .dgc-reason { font-style: italic; color: #9fb4c7; margin-bottom: 12px; }
+  .dgc-actions { display: flex; gap: 10px; }
+  .dgc-actions .btn { flex: 1; cursor: pointer; }
+  .dgc-status { margin-top: 10px; min-height: 18px; font-weight: 600; }
+  /* LangGraph graph visualizer modal */
+  .graph-modal { position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center; }
+  .graph-modal-backdrop { position: absolute; inset: 0; background: rgba(2,6,16,0.66); backdrop-filter: blur(2px); }
+  .graph-modal-card { position: relative; background: #0b1220; border: 1px solid rgba(0,255,255,0.45);
+    border-radius: 14px; padding: 18px 24px 20px; max-width: 480px; width: 92vw; max-height: 90vh; overflow: auto;
+    box-shadow: 0 0 60px rgba(0,255,255,0.22); color: #e5f6ff; }
+  .graph-modal-header { display: flex; justify-content: space-between; align-items: center; font-weight: 700;
+    color: #0ff; margin-bottom: 4px; }
+  .graph-modal-header button { background: none; border: none; color: #9fb4c7; font-size: 18px; cursor: pointer; line-height: 1; }
+  .graph-modal-sub { font-size: 11px; color: #9fb4c7; margin-bottom: 14px; }
+  .graph-flow { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+  .gnode { border-radius: 10px; padding: 8px 14px; text-align: center; font-size: 13px; font-weight: 600; min-width: 130px; }
+  .gnode small { display: block; font-weight: 400; font-size: 10px; color: #9fb4c7; margin-top: 2px; }
+  .gnode-start, .gnode-end { background: #1e293b; border: 1px solid #465a78; color: #cbd5e1; border-radius: 20px; padding: 4px 20px; min-width: 0; }
+  .gnode-activity { background: rgba(0,255,255,0.08); border: 1px solid rgba(0,255,255,0.4); }
+  .gnode-hitl { background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.55); color: #fde68a; }
+  .gnode-decision { background: transparent; border: 1px dashed #94a3b8; color: #cbd5e1; font-style: italic; border-radius: 6px; min-width: 0; }
+  .garrow { color: #4b5d77; font-size: 12px; }
+  .gparallel { display: flex; gap: 12px; }
+  .gbranch { display: flex; gap: 20px; align-items: flex-start; }
+  .gbranch-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .glabel { font-size: 10px; color: #9fb4c7; }
+  .graph-legend { margin-top: 16px; font-size: 10px; color: #9fb4c7; display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+  .graph-legend span::before { content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: middle; }
+  .lg-activity::before { background: rgba(0,255,255,0.45); }
+  .lg-hitl::before { background: rgba(251,191,36,0.55); }
   .btn-reject { background: #ef4444; color: #fff; font-size: 15px; padding: 6px 12px; border: none; }
   .btn-reset { background: #111318; color: #6b7280; border: 1px solid #374151; }
   .btn-reset:hover { color: #9ca3af; border-color: #4b5563; }
@@ -1071,15 +1113,16 @@
   <div class="header-left">
     <h1>
       <img src="/static/img/ziggymeltdownneon.png" alt="Meltdown" class="brand-logo" />
-      <span class="sub">Ice Cream Delivery · Las Vegas</span>
+      <span class="sub">Ice Cream Delivery · San Francisco</span>
     </h1>
+    <div style="font-size:11px;color:#7dd3fc;letter-spacing:.08em;text-transform:uppercase;margin-top:2px;">Durable Human-in-the-Loop</div>
   </div>
   <div class="header-right">
     <a href="https://github.com/temporal-community/ice-cream-fleet-demo" target="_blank" class="header-brand" style="text-decoration:none;">
       <img src="/static/img/temporal_logo.svg" alt="Temporal" title="Temporal — View on GitHub" style="height:40px;" />
     </a>
     <div class="header-divider"></div>
-    <a href="https://adk.dev" target="_blank" class="header-brand" style="text-decoration:none;">
+    <a id="framework-brand" href="https://adk.dev" target="_blank" class="header-brand" style="text-decoration:none;">
       <img src="/static/img/google_adk.png" alt="Google ADK" title="Google Agent Development Kit" style="height:40px;" />
       <span class="brand-name">Google ADK</span>
     </a>
@@ -1087,9 +1130,8 @@
 </header>
 
 <div class="tab-bar">
-  <button class="tab active" data-tab="agent" onclick="switchTab('agent')">Agent Disconnect <span class="tab-scenario">Tool Degradation</span></button>
-  <button class="tab" data-tab="crew" onclick="switchTab('crew')">Fleet Disconnect <span class="tab-scenario">Retries</span></button>
-  <button class="tab" data-tab="customer" onclick="switchTab('customer')">Customer Change <span class="tab-scenario">HITL</span></button>
+  <button class="tab active" data-tab="human" onclick="switchTab('human')">🧑 Human → Agent <span class="tab-scenario">Human-initiated</span></button>
+  <button class="tab" data-tab="agent" onclick="switchTab('agent')">🤖 Agent → Human <span class="tab-scenario">Agent-initiated</span></button>
   <div class="status-area">
     <div id="worker-status" class="worker-indicator online">
       <div class="worker-dot"></div>
@@ -1100,38 +1142,10 @@
 <div class="left-panel">
   <!-- Controls -->
   <div class="tab-panels">
-    <div class="tab-panel active" id="panel-agent">
+    <div class="tab-panel active" id="panel-human">
       <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
       <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
-      <select id="agent-disconnect-select" class="agent-select">
-        <option value="fleet_agent">Fleet Agent</option>
-        <option value="customer_agent">Customer Agent</option>
-      </select>
-      <button class="btn btn-disrupt" onclick="disconnectAgent()">Agent Disconnect</button>
-      <div class="btn-row">
-        <button class="btn btn-restart" onclick="reconnectAgent()">Reconnect</button>
-        <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
-      </div>
-    </div>
-    <div class="tab-panel" id="panel-crew">
-      <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
-      <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
-      <select id="crew-disconnect-select" class="crew-select">
-        <option value="driver-a">Driver A</option>
-        <option value="driver-b">Driver B</option>
-        <option value="driver-c">Driver C</option>
-        <option value="driver-d">Driver D</option>
-        <option value="driver-e">Driver E</option>
-      </select>
-      <button class="btn btn-disrupt" onclick="disconnectCrew()">Service Lost</button>
-      <div class="btn-row">
-        <button class="btn btn-restart" onclick="reconnectCrew()">Reconnect Crew</button>
-        <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
-      </div>
-    </div>
-    <div class="tab-panel" id="panel-customer">
-      <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
-      <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
+      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Operator submits a change mid-delivery — the driver holds, a human approves.</div>
       <select id="change-order" class="agent-select">
         <option value="">— no active orders —</option>
       </select>
@@ -1148,6 +1162,20 @@
         <button class="btn btn-approve" id="btn-approve" onclick="approveChange(true)" style="display:none;">Approve</button>
         <button class="btn btn-reject" id="btn-reject" onclick="approveChange(false)" style="display:none;">Reject</button>
       </div>
+    </div>
+    <div class="tab-panel" id="panel-agent">
+      <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
+      <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
+      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Drop a premium Moscone catering order. The dispatch agent calls the human <b>as a tool</b> (<code>request_human_approval</code>) before committing the fleet — the approval card appears over the map.</div>
+      <div class="btn-row">
+        <button class="btn btn-change" onclick="injectHighValueOrder()">Drop high-value order</button>
+        <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
+      </div>
+      <label style="display:flex;align-items:center;gap:7px;font-size:11px;color:#94a3b8;margin-top:8px;cursor:pointer;">
+        <input type="checkbox" id="hitl-interrupt-toggle" />
+        HITL via LangGraph <code>interrupt()</code> <span style="opacity:.7;">(default: Temporal signal)</span>
+      </label>
+      <button class="btn" style="margin-top:8px;font-size:12px;background:#11203a;color:#7dd3fc;border:1px solid #465a78;" onclick="openGraph()">🔗 View the LangGraph</button>
     </div>
   </div>
 
@@ -1216,23 +1244,77 @@
 
 <div id="map"></div>
 
-<div id="crew-disconnect-banner" class="crew-disconnect-banner">
-  <div class="banner-text"><span id="crew-banner-text">Driver Disconnected</span></div>
-  <div class="banner-sub"><span id="crew-banner-sub">Other drivers continue delivering. Temporal will retry when reconnected.</span></div>
+<!-- Pattern B — agent-initiated dispatch approval (the human as an async API) -->
+<div id="dispatch-gate-card" class="dispatch-gate-card" style="display:none;">
+  <div class="dgc-header">⚠️ Agent is requesting human approval</div>
+  <div class="dgc-body" id="dgc-body"></div>
+  <div class="dgc-actions">
+    <button class="btn btn-approve" onclick="decideDispatch(true)">Approve dispatch</button>
+    <button class="btn btn-reject" onclick="decideDispatch(false)">Reject</button>
+  </div>
+  <div class="dgc-status" id="dgc-status"></div>
 </div>
+
+<!-- LangGraph graph visualizer -->
+<div id="graph-modal" class="graph-modal" style="display:none;">
+  <div class="graph-modal-backdrop" onclick="closeGraph()"></div>
+  <div class="graph-modal-card">
+    <div class="graph-modal-header"><span>🔗 LangGraph · Dispatch Gate</span><button onclick="closeGraph()" title="Close">✕</button></div>
+    <div class="graph-modal-sub">The agent-in-the-loop graph. Each agent node runs as a durable Temporal activity.</div>
+    <div class="graph-flow">
+      <div class="gnode gnode-start">START</div>
+      <div class="garrow">↓</div>
+      <div class="gparallel">
+        <div class="gnode gnode-activity">🚚 Fleet Agent<small>activity · Gemini</small></div>
+        <div class="gnode gnode-activity">🧑 Customer Agent<small>activity · Gemini</small></div>
+      </div>
+      <div class="garrow">↓&nbsp;&nbsp;run in parallel&nbsp;&nbsp;↓</div>
+      <div class="gnode gnode-activity">🧭 Dispatch Agent<small>activity · weighs both, may call request_human_approval</small></div>
+      <div class="garrow">↓</div>
+      <div class="gnode gnode-decision">escalate to a human?</div>
+      <div class="gbranch">
+        <div class="gbranch-col">
+          <div class="glabel">yes ↓</div>
+          <div class="gnode gnode-hitl">⏸ Human Approval<small>durable Temporal signal<br/>(or LangGraph interrupt)</small></div>
+        </div>
+        <div class="gbranch-col">
+          <div class="glabel">no ↓</div>
+          <div class="gnode gnode-activity">Dispatch</div>
+        </div>
+      </div>
+      <div class="garrow">↓</div>
+      <div class="gnode gnode-end">END</div>
+    </div>
+    <div class="graph-legend">
+      <span class="lg-activity">node = Temporal activity (durable)</span>
+      <span class="lg-hitl">human-in-the-loop</span>
+    </div>
+  </div>
+</div>
+
+<!-- driver-disconnect banner removed (not part of the two demos) -->
 
 <script>
 // --- Tab switching ---
 function switchTab(tabName) {
   document.querySelectorAll('.tab-bar .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tabName}`));
+  // Swap the framework logo to match the active pattern's framework (Temporal stays).
+  const brand = document.getElementById('framework-brand');
+  if (brand && tabName === 'agent') {
+    brand.href = 'https://langchain-ai.github.io/langgraph/';
+    brand.innerHTML = '<span class="brand-name" style="font-size:20px;">🦜🔗 LangGraph</span>';
+  } else if (brand) {
+    brand.href = 'https://adk.dev';
+    brand.innerHTML = '<img src="/static/img/google_adk.png" alt="Google ADK" title="Google Agent Development Kit" style="height:40px;" /><span class="brand-name">Google ADK</span>';
+  }
 }
 
-// --- Map setup (Las Vegas Strip) ---
+// --- Map setup (downtown San Francisco) ---
 const map = L.map('map', {
   zoomControl: false,
   attributionControl: false,
-}).setView([36.1040, -115.1690], 15);
+}).setView([37.7900, -122.4050], 14);
 
 // Tile options — switch between styles
 const tileLayers = {
@@ -1397,28 +1479,11 @@ const DRIVER_COLORS = {
 };
 
 // --- Sign tooltips ---
-const HOTEL_SIGNS = {
-  'MGM Grand': '/static/img/vegassign_mgmgrand_animated.svg',
-  'Caesars': '/static/img/vegassign_caesars_animated.svg',
-  'Caesars Palace': '/static/img/vegassign_caesars_animated.svg',
-  'Mandalay Bay': '/static/img/vegassign_mandalaybay_animated.svg',
-  'Cosmopolitan': '/static/img/vegassign_cosmo_animated.svg',
-  'The Cosmopolitan': '/static/img/vegassign_cosmo_animated.svg',
-};
-const BASE_SIGN_W = 120;
-
-function vegasSign(name, sub) {
-  const signSrc = HOTEL_SIGNS[name];
-  if (signSrc) {
-    const w = Math.round(BASE_SIGN_W * mapScale());
-    return `<div style="text-align:center;">
-      <img src="${signSrc}" class="hotel-sign" style="width:${w}px;height:auto;" alt="${name}" />
-    </div>`;
-  }
-  // Fallback for unknown hotels (e.g. Cosmopolitan reroute)
-  return `<div style="text-align:center;padding:4px 10px;background:rgba(0,0,0,0.7);border:1px solid #c8a84e;border-radius:4px;">
-    <div style="color:#ffe14d;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">${name}</div>
-    ${sub ? `<div style="color:#f0d080;font-size:10px;">${sub}</div>` : ''}
+// Clean labeled markers for SF venues (no more Vegas neon signs).
+function venueLabel(name, sub) {
+  return `<div style="text-align:center;padding:4px 10px;background:rgba(11,18,32,0.85);border:1px solid rgba(0,255,255,0.4);border-radius:6px;">
+    <div style="color:#e5f6ff;font-size:13px;font-weight:700;letter-spacing:.5px;">${name}</div>
+    ${sub ? `<div style="color:#9fb4c7;font-size:10px;">${sub}</div>` : ''}
   </div>`;
 }
 
@@ -1448,12 +1513,12 @@ async function loadLocations() {
     DESTINATIONS[oid] = d;
     L.circleMarker([d.lat, d.lng], {
       radius: 7, fillColor: '#f97316', color: '#f97316', fillOpacity: 0.3, weight: 2,
-    }).addTo(map).bindTooltip(vegasSign(d.map_label, d.sub || ''), {
+    }).addTo(map).bindTooltip(venueLabel(d.map_label, d.sub || ''), {
       permanent: true, direction: 'top', className: 'map-label', offset: [0, -10],
     });
   });
 
-  // Reroute destination (Cosmopolitan) — marker shown only during customer change
+  // Reroute destination (Palace Hotel) — marker shown only during customer change
   if (data.reroute_destination) {
     _rerouteDestination = data.reroute_destination;
   }
@@ -1465,7 +1530,7 @@ function showRerouteMarker() {
   const d = _rerouteDestination;
   _rerouteMarker = L.circleMarker([d.lat, d.lng], {
     radius: 7, fillColor: '#a855f7', color: '#a855f7', fillOpacity: 0.3, weight: 2,
-  }).addTo(map).bindTooltip(vegasSign(d.label, 'Reroute'), {
+  }).addTo(map).bindTooltip(venueLabel(d.label, 'Reroute'), {
     permanent: true, direction: 'top', className: 'map-label', offset: [0, -10],
   });
 }
@@ -1486,7 +1551,6 @@ function connectWS() {
     updateOrders(state.orders);
     updateChangeOrderDropdown(state.orders);
     updateAgentEvents(state.agent_events, state.agent_health);
-    updateCrewDisconnectBanner(state.drivers);
   };
   ws.onclose = () => setTimeout(connectWS, 1000);
 }
@@ -1778,7 +1842,7 @@ async function submitCustomerChange() {
 
   let body = { order_id: orderId, change_type: changeType };
   if (changeType === 'address_change') {
-    // Always reroute to The Cosmopolitan (loaded from /api/locations)
+    // Always reroute to the Palace Hotel (loaded from /api/locations)
     const dest = _rerouteDestination;
     if (!dest) { alert('Reroute destination not loaded'); return; }
     body.new_details = `${orderId} rerouted to ${dest.hotel}`;
@@ -1786,7 +1850,7 @@ async function submitCustomerChange() {
     body.new_lng = dest.lng;
     body.new_hotel = dest.hotel;
     _pendingChangeDetails = `rerouted to ${dest.hotel}`;
-    // Show Cosmopolitan marker on the map if not already visible
+    // Show Palace Hotel marker on the map if not already visible
     showRerouteMarker();
   } else {
     body.new_details = `${orderId} cancelled by customer`;
@@ -1823,56 +1887,47 @@ async function approveChange(approved) {
   }, 3000);
 }
 
-// --- Per-driver disconnect/reconnect ---
-async function disconnectCrew() {
-  const driverId = document.getElementById('crew-disconnect-select').value;
-  const result = await api('disconnect-crew', 'POST', { driver_id: driverId });
-  console.log('Driver disconnected:', result);
+// --- Pattern B: agent-initiated dispatch approval (polls the gate the agent parked on) ---
+let _gateCurrentOrder = null;
+async function pollDispatchGate() {
+  const card = document.getElementById('dispatch-gate-card');
+  try {
+    const res = await api('pending-dispatch', 'GET');
+    const pending = (res && res.pending_dispatch) || {};
+    const ids = Object.keys(pending);
+    if (ids.length === 0) { _gateCurrentOrder = null; card.style.display = 'none'; return; }
+    const oid = ids[0], b = pending[oid];
+    _gateCurrentOrder = oid;
+    document.getElementById('dgc-body').innerHTML =
+      `<div class="dgc-order"><b>$${(b.order_value || 0).toLocaleString()}</b> · ${b.venue}</div>`
+      + `<div class="dgc-impact">${b.fleet_impact || ''}</div>`
+      + `<div class="dgc-rec">Agent recommends <b>${b.recommendation || '—'}</b></div>`;
+    card.style.display = 'block';
+  } catch (e) { /* demo not running yet — leave card hidden */ }
+}
+setInterval(pollDispatchGate, 1500);
+
+async function decideDispatch(approved) {
+  if (!_gateCurrentOrder) return;
+  const oid = _gateCurrentOrder;
+  _gateCurrentOrder = null;
+  // Clear the card immediately so the buttons always dismiss it — even if the gate
+  // workflow has already gone away (e.g. a high-value order dropped as the demo ends).
+  document.getElementById('dispatch-gate-card').style.display = 'none';
+  await api('approve-dispatch', 'POST', { order_id: oid, approved });
 }
 
-async function reconnectCrew() {
-  const driverId = document.getElementById('crew-disconnect-select').value;
-  const result = await api('reconnect-crew', 'POST', { driver_id: driverId });
-  console.log('Driver reconnected:', result);
+// --- Agent-in-the-loop: drop a high-value order on demand ---
+async function injectHighValueOrder() {
+  const useInterrupt = document.getElementById('hitl-interrupt-toggle')?.checked || false;
+  const result = await api('inject-order', 'POST', { use_interrupt: useInterrupt });
+  console.log('Injected high-value order:', result);
 }
 
-function updateCrewDisconnectBanner(crews) {
-  const banner = document.getElementById('crew-disconnect-banner');
-  const textEl = document.getElementById('crew-banner-text');
-  const subEl = document.getElementById('crew-banner-sub');
-
-  const disconnected = Object.values(crews).filter(c => c.disconnected);
-  const recovering = Object.values(crews).filter(c => c.recovering);
-
-  const driverLabel = (id) => id.replace(/^driver-(.)/, (_, l) => 'Driver-' + l.toUpperCase());
-  if (recovering.length > 0) {
-    const ids = recovering.map(c => driverLabel(c.driver_id)).join(', ');
-    banner.classList.add('active', 'recovering');
-    textEl.textContent = `Replaying — ${ids}`;
-    subEl.textContent = 'Temporal restoring workflow state from durable history...';
-  } else if (disconnected.length > 0) {
-    const ids = disconnected.map(c => driverLabel(c.driver_id)).join(', ');
-    banner.classList.add('active');
-    banner.classList.remove('recovering');
-    textEl.textContent = `${ids} Disconnected`;
-    subEl.textContent = 'Other drivers continue delivering. Temporal will retry when reconnected.';
-  } else {
-    banner.classList.remove('active', 'recovering');
-  }
-}
-
-// --- Per-agent disconnect/reconnect ---
-async function disconnectAgent() {
-  const agentName = document.getElementById('agent-disconnect-select').value;
-  const result = await api('disconnect-agent', 'POST', { agent_name: agentName });
-  console.log('Agent disconnected:', result);
-}
-
-async function reconnectAgent() {
-  const agentName = document.getElementById('agent-disconnect-select').value;
-  const result = await api('reconnect-agent', 'POST', { agent_name: agentName });
-  console.log('Agent reconnected:', result);
-}
+// --- LangGraph graph visualizer modal ---
+function openGraph() { document.getElementById('graph-modal').style.display = 'flex'; }
+function closeGraph() { document.getElementById('graph-modal').style.display = 'none'; }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeGraph(); });
 
 async function resetDemo() {
   try {
@@ -1898,10 +1953,6 @@ async function resetDemo() {
   const el = document.getElementById('worker-status');
   el.className = 'worker-indicator online';
   el.innerHTML = '<div class="worker-dot"></div><span>Service Online</span>';
-
-  // Reset crew disconnect banner
-  const crewBanner = document.getElementById('crew-disconnect-banner');
-  crewBanner.classList.remove('active', 'recovering');
 
   // Reset agent boxes
   AGENT_IDS.forEach(agentId => {
