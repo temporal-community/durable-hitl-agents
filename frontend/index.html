@@ -1162,6 +1162,7 @@
         <button class="btn btn-approve" id="btn-approve" onclick="approveChange(true)" style="display:none;">Approve</button>
         <button class="btn btn-reject" id="btn-reject" onclick="approveChange(false)" style="display:none;">Reject</button>
       </div>
+      <button class="btn" style="margin-top:8px;font-size:12px;background:#1a2342;color:#8ea2ff;border:1px solid #465a78;" onclick="openAdk()">🧩 View the ADK agents</button>
     </div>
     <div class="tab-panel" id="panel-agent">
       <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
@@ -1255,6 +1256,41 @@
   <div class="dgc-status" id="dgc-status"></div>
 </div>
 
+<!-- ADK agent-team visualizer -->
+<div id="adk-modal" class="graph-modal" style="display:none;">
+  <div class="graph-modal-backdrop" onclick="closeAdk()"></div>
+  <div class="graph-modal-card">
+    <div class="graph-modal-header"><span>🧩 Google ADK · Dispatch Team</span><button onclick="closeAdk()" title="Close">✕</button></div>
+    <div class="graph-modal-sub">The human-in-the-loop pattern's multi-agent assignment. Each agent's LLM call runs as a Temporal activity.</div>
+    <div class="graph-flow">
+      <div class="gnode gnode-start">new order</div>
+      <div class="garrow">↓</div>
+      <div class="gparallel">
+        <div class="gnode gnode-activity">🚚 Fleet Agent<small>activity · Gemini · fleet status, routes</small></div>
+        <div class="gnode gnode-activity">🧑 Customer Agent<small>activity · Gemini · priorities, search</small></div>
+      </div>
+      <div class="garrow">↓&nbsp;&nbsp;run in parallel&nbsp;&nbsp;↓</div>
+      <div class="gnode gnode-activity">🧭 Dispatch Agent<small>activity · weighs both, assigns a driver</small></div>
+      <div class="garrow">↓</div>
+      <div class="gnode gnode-activity">driver assigned · en route</div>
+      <div class="garrow" style="margin-top:8px;">— then, mid-delivery —</div>
+      <div class="gnode gnode-hitl">📝 Customer requests a change<small>human-initiated · operator submits it → signals the workflow</small></div>
+      <div class="garrow">↓</div>
+      <div class="gnode gnode-hitl">⏸ HITL starts — driver PAUSES (holds at venue)<small>waits on a durable Temporal signal</small></div>
+      <div class="garrow">↓</div>
+      <div class="gnode gnode-hitl">👤 Human approves / rejects<small>→ reroute · cancel · release</small></div>
+      <div class="garrow">↓</div>
+      <div class="gnode gnode-activity">🚚 Driver resumes<small>reroutes, then finishes or cancels the delivery</small></div>
+      <div class="garrow">↓</div>
+      <div class="gnode gnode-end">END</div>
+    </div>
+    <div class="graph-legend">
+      <span class="lg-activity">node = Temporal activity (durable)</span>
+      <span class="lg-hitl">human-in-the-loop</span>
+    </div>
+  </div>
+</div>
+
 <!-- LangGraph graph visualizer -->
 <div id="graph-modal" class="graph-modal" style="display:none;">
   <div class="graph-modal-backdrop" onclick="closeGraph()"></div>
@@ -1274,8 +1310,8 @@
       <div class="gnode gnode-decision">escalate to a human?</div>
       <div class="gbranch">
         <div class="gbranch-col">
-          <div class="glabel">yes ↓</div>
-          <div class="gnode gnode-hitl">⏸ Human Approval<small>durable Temporal signal<br/>(or LangGraph interrupt)</small></div>
+          <div class="glabel">yes — agent calls the human ↓</div>
+          <div class="gnode gnode-hitl">⏸ HITL starts — workflow PAUSES<small>agent-initiated · waits on a durable Temporal signal (or LangGraph interrupt) until a human approves / rejects</small></div>
         </div>
         <div class="gbranch-col">
           <div class="glabel">no ↓</div>
@@ -1527,7 +1563,9 @@ async function loadLocations() {
     L.circleMarker([d.lat, d.lng], {
       radius: 7, fillColor: '#f97316', color: '#f97316', fillOpacity: 0.3, weight: 2,
     }).addTo(map).bindTooltip(venueLabel(d.map_label, d.sub || ''), {
-      permanent: true, direction: 'top', className: 'map-label', offset: [0, -10],
+      permanent: true, className: 'map-label',
+      direction: d.map_label === 'Chinatown' ? 'left' : 'top',
+      offset: d.map_label === 'Chinatown' ? [-6, 0] : [0, -10],
     });
   });
 
@@ -1937,10 +1975,12 @@ async function injectHighValueOrder() {
   console.log('Injected high-value order:', result);
 }
 
-// --- LangGraph graph visualizer modal ---
+// --- Graph visualizer modals (LangGraph / ADK) ---
 function openGraph() { document.getElementById('graph-modal').style.display = 'flex'; }
 function closeGraph() { document.getElementById('graph-modal').style.display = 'none'; }
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeGraph(); });
+function openAdk() { document.getElementById('adk-modal').style.display = 'flex'; }
+function closeAdk() { document.getElementById('adk-modal').style.display = 'none'; }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeGraph(); closeAdk(); } });
 
 async function resetDemo() {
   try {
