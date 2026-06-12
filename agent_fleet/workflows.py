@@ -856,6 +856,7 @@ class MeltdownDemoWorkflow:
         self._gate_handles: dict = {}
         self._pending_dispatch: dict[str, dict] = {}  # order_id -> brief (awaiting human)
         self._gate_use_interrupt: bool = False  # HITL impl for the gate (set from input)
+        self._dispatch_mode: str = "adk"  # which framework dispatches orders: "adk" | "langgraph"
 
     # --- Signals ---
 
@@ -909,6 +910,12 @@ class MeltdownDemoWorkflow:
     async def new_order(self, order: OrderAssignmentResult) -> None:
         """Signaled by OrderGenerationWorkflow with each new order to assign."""
         self._pending_new_orders.append(order)
+
+    @workflow.signal
+    async def set_dispatch_mode(self, mode: str) -> None:
+        """UI tab selects which framework dispatches orders: 'adk' or 'langgraph'."""
+        self._dispatch_mode = mode
+        workflow.logger.info(f"Dispatch mode → {mode}")
 
     @workflow.signal
     async def dispatch_gate_awaiting(self, brief: dict) -> None:
@@ -1268,10 +1275,10 @@ class MeltdownDemoWorkflow:
         # Build driver snapshots from workflow state — passed to activity as input
         driver_snapshots = self._build_driver_snapshots()
 
-        # Agent-initiated use case (Pattern B): high-value orders bypass ADK entirely and
-        # route to the LangGraph dispatch gate. ADK runs only for the human-initiated
-        # (routine) path. Mock mode never gates.
-        if order.order_value >= GATE_REVIEW_VALUE:
+        # The active UI tab sets the dispatch framework: in "langgraph" mode EVERY order
+        # routes through the LangGraph dispatch gate (the agents assess + the dispatch agent
+        # decides whether to escalate to a human); "adk" mode uses the ADK assignment path.
+        if self._dispatch_mode == "langgraph":
             self._spawn_gate(order, self._least_loaded_driver(), False, onum)
             return
 

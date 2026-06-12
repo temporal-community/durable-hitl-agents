@@ -458,6 +458,23 @@ async def inject_high_value_order(body: InjectOrderRequest | None = None):
     }
 
 
+class DispatchModeRequest(BaseModel):
+    mode: str = "adk"  # "adk" (Human → Agent tab) or "langgraph" (Agent → Human tab)
+
+
+@app.post("/api/dispatch-mode")
+async def set_dispatch_mode(body: DispatchModeRequest):
+    """The active UI tab sets which framework dispatches all orders."""
+    if _temporal_client is None:
+        return {"error": "Temporal client not connected"}
+    try:
+        handle = _temporal_client.get_workflow_handle("meltdown-demo")
+        await handle.signal(MeltdownDemoWorkflow.set_dispatch_mode, body.mode)
+    except RPCError as e:
+        return {"error": f"Failed to signal workflow: {e}"}
+    return {"status": "dispatch_mode_set", "mode": body.mode}
+
+
 # --- Demo config endpoints ---
 
 

@@ -1167,7 +1167,7 @@
     <div class="tab-panel" id="panel-agent">
       <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
       <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
-      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Drop a premium Moscone catering order. The dispatch agent calls the human <b>as a tool</b> (<code>request_human_approval</code>) before committing the fleet — the approval card appears over the map.</div>
+      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Dispatch here runs through the <b>LangGraph</b> gate. Drop a premium Moscone catering order and the dispatch agent calls the human <b>as a tool</b> (<code>request_human_approval</code>) before committing the fleet — the approval card appears over the map.</div>
       <div class="btn-row">
         <button class="btn btn-change" onclick="injectHighValueOrder()">Drop high-value order</button>
         <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
@@ -1335,6 +1335,8 @@
 function switchTab(tabName) {
   document.querySelectorAll('.tab-bar .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tabName}`));
+  // The active tab selects which framework dispatches all orders.
+  api('dispatch-mode', 'POST', { mode: tabName === 'agent' ? 'langgraph' : 'adk' });
   // Swap the framework logo to match the active pattern's framework (Temporal stays).
   const brand = document.getElementById('framework-brand');
   if (brand && tabName === 'agent') {
@@ -1885,6 +1887,9 @@ async function api(endpoint, method = 'POST', body = null) {
 async function startDemo() {
   const result = await api('start');
   console.log('Started:', result);
+  // Sync the dispatch framework to whichever tab is active.
+  const mode = document.querySelector('.tab-bar .tab.active')?.dataset.tab === 'agent' ? 'langgraph' : 'adk';
+  await api('dispatch-mode', 'POST', { mode });
 }
 
 async function submitCustomerChange() {
