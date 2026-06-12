@@ -1083,9 +1083,18 @@ class MeltdownDemoWorkflow:
             except Exception:
                 pass
 
-        # Cancel any in-flight dispatch gates so a parked approval can't hang shutdown,
-        # and clear pending briefs so the UI approval card doesn't get stuck on a
-        # gate that no longer exists (e.g. a high-value order dropped as the demo ends).
+        # Reject-resolve any gate child parked on a human so it ends
+        # WorkflowExecutionCompleted with a result ("rejected — order held") instead of
+        # being terminated "by parent close policy" when this workflow closes. Signal
+        # BEFORE cancelling the awaiting tasks: the reject lands in each gate's history
+        # first, so the gate processes it and completes before any cancel takes effect.
+        # (This is the graceful path — a demo run that finishes on its own. Reset/Start
+        # hard-terminate the parent, so those still cascade-terminate parked gates.)
+        for order_id, handle in list(self._gate_handles.items()):
+            try:
+                await handle.signal(DispatchGateWorkflow.approve, "reject")
+            except Exception:
+                pass
         for task in self._gate_tasks:
             task.cancel()
         self._pending_dispatch.clear()

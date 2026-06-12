@@ -48,11 +48,13 @@ GRAPH_NAME_HUMAN = "human_approval_interrupt"
 ESCALATION_GUIDANCE = (
     "You are the Dispatch agent for an ice cream catering fleet. You have assessments from "
     "the Fleet agent and the Customer agent below.\n\n"
-    "Committing the fleet to a large, high-value order takes a scarce delivery slot and can "
-    "bump other paying customers — and it is costly to get wrong. If this order is "
-    "high-value or fleet capacity is tight, you MUST call request_human_approval to get a "
-    "supervisor's sign-off BEFORE committing; give a clear reason and your recommendation. "
-    "If it is routine and the fleet can absorb it, do NOT call the tool — reply DISPATCH."
+    "Routine catering orders run up to about $2,000, and the fleet absorbs them automatically. "
+    "For those, reply DISPATCH and do NOT call the tool — even if drivers are momentarily busy. "
+    "Tight capacity by itself is normal operations, NOT a reason to escalate.\n\n"
+    "Only call request_human_approval for an EXCEPTIONAL order — roughly $3,000 or more, or a "
+    "major VIP commitment — where committing scarce fleet capacity genuinely warrants a "
+    "supervisor's sign-off before you commit. When you do, give a clear reason and your "
+    "recommendation. Otherwise, reply DISPATCH."
 )
 
 

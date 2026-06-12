@@ -1954,8 +1954,9 @@ async function pollDispatchGate() {
     if (ids.length === 0) { _gateCurrentOrder = null; card.style.display = 'none'; return; }
     const oid = ids[0], b = pending[oid];
     _gateCurrentOrder = oid;
+    const onum = (b.order_id || oid).replace(/^order-/, '#');
     document.getElementById('dgc-body').innerHTML =
-      `<div class="dgc-order"><b>$${(b.order_value || 0).toLocaleString()}</b> · ${b.venue}</div>`
+      `<div class="dgc-order"><b>Order ${onum}</b> · $${(b.order_value || 0).toLocaleString()} · ${b.venue}</div>`
       + `<div class="dgc-impact">${b.fleet_impact || ''}</div>`
       + `<div class="dgc-rec">Agent recommends <b>${b.recommendation || '—'}</b></div>`;
     card.style.display = 'block';
