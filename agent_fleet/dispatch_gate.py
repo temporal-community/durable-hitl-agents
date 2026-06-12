@@ -41,6 +41,9 @@ with workflow.unsafe.imports_passed_through():
 
 GRAPH_NAME = "dispatch_gate"
 GRAPH_NAME_INTERRUPT = "dispatch_gate_interrupt"  # interrupt-mode variant (has the interrupt node)
+# Demo path only: a 1-node interrupt graph for the HITL pause AFTER the multi-agent
+# assessment has already run inline in the parent (so the agent team is not re-invoked).
+GRAPH_NAME_HUMAN = "human_approval_interrupt"
 
 ESCALATION_GUIDANCE = (
     "You are the Dispatch agent for an ice cream catering fleet. You have assessments from "
@@ -191,9 +194,25 @@ def build_gate_graph(use_interrupt: bool = False) -> StateGraph:
     """
     g = StateGraph(GateState)
     activity = {"execute_in": "activity", "start_to_close_timeout": timedelta(seconds=60)}
-    g.add_node("fleet_agent", fleet_agent, metadata=activity)
-    g.add_node("customer_agent", customer_agent, metadata=activity)
-    g.add_node("dispatch_agent", dispatch_agent, metadata=activity)
+    # Per-node `summary` surfaces a human-readable label on each scheduled activity in
+    # the Temporal UI (the integration passes `summary` through to execute_activity).
+    # Static — set at graph-build time, so no per-order prefix like the ADK side — but it
+    # names the agent on every call instead of the bare `dispatch_gate.fleet_agent` type.
+    g.add_node(
+        "fleet_agent",
+        fleet_agent,
+        metadata={**activity, "summary": "Fleet Agent — assess fleet capacity"},
+    )
+    g.add_node(
+        "customer_agent",
+        customer_agent,
+        metadata={**activity, "summary": "Customer Agent — assess priority & deadline"},
+    )
+    g.add_node(
+        "dispatch_agent",
+        dispatch_agent,
+        metadata={**activity, "summary": "Dispatch Agent — weigh both, decide whether to escalate"},
+    )
 
     # Fan out to the two assessor agents, then converge on dispatch (multi-agent).
     g.add_edge(START, "fleet_agent")
@@ -203,7 +222,9 @@ def build_gate_graph(use_interrupt: bool = False) -> StateGraph:
 
     if use_interrupt:
         g.add_node("request_human", request_human, metadata={"execute_in": "workflow"})
-        g.add_node("finalize", finalize, metadata=activity)
+        g.add_node(
+            "finalize", finalize, metadata={**activity, "summary": "Finalize dispatch decision"}
+        )
         g.add_conditional_edges(
             "dispatch_agent", _route, {"request_human": "request_human", "finalize": "finalize"}
         )
@@ -211,6 +232,31 @@ def build_gate_graph(use_interrupt: bool = False) -> StateGraph:
         g.add_edge("finalize", END)
     else:
         g.add_edge("dispatch_agent", END)
+    return g
+
+
+class HumanGateState(TypedDict, total=False):
+    brief: dict[str, Any]
+    decision: str
+    approved: bool
+
+
+async def human_pause(state: HumanGateState) -> dict:
+    """HITL-only interrupt node: suspend on the pre-built brief, resume via Command."""
+    decision = interrupt(state["brief"])
+    return {"decision": decision, "approved": decision != "reject"}
+
+
+def build_human_graph() -> StateGraph:
+    """A single interrupt node for the demo's HITL-only gate child (interrupt toggle).
+
+    The multi-agent assessment has already run inline in the parent workflow, so this
+    graph is purely the durable human endpoint — the agent team is NOT re-invoked here.
+    """
+    g = StateGraph(HumanGateState)
+    g.add_node("request_human", human_pause, metadata={"execute_in": "workflow"})
+    g.add_edge(START, "request_human")
+    g.add_edge("request_human", END)
     return g
 
 
@@ -227,6 +273,13 @@ class DispatchGateWorkflow:
 
     @workflow.run
     async def run(self, inp: DispatchGateInput) -> DispatchGateResult:
+        # Demo path: the multi-agent assessment already ran inline in the parent and
+        # the agent escalated. This child performs the durable HITL pause only — so
+        # gate-* children equal human approvals, not order count.
+        if inp.brief is not None:
+            return await self._run_hitl_only(inp)
+
+        # Standalone path (spikes): run the full multi-agent graph + HITL in one workflow.
         graph_name = GRAPH_NAME_INTERRUPT if inp.use_interrupt else GRAPH_NAME
         compiled = graph(graph_name).compile(checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": workflow.info().workflow_id}}
@@ -249,6 +302,51 @@ class DispatchGateWorkflow:
         if inp.use_interrupt:
             return await self._run_interrupt(compiled, config, inp, state)
         return await self._run_temporal(compiled, config, inp, state)
+
+    async def _run_hitl_only(self, inp: DispatchGateInput) -> DispatchGateResult:
+        """Demo gate child: the agent already escalated inline; park on the human.
+
+        The pause primitive matches the toggle — a Temporal `approve` signal (default)
+        or a LangGraph `interrupt()` (back-pocket). Either way the human is a durable,
+        async endpoint the workflow awaits, not a synchronous call.
+        """
+        brief = inp.brief or {}
+        self._brief = brief
+        venue = brief.get("venue", "")
+        order_value = brief.get("order_value", 0)
+        rec = brief.get("recommendation", "—")
+        await self._notify_parent_awaiting()
+        mode = "interrupt" if inp.use_interrupt else "signal"
+        workflow.set_current_details(
+            f"⏸ **Awaiting human approval** ({mode}) — {venue} (${order_value:,})\n\n"
+            f"Agent recommends **{rec}**. Resolves on the `approve` signal."
+        )
+        if inp.use_interrupt:
+            decision = await self._human_via_interrupt(inp)
+        else:
+            decision = await self._await_human(inp.escalation_seconds)
+        self._brief = None
+        approved = decision != "reject"
+        outcome = "✓ **Approved & dispatched**" if approved else "✕ **Rejected — order held**"
+        workflow.set_current_details(f"{outcome} — {venue} (${order_value:,})")
+        return DispatchGateResult(
+            order_id=inp.order_id, approved=approved, decision=decision, timed_out=self._timed_out
+        )
+
+    async def _human_via_interrupt(self, inp: DispatchGateInput) -> str:
+        """Interrupt-toggle HITL for the demo child: drive the 1-node interrupt graph.
+
+        The agent team is NOT re-run — this graph only carries the brief into a
+        LangGraph `interrupt()` and resumes from the `approve` signal via Command.
+        """
+        compiled = graph(GRAPH_NAME_HUMAN).compile(checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": workflow.info().workflow_id}}
+        result = await compiled.ainvoke({"brief": inp.brief}, config=config)
+        decision = "approve"
+        while result.get("__interrupt__"):
+            decision = await self._await_human(inp.escalation_seconds)
+            result = await compiled.ainvoke(Command(resume=decision), config=config)
+        return str(result.get("decision", decision))
 
     async def _run_temporal(self, compiled, config, inp, state) -> DispatchGateResult:
         """Default: the agent's tool call → the WORKFLOW does Temporal-signal HITL."""

@@ -379,19 +379,29 @@ class OrderAssignmentResult:
 
 @dataclass
 class DispatchGateInput:
-    """Input to DispatchGateWorkflow (Pattern B: the agent calls the human)."""
+    """Input to DispatchGateWorkflow (Pattern B: the agent calls the human).
+
+    Two shapes:
+    - Demo path: pass `order_id` + a pre-built `brief` (the multi-agent assessment
+      already ran inline in the parent). The gate child does the HITL pause only.
+    - Standalone path (spikes): pass the order/fleet fields and leave `brief=None`;
+      the workflow runs the full multi-agent graph + HITL in one workflow.
+    """
 
     order_id: str
-    venue: str
-    order_value: int
-    servings: int
-    deadline_minutes: int
-    proposed_driver_id: str
-    drivers_available: int
-    drivers_total: int
-    pending_orders: int
+    venue: str = ""
+    order_value: int = 0
+    servings: int = 0
+    deadline_minutes: int = 0
+    proposed_driver_id: str = ""
+    drivers_available: int = 0
+    drivers_total: int = 0
+    pending_orders: int = 0
     escalation_seconds: int = 3600
     use_interrupt: bool = False  # False=Temporal-signal HITL (default); True=LangGraph interrupt
+    # Demo path: pre-built decision brief. When set, the child skips assessment and
+    # only performs the human-in-the-loop pause (gate-* children == approvals).
+    brief: dict | None = None
 
 
 @dataclass

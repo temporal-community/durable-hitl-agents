@@ -20,22 +20,27 @@ the point that the durable-HITL pattern is framework-agnostic.
 | "The Human…" | …calls the agent | …gets called by the agent |
 | Framework | **Google ADK** (`temporalio[google-adk]`) | **LangGraph** (`temporalio.contrib.langgraph`) |
 | Who initiates | An **operator**, externally, mid-delivery | The **agent**, when it hits a decision it shouldn't make alone |
-| Triggers on | **Routine** orders (every auto-generated order) | A **high-value** order (`order_value >= GATE_REVIEW_VALUE` = $2,000), injected on demand |
+| Triggers on | Every order, while the **ADK tab** is active | Every order, while the **LangGraph tab** is active; the agent escalates only genuinely high-value ones |
 | Agents involved | Fleet + Customer (parallel) → Dispatch (sequential) | Fleet + Customer (parallel) → Dispatch (sequential) — a separate LangGraph team |
 | The HITL gate lives in | the **workflow**, not any agent tool | the **workflow** (default), via the agent's tool call |
 | Durable primitive | signal → `wait_condition` hold → resolve | signal → `wait_condition` hold → resolve (timeout → backup approver) |
 
-**The key routing fact:** routine and high-value orders take *different* paths.
+**The key routing fact:** the **active UI tab** picks the dispatch framework for
+*all* orders — `set_dispatch_mode("adk" | "langgraph")` sets `_dispatch_mode`, and
+`_assign_order` routes on it.
 
-- **Routine orders → ADK.** The ADK multi-agent pipeline reasons about every
-  routine order and assigns it to a driver.
-- **High-value orders → LangGraph gate, bypassing ADK entirely.** When
-  `order_value >= GATE_REVIEW_VALUE`, `_assign_order` returns early into
-  `_spawn_gate` *before* ADK ever runs. The LangGraph dispatch gate — its own
-  multi-agent team — handles that order. ADK never sees it.
+- **ADK tab → ADK.** Every order runs `_run_adk_assignment()` inline in the parent
+  workflow; the ADK multi-agent pipeline reasons about it and assigns it to the
+  least-loaded driver. No gate.
+- **LangGraph tab → inline LangGraph assessment.** Every order runs
+  `_run_langgraph_assignment(order, driver_id, onum)` — the multi-agent LangGraph
+  team runs *inline in the parent workflow*. If the Dispatch agent dispatches, the
+  order commits directly; only when it escalates does a gate child spin up for the
+  human pause.
 
-This split is deliberate: each framework owns one use case, on the same Temporal
-runtime, with the same durable-signal HITL primitive underneath both.
+This split is deliberate: each framework dispatches all orders while its tab is
+active, on the same Temporal runtime, with the same durable-signal HITL primitive
+underneath both.
 
 The disconnect/recovery scenarios (agent disconnect, driver disconnect, tool
 degradation) are **dormant code**, not demo features — the UI no longer surfaces
@@ -117,8 +122,9 @@ This is a feature — it catches bugs that would otherwise silently corrupt stat
 
 **`MeltdownDemoWorkflow`** is the brain. It owns the fleet state — driver
 positions, order assignments, disconnect/reconnect status. It routes each new
-order: **routine → ADK inline** (`_run_adk_assignment()` in live mode), or
-**high-value → the LangGraph dispatch gate** (`_spawn_gate`). It builds
+order by the active tab's `_dispatch_mode`: **ADK tab → ADK inline**
+(`_run_adk_assignment()`), or **LangGraph tab → inline LangGraph assessment**
+(`_run_langgraph_assignment()`, which spawns a gate child only on escalation). It builds
 `DriverSnapshot`s from its own state, applies the capacity guardrail and
 least-loaded balancing, and handles customer changes. It never does delivery
 work directly — it delegates to child workflows.
@@ -135,16 +141,17 @@ on `update_pending` the driver navigates to the venue but holds before deliverin
 get their own slot.
 
 **`OrderGenerationWorkflow`** is a child workflow that generates orders on a
-timer and signals the parent with each new order. The first 3 orders fire in a
-quick burst (2s apart) to get multiple drivers on the road, then it settles into
-a normal cadence (±30% jitter around a 10s base). Auto-generated orders stay
-*below* `GATE_REVIEW_VALUE`, so they never trip Pattern B — only the deliberately
-injected premium order does.
+timer and signals the parent with each new order. The first
+`WARMUP_BURST_ORDERS` = 5 orders fire in a quick burst (`WARMUP_BURST_SECONDS` =
+2s apart) to get multiple drivers on the road, then it settles into a normal
+cadence (±30% jitter around a 12s base — `ORDER_INTERVAL_SECONDS`, min 5s).
+Auto-generated orders top out around $1,950 (servings ≤150 × ≤$13), so the agent
+never escalates them — only the deliberately injected premium order does.
 
-**`DispatchGateWorkflow`** is Pattern B, one instance per high-value order
-(`id=gate-<order_id>`). It runs concurrently with the rest of the fleet — the
-fleet keeps moving while the agent (and possibly a human) decides. Covered in
-detail below.
+**`DispatchGateWorkflow`** is Pattern B's HITL gate, one instance per **escalated**
+order — i.e. per human approval, not per order — (`id=gate-<order_id>`). It runs
+concurrently with the rest of the fleet — the fleet keeps moving while a human
+decides. Covered in detail below.
 
 The workflows connect through signals in both directions:
 - **Parent → child:** `add_order`, `update_pending` (HITL hold), `resolve_update`
@@ -238,26 +245,35 @@ their assessment; this only rebalances the final destination.
 
 ## Pattern B — Agent-in-the-loop (LangGraph dispatch gate)
 
-**The agent calls the human.** A high-value order bypasses ADK and routes to a
-per-order `DispatchGateWorkflow`. Inside it runs a **multi-agent LangGraph team**
-that mirrors the ADK side, and the Dispatch agent decides for itself whether to
-escalate to a human.
+**The agent calls the human.** While the LangGraph tab is active, every order runs
+a **multi-agent LangGraph team** that mirrors the ADK side — but *inline in the
+parent workflow*, not in a child. The Dispatch agent decides for itself whether to
+escalate to a human; only then does a gate child spin up for the HITL pause.
 
 ### Routing
 
-In `MeltdownDemoWorkflow._assign_order`:
+In `MeltdownDemoWorkflow._assign_order`, the LangGraph branch runs the assessment
+as a concurrent asyncio task (appended to `self._gate_tasks`) so the order loop and
+fleet keep moving:
 
 ```python
-# High-value orders bypass ADK entirely and route to the LangGraph gate.
-if order.order_value >= GATE_REVIEW_VALUE:
-    self._spawn_gate(order, self._least_loaded_driver(), False, onum)
+if self._dispatch_mode == "langgraph":
+    self._gate_tasks.append(
+        asyncio.create_task(
+            self._run_langgraph_assignment(order, self._least_loaded_driver(), onum)
+        )
+    )
     return
-# ...otherwise, routine: run ADK inline.
 ```
 
-`GATE_REVIEW_VALUE` is $2,000. Routine auto-generated orders stay under it; the
-gate fires only on the deliberately injected premium Moscone order
-(`POST /api/inject-order`).
+`_run_langgraph_assignment` compiles `graph(GRAPH_NAME)` and `ainvoke`s it
+in-workflow — the Fleet ∥ Customer → Dispatch nodes execute as Temporal activities
+recorded in the **parent's** history. Not escalated → `_commit_assignment(order,
+driver_id, False, onum)` directly. Escalated → `brief = _build_brief(result,
+result.get("tool_args", {}))` then `_run_gate(order, driver_id, brief, onum)`, which
+starts the `gate-<order_id>` child. So `gate-*` children equal human approvals, not
+order count. Auto-generated orders top out around $1,950, so the agent escalates
+only the deliberately injected premium Moscone order (`POST /api/inject-order`).
 
 ### The multi-agent gate graph
 
@@ -279,21 +295,24 @@ committing scarce fleet capacity.
 
 ### Two HITL implementations — default is the Temporal signal
 
-The gate has two HITL implementations, chosen per-order via
+The escalated order's gate child runs `_run_hitl_only` (the assessment already ran
+inline upstream, so the child gets the pre-built `brief` and performs the
+human-in-the-loop pause only). It has two HITL implementations, chosen per-order via
 `DispatchGateInput.use_interrupt` (wired from `config.INTERRUPT_MODE`, set by the
 `HITL_MODE` env var, default `"temporal"`):
 
-- **Temporal-signal (default, `HITL_MODE=temporal`):** the Dispatch agent's
-  `request_human_approval` tool call surfaces an `escalate` flag + a brief; the
-  LangGraph graph **ends there**, and the **workflow** performs the HITL. It
-  signals the parent (`dispatch_gate_awaiting`), then parks on `wait_condition`
-  for the human decision (arriving via the `approve` signal), with a timeout
-  (`GATE_ESCALATION_SECONDS`, 3600s) that escalates to a `backup` approver tier.
-  The human decision is a durable Temporal signal — **no LangGraph interrupt
+- **Temporal-signal (default, `HITL_MODE=temporal`):** `_await_human` performs the
+  HITL. The gate signals the parent (`dispatch_gate_awaiting`), then parks on
+  `wait_condition` for the human decision (arriving via the `approve` signal), with
+  a timeout (`GATE_ESCALATION_SECONDS`, 3600s) that escalates to a `backup` approver
+  tier. The human decision is a durable Temporal signal — **no LangGraph interrupt
   involved.** This is the version the talk leads with.
-- **Interrupt (back-pocket toggle, `HITL_MODE=interrupt`):** a workflow-resident
-  node calls LangGraph `interrupt(brief)` to park the workflow; resume via
-  `Command(resume=...)`. Same durability, LangGraph's own mechanism.
+- **Interrupt (back-pocket toggle, `HITL_MODE=interrupt`):** `_human_via_interrupt`
+  compiles a dedicated 1-node interrupt graph — `build_human_graph()` /
+  `GRAPH_NAME_HUMAN = "human_approval_interrupt"` — whose only node calls LangGraph
+  `interrupt(brief)` to park the workflow; resume via `Command(resume=...)`. The
+  agent team is **not** re-invoked for the pause — this graph just carries the
+  pre-built brief into the interrupt. Same durability, LangGraph's own mechanism.
 
 On resume: approve → `_commit_assignment` (dispatch to the proposed driver);
 reject → `_reject_order` (cancel the order, preserve fleet capacity). Gate
@@ -408,7 +427,7 @@ server runs in its own process.
 
 | Queue | Worker | What it runs |
 |---|---|---|
-| `meltdown-workflows` | Workflows + minimal local activities | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow`, `DispatchGateWorkflow`; `publish_agent_event` / `publish_agent_events_batch` (local activities); the Pattern B gate's node activities (Fleet/Customer/Dispatch Gemini calls, via `LangGraphPlugin`) |
+| `meltdown-workflows` | Workflows + minimal local activities | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow`, `DispatchGateWorkflow`; `publish_agent_event` / `publish_agent_events_batch` (local activities); the Pattern B node activities (Fleet/Customer/Dispatch Gemini calls, via `LangGraphPlugin`) — these run for the assessment graph **inline in `MeltdownDemoWorkflow`** as well as in the gate child. `LangGraphPlugin` registers **three** graphs: `GRAPH_NAME` (assessment), `GRAPH_NAME_HUMAN` (demo HITL-only interrupt pause), `GRAPH_NAME_INTERRUPT` (full assess+interrupt for the spike path) |
 | `meltdown-delivery` | Delivery | `generate_order`, `navigate_to`, `pickup_orders`, `deliver_order`, `execute_customer_change`, `get_route_polyline`, `get_fleet_status`, `get_order_priorities`, `set_driver_idle`, `set_warmup_hidden`, `sync_driver_position` (max 20 concurrent) |
 | `meltdown-agents` | ADK/LLM activities | `register_assignment`, `tool_get_fleet_status`, `tool_get_order_priorities`, `tool_get_route_info`, plus the ADK `invoke_model` activity + `google_search` grounding (max 5 concurrent) |
 
@@ -425,9 +444,12 @@ delivery at 20.
 - `GoogleAdkPlugin` is on **both** the workflow worker (sandbox passthroughs for
   `google.adk` / `google.genai`, deterministic runtime for replay) and the agents
   worker (hosts the `invoke_model` activity that calls Gemini for Pattern A).
-- `LangGraphPlugin(graphs={GRAPH_NAME: build_gate_graph(use_interrupt=INTERRUPT_MODE)})`
-  is on the **workflow** worker — it runs the Pattern B dispatch-gate graph, and
-  its node activities execute there.
+- `LangGraphPlugin(graphs={...})` is on the **workflow** worker, registering three
+  graphs — `GRAPH_NAME: build_gate_graph(use_interrupt=False)`,
+  `GRAPH_NAME_HUMAN: build_human_graph()`, and
+  `GRAPH_NAME_INTERRUPT: build_gate_graph(use_interrupt=True)`. It runs the Pattern B
+  graphs (assessment inline in `MeltdownDemoWorkflow`, plus the gate child's pause),
+  and their node activities execute there.
 
 `TemporalModel` uses `ActivityConfig(task_queue=AGENTS_QUEUE)` to route Pattern
 A's LLM calls from the workflow to the agents queue.

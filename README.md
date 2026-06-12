@@ -36,7 +36,7 @@ async def resolve_update(self, inp):   # the human's decision resumes the driver
 
 ### Pattern B — The Agent Calls the Human (LangGraph)
 
-A high-value order routes to a multi-agent LangGraph gate; the dispatch agent decides — **by calling a tool** — that it needs a human, and the workflow turns that human into a durable signal that **survives a worker crash**. *Agent-initiated approval gate with timeout and escalation.*
+On the LangGraph tab, a multi-agent team assesses every order inline; for a high-value order the dispatch agent decides — **by calling a tool** — that it needs a human, and the workflow turns that human into a durable signal that **survives a worker crash**. *Agent-initiated approval gate with timeout and escalation.*
 
 ```python
 # dispatch_gate.py — the agent decides, by calling a tool, that it needs a human
@@ -83,9 +83,9 @@ Built with **Google ADK** (multi-agent reasoning for Pattern A), **LangGraph** v
 | Pattern | "The Human..." | Built on | What Happens | Durable primitive |
 |---------|----------------|----------|--------------|-------------------|
 | **A — Human-in-the-loop** | ...calls the agent | **Google ADK** (multi-agent) | An operator submits a customer change (address change / cancel) mid-delivery. The change is **operator-initiated** — the gate lives in the workflow, not in any LLM tool. The driver navigates to the venue but holds before delivering (`awaiting_update`). A human approves or rejects: approve cancel → delivery skipped; approve reroute → driver navigates to Oracle Park; reject → deliver normally. | Signal → `wait_condition` hold → resolve (two `wait_condition`s: parent waits for human, child waits for parent) |
-| **B — Agent-in-the-loop** | ...gets called by the agent | **LangGraph** (`temporalio.contrib.langgraph`) | A high-value order bypasses ADK and routes to a per-order `DispatchGateWorkflow`. A **multi-agent** LangGraph team (Fleet + Customer assess in parallel → Dispatch decides) — each node a real Gemini call run as a Temporal **activity** — decides whether to call `request_human_approval`. By default the tool call surfaces an escalate flag + brief and the **workflow** does the HITL via a durable Temporal **signal** + `wait_condition` (timeout escalates to a backup approver). LangGraph `interrupt()` is an optional back-pocket toggle (`HITL_MODE=interrupt`). Survives worker death. | The human is just another tool the agent calls — but a durable, async one. On Temporal, that tool call is a signal. |
+| **B — Agent-in-the-loop** | ...gets called by the agent | **LangGraph** (`temporalio.contrib.langgraph`) | On the LangGraph tab, **every** order runs a **multi-agent** LangGraph team inline in the parent workflow (Fleet + Customer assess in parallel → Dispatch decides) — each node a real Gemini call run as a Temporal **activity** recorded in the parent's history. The Dispatch agent decides whether to escalate by calling `request_human_approval`; if it doesn't, it commits directly. Only on escalation does a durable `gate-<order_id>` child (`DispatchGateWorkflow`) spawn to do the HITL pause via a durable Temporal **signal** + `wait_condition` (timeout escalates to a backup approver). LangGraph `interrupt()` is an optional back-pocket toggle (`HITL_MODE=interrupt`). Survives worker death. | The human is just another tool the agent calls — but a durable, async one. On Temporal, that tool call is a signal. |
 
-Pattern A's ADK assignment (Fleet + Customer + Dispatch Agents) reasons about every **routine** order. A deliberately injected premium order (above the $2,000 review threshold) **bypasses ADK entirely** and trips Pattern B's gate instead — so the agent-in-the-loop demo fires when you choose, not at random.
+The active framework is chosen by the UI tab and applies to all orders. On the LangGraph tab, routine auto-generated orders top out around $1,950 (servings ≤150 × ≤$13), so the Dispatch agent commits them directly; only a genuinely high-value order escalates. The **Drop high-value order** button injects a premium Moscone order the agent escalates — so the agent-in-the-loop demo fires when you choose, not at random.
 
 ## Quick Start
 
@@ -139,7 +139,7 @@ The dashboard has two tabs — one per pattern. Both start the same way.
 
 1. **Start Deliveries** — Ziggy's (the Ferry Building) opens for business. Orders flow in from Moscone Center, Fisherman's Wharf, and Chinatown. The ADK agents reason per-order and assign to the least-loaded driver. Drivers batch-pickup and deliver sequentially.
 2. **Pattern A — Human-in-the-loop tab:** pick an active order, choose **Address Change** or **Cancel Order**, click **Submit Change**. The driver arrives at the venue but holds (`awaiting_update`) while a human decides. Click **Approve** / **Reject** — cancel skips delivery, address change reroutes to Oracle Park, reject delivers normally.
-3. **Pattern B — Agent-in-the-loop tab:** click **Drop high-value order** to inject a premium Moscone catering order (over the $2,000 threshold). The order bypasses ADK; the LangGraph dispatch team (Fleet + Customer → Dispatch) decides to call `request_human_approval`, and the workflow parks on a durable Temporal signal; an approval card appears over the map. Approve or reject. To show durability, **kill the worker while the card is up** — the gate survives; restart the worker and the pending approval is still there.
+3. **Pattern B — Agent-in-the-loop tab:** click **Drop high-value order** to inject a premium Moscone catering order. The LangGraph team (Fleet + Customer → Dispatch) assesses it inline in the parent workflow; the Dispatch agent decides to call `request_human_approval`, which spawns a durable `gate-<order_id>` child that parks on a Temporal signal; an approval card appears over the map. Approve or reject. To show durability, **kill the worker while the card is up** — the gate survives; restart the worker and the pending approval is still there.
 
 
 ## Architecture
@@ -171,9 +171,12 @@ The dashboard has two tabs — one per pattern. Both start the same way.
 │  │   batch pickup → deliver                         + tool calls here  │
 │  │   sequentially → return                          (max 5 concurrent) │
 │  │   (max 20 concurrent)                                               │
-│  └─ DispatchGateWorkflow (Pattern B, per high-value order)            │
-│      LangGraph team (Fleet+Customer→Dispatch) decides → workflow      │
-│      does HITL via durable signal (interrupt() = back-pocket toggle)  │
+│  ├─ LangGraph tab inline:                                             │
+│  │   multi-agent team (Fleet+Customer→Dispatch) runs in the parent    │
+│  │   (each node a Temporal activity in the parent's history)          │
+│  └─ DispatchGateWorkflow (Pattern B, per ESCALATED order)             │
+│      gate-<order_id> child does the HITL pause via durable signal     │
+│      (interrupt() = back-pocket toggle)                               │
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────┐      ┌───────────────────────────────────────┐
@@ -197,7 +200,7 @@ The dashboard has two tabs — one per pattern. Both start the same way.
 
 **Order lifecycle (routine):** Order generates on timer → ADK agents reason (Fleet + Customer in parallel → Dispatch) → capacity check + least-loaded assignment → driver batch-picks up at Ziggy's → delivers sequentially to venues → signals parent on each completion → returns to base
 
-**Order lifecycle (high-value):** Order injected (≥ $2,000) → **bypasses ADK** → routes to the per-order LangGraph dispatch gate (multi-agent: Fleet + Customer → Dispatch) → agent decides → may pause for a human (durable Temporal signal) → on approve, commits to the least-loaded driver and delivers; on reject, the order is cancelled
+**Order lifecycle (high-value, LangGraph tab):** High-value order injected → multi-agent team assesses inline in the parent (Fleet + Customer → Dispatch) → Dispatch agent escalates by calling `request_human_approval` → durable `gate-<order_id>` child spawns for the human pause (durable Temporal signal) → on approve, commits to the least-loaded driver and delivers; on reject, the order is cancelled
 
 **How ADK and Temporal map to each other:**
 
@@ -242,7 +245,7 @@ The plugin turns each Gemini inference and each tool invocation into a **separat
 
 **Two processes**: `run.sh` starts a worker process and a server process (plus Temporal dev server). The server builds the frontend snapshot from FleetState (`_build_snapshot()` → `fleet.snapshot()`, SQLite shared across processes) and otherwise sends signals / runs queries only — it runs no workers. Workers run three Temporal workers on three task queues.
 
-**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs workflows plus `publish_agent_event` as a local activity (UI projection with minimal history). `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). `LangGraphPlugin(graphs={...})` is registered on the **workflow** worker — it runs the Pattern B dispatch-gate graph (`build_gate_graph`), whose node activities (the Fleet / Customer / Dispatch agent Gemini calls) execute there; `DispatchGateWorkflow` is registered alongside the other workflows. Agents use the upstream `TemporalModel` with `summary_fn=_build_summary` — `_build_summary` in `agents.py` generates context-aware Temporal UI summaries per LLM call.
+**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs workflows plus `publish_agent_event` as a local activity (UI projection with minimal history). `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). `LangGraphPlugin(graphs={...})` is registered on the **workflow** worker — it now registers **three** LangGraph graphs: the inline multi-agent assessment graph (`GRAPH_NAME`, run inline by the parent workflow), the demo HITL-only interrupt-pause graph (`GRAPH_NAME_HUMAN`), and the full assess+interrupt graph (`GRAPH_NAME_INTERRUPT`, used by the standalone spike path). Their node activities (the Fleet / Customer / Dispatch agent Gemini calls) execute on this worker; the parent workflow runs the assessment graph inline, and `DispatchGateWorkflow` (the `gate-<order_id>` child that does the HITL pause) is registered alongside the other workflows. Agents use the upstream `TemporalModel` with `summary_fn=_build_summary` — `_build_summary` in `agents.py` generates context-aware Temporal UI summaries per LLM call.
 
 ### What each agent reasons about
 

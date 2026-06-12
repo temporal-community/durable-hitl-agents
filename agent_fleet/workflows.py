@@ -26,6 +26,8 @@ with workflow.unsafe.imports_passed_through():
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
     from google.genai.types import Content, Part
+    from langgraph.checkpoint.memory import InMemorySaver
+    from temporalio.contrib.langgraph import graph
 
     from agent_fleet.activities import (
         deliver_order,
@@ -42,7 +44,7 @@ with workflow.unsafe.imports_passed_through():
         sync_driver_position,
     )
     from agent_fleet.agents import create_order_assignment_agent
-    from agent_fleet.dispatch_gate import DispatchGateWorkflow
+    from agent_fleet.dispatch_gate import GRAPH_NAME, DispatchGateWorkflow, _build_brief
     from agent_fleet.locations import WAREHOUSE
     from agent_fleet.models import (
         AgentDisconnectInput,
@@ -81,7 +83,17 @@ NAV_RETRY = RetryPolicy(
 )
 
 MAX_ORDERS = 50
-ORDER_INTERVAL_SECONDS = 10
+# Steady-state spacing between orders. The langgraph tab runs the full 3-agent team
+# per order (Fleet ∥ Customer → Dispatch, each a Gemini activity), so the cadence is
+# tuned for that heavier mode — slower than ADK needs, but watchable and within the
+# worker's LLM throughput. Tune against a live rehearsal.
+ORDER_INTERVAL_SECONDS = 12
+# Initial burst so the first few drivers pick up multi-order batches. Gentler than the
+# old 8-at-1s flood: at 8 orders/sec, langgraph mode fires ~24 concurrent Gemini calls
+# at the worker. Aligned to the warmup window (drivers D-E are hidden for the first
+# _WARMUP_ORDERS), so the burst fills A-C without overwhelming the agent team.
+WARMUP_BURST_ORDERS = 5
+WARMUP_BURST_SECONDS = 2
 
 DRIVER_CAPACITY = 3
 DRIVER_IDS = ["driver-a", "driver-b", "driver-c", "driver-d", "driver-e"]
@@ -800,11 +812,11 @@ class OrderGenerationWorkflow:
                 f"Order {order_num}/{inp.max_orders}: {order.order_id} signaled to parent"
             )
 
-            # Wait before next order — initial burst to fill driver batches, then normal cadence
+            # Wait before next order — gentle initial burst to fill driver batches,
+            # then normal cadence (tuned for the heavier langgraph agent-team mode).
             if order_num < inp.max_orders:
-                if order_num <= 8:
-                    # Fast burst: 8 orders in ~10s to get multi-order batches on drivers
-                    await workflow.sleep(timedelta(seconds=1))
+                if order_num <= WARMUP_BURST_ORDERS:
+                    await workflow.sleep(timedelta(seconds=WARMUP_BURST_SECONDS))
                 else:
                     base = inp.order_interval_seconds
                     jitter = int(workflow.random().random() * base * 0.6)  # 0–60% jitter
@@ -1129,7 +1141,7 @@ class MeltdownDemoWorkflow:
             f"{agent_context}"
             f"NEW ORDER — assign to the best driver:\n"
             f"Order ID: {inp.order_id}\n"
-            f"Hotel: {inp.hotel}\n"
+            f"Venue: {inp.hotel}\n"
             f"Event: {inp.event}\n"
             f"Priority: {inp.priority}\n"
             f"Servings: {inp.servings}\n"
@@ -1275,11 +1287,18 @@ class MeltdownDemoWorkflow:
         # Build driver snapshots from workflow state — passed to activity as input
         driver_snapshots = self._build_driver_snapshots()
 
-        # The active UI tab sets the dispatch framework: in "langgraph" mode EVERY order
-        # routes through the LangGraph dispatch gate (the agents assess + the dispatch agent
-        # decides whether to escalate to a human); "adk" mode uses the ADK assignment path.
+        # The active UI tab sets the dispatch framework. In "langgraph" mode the
+        # multi-agent dispatch decision runs INLINE in this workflow (mirroring the ADK
+        # path) — agent nodes execute as Temporal activities recorded in this history,
+        # NOT a per-order child. Run it concurrently so the order loop and the fleet keep
+        # moving while the agents (and possibly a human) deliberate. "adk" mode uses the
+        # ADK assignment path below.
         if self._dispatch_mode == "langgraph":
-            self._spawn_gate(order, self._least_loaded_driver(), False, onum)
+            self._gate_tasks.append(
+                asyncio.create_task(
+                    self._run_langgraph_assignment(order, self._least_loaded_driver(), onum)
+                )
+            )
             return
 
         assignment_input = ReasonAboutAssignmentInput(
@@ -1426,39 +1445,101 @@ class MeltdownDemoWorkflow:
 
         workflow.logger.info(f"Order {self._orders_generated}: {order.order_id} → {driver_id}")
 
-    def _spawn_gate(
-        self, order: OrderAssignmentResult, driver_id: str, fleet_offline: bool, onum: str
+    async def _run_langgraph_assignment(
+        self, order: OrderAssignmentResult, driver_id: str, onum: str
     ) -> None:
-        """Run the agent-initiated approval gate concurrently — the fleet keeps moving
-        while the agent (and possibly a human) decides on this order."""
-        self._gate_tasks.append(
-            asyncio.create_task(self._run_gate(order, driver_id, fleet_offline, onum))
-        )
+        """Run the LangGraph multi-agent dispatch decision INLINE in this workflow.
 
-    async def _run_gate(
-        self, order: OrderAssignmentResult, driver_id: str, fleet_offline: bool, onum: str
-    ) -> None:
-        """Start the DispatchGateWorkflow child; commit on approval, hold on rejection."""
+        The langgraph-tab counterpart to _run_adk_assignment: the Fleet ∥ Customer →
+        Dispatch graph runs in THIS workflow's context (nodes execute as Temporal
+        activities recorded in this history), not a per-order child. The Dispatch agent
+        decides whether to escalate. If it dispatches, commit immediately; if it calls
+        for a human, spawn a durable gate child for the HITL pause ONLY — so gate-*
+        children equal human approvals, not order count.
+        """
         available = sum(
             1
             for d in DRIVER_IDS
             if d not in self._disconnected_drivers
             and len(self._driver_orders.get(d, [])) < DRIVER_CAPACITY
         )
+        state = {
+            "order_id": order.order_id,
+            "venue": order.hotel,
+            "order_value": order.order_value,
+            "servings": order.servings,
+            "deadline_minutes": order.deadline_minutes,
+            "proposed_driver_id": driver_id,
+            "drivers_available": available,
+            "drivers_total": len(DRIVER_IDS),
+            "pending_orders": len(self._pending_new_orders),
+        }
+        compiled = graph(GRAPH_NAME).compile(checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": f"{workflow.info().workflow_id}-{order.order_id}"}}
+        result = await compiled.ainvoke(state, config=config)
+        await self._publish_langgraph_reasoning(result)
+
+        if not result.get("escalate"):
+            workflow.logger.info(
+                f"[#{onum}] LangGraph agent dispatched {order.order_id} — no human needed"
+            )
+            await self._commit_assignment(order, driver_id, False, onum)
+            return
+
+        brief = _build_brief(result, result.get("tool_args", {}))
+        await self._run_gate(order, driver_id, brief, onum)
+
+    async def _publish_langgraph_reasoning(self, result: dict) -> None:
+        """Surface the inline LangGraph team's reasoning in the Fleet/Customer/Dispatch panels."""
+        fleet = (result.get("fleet_assessment") or "").strip()
+        cust = (result.get("customer_assessment") or "").strip()
+        reason = (result.get("tool_args") or {}).get("reason", "")
+        dispatch_note = (
+            f"High-value — calling for human approval. {reason}"
+            if result.get("escalate")
+            else "Within policy — dispatching."
+        )
+        await workflow.execute_local_activity(
+            publish_agent_events_batch,
+            [
+                PublishAgentEventInput(
+                    agent_name="fleet_agent",
+                    event_type="assessment",
+                    content=fleet,
+                    summary=fleet[:90],
+                ),
+                PublishAgentEventInput(
+                    agent_name="customer_agent",
+                    event_type="assessment",
+                    content=cust,
+                    summary=cust[:90],
+                ),
+                PublishAgentEventInput(
+                    agent_name="resolver",
+                    event_type="plan",
+                    content=dispatch_note,
+                    summary=dispatch_note[:90],
+                ),
+            ],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+
+    async def _run_gate(
+        self, order: OrderAssignmentResult, driver_id: str, brief: dict, onum: str
+    ) -> None:
+        """Spawn the durable HITL gate child for an escalated order — the fleet keeps
+        moving while a human decides. Commit on approval, reject on rejection.
+
+        The assessment already ran inline (_run_langgraph_assignment), so the child gets
+        the pre-built brief and performs the human-in-the-loop pause only.
+        """
         handle = await workflow.start_child_workflow(
             DispatchGateWorkflow.run,
             DispatchGateInput(
                 order_id=order.order_id,
-                venue=order.hotel,
-                order_value=order.order_value,
-                servings=order.servings,
-                deadline_minutes=order.deadline_minutes,
-                proposed_driver_id=driver_id,
-                drivers_available=available,
-                drivers_total=len(DRIVER_IDS),
-                pending_orders=len(self._pending_new_orders),
                 escalation_seconds=GATE_ESCALATION_SECONDS,
                 use_interrupt=order.use_interrupt or self._gate_use_interrupt,
+                brief=brief,
             ),
             id=f"gate-{order.order_id}",
             static_summary=f"Dispatch gate — {order.order_id} (${order.order_value:,})",
@@ -1476,7 +1557,7 @@ class MeltdownDemoWorkflow:
         self._pending_dispatch.pop(order.order_id, None)
 
         if result is None or result.approved:
-            await self._commit_assignment(order, driver_id, fleet_offline, onum)
+            await self._commit_assignment(order, driver_id, False, onum)
         else:
             await self._reject_order(order, onum)
 

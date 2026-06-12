@@ -13,13 +13,17 @@ fleet in **downtown San Francisco**:
   supervisor approves or rejects; the order reroutes / cancels / releases.
   Durable primitive: signal → `wait_condition` hold → resolve.
 - **Pattern B — Agent-in-the-loop ("The Agent Calls the Human")** — built on
-  **LangGraph** via `temporalio.contrib.langgraph`. A high-value order routes to a
-  per-order `DispatchGateWorkflow` whose LangGraph graph runs a dispatch agent
-  (real Gemini call) that DECIDES whether to call a `request_human_approval` tool.
-  Calling it runs LangGraph `interrupt()`, suspending the workflow on a durable
-  Temporal SIGNAL (the draft brief is exposed via a QUERY). A timeout escalates to
-  a backup approver. The thesis: the human is just another tool the agent calls —
-  but a durable, async one; on Temporal that tool call is a signal.
+  **LangGraph** via `temporalio.contrib.langgraph`. The framework is chosen by the
+  UI **tab** (`set_dispatch_mode` → `"langgraph"`), applying to all orders. The
+  multi-agent assessment (Fleet ∥ Customer → Dispatch) runs INLINE in the parent
+  workflow — each agent node a real Gemini call executed as a Temporal activity in
+  the parent's history. The Dispatch agent DECIDES whether to call a
+  `request_human_approval` tool. Only when it escalates does the parent spawn a
+  durable child `DispatchGateWorkflow` (`gate-<order_id>`) for the human pause; the
+  default pause is a durable Temporal SIGNAL (the draft brief is exposed via a
+  QUERY), with a timeout that escalates to a backup approver. The thesis: the human
+  is just another tool the agent calls — but a durable, async one; on Temporal that
+  tool call is a signal.
 
 The disconnect/recovery scenarios (agent disconnect, driver disconnect, tool
 degradation) are **not** part of the talk's two demos. The underlying signals,
@@ -90,33 +94,39 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   demo shutdown can't leave a parked child hanging the parent's
   `await handle` join.
   `OrderGenerationWorkflow` is a child workflow that generates orders on a randomized timer and
-  signals the parent. Parent handles assignment. Routine orders stay below `GATE_REVIEW_VALUE`
-  ($2,000) so they never trip Pattern B — the agent gate fires only on the deliberately
-  injected premium order.
-- **Pattern B — dispatch gate** (`dispatch_gate.py`): the agent-in-the-loop path. A material
-  order (`order_value >= GATE_REVIEW_VALUE` = $2,000, live mode only) **bypasses the ADK
-  pipeline entirely** and routes through `_assign_order` → `_spawn_gate` → `_run_gate`, which
-  starts a per-order child `DispatchGateWorkflow` (`id=gate-<order_id>`) concurrently — the fleet
-  keeps moving while the agent (and possibly a human) decides. The gate is its own
-  **multi-agent** LangGraph team (`build_gate_graph`) compiled via `temporalio.contrib.langgraph`,
-  mirroring the ADK team: a `fleet_agent` node and a `customer_agent` node assess in parallel,
-  then a `dispatch_agent` node weighs both and decides whether to call `request_human_approval`.
-  Each node is a real Gemini call (through `init_chat_model`) executed as a Temporal **activity**.
-  **HITL implementation (two modes, default Temporal):**
-  - **Temporal-signal (default, `HITL_MODE=temporal`):** the dispatch agent's
-    `request_human_approval` tool call surfaces an `escalate` flag + brief; the LangGraph graph
-    ends there and the **workflow** performs the HITL — it signals the parent
+  signals the parent. Parent handles assignment. Auto-generated orders top out at ~$1,950
+  (servings ≤150 × ≤$13) and the agent only escalates genuinely high-value orders, so routine
+  orders auto-dispatch — the gate fires only on the deliberately injected premium order.
+- **Pattern B — dispatch gate** (`dispatch_gate.py`): the agent-in-the-loop path, selected by the
+  langgraph tab for **all** orders. `_assign_order` runs `_run_langgraph_assignment` INLINE in the
+  parent as a concurrent task — the fleet keeps moving while the agents (and possibly a human)
+  decide. That assessment is a **multi-agent** LangGraph team (`build_gate_graph`, registered as
+  `GRAPH_NAME`) compiled via `temporalio.contrib.langgraph`, mirroring the ADK team: a `fleet_agent`
+  node and a `customer_agent` node assess in parallel, then a `dispatch_agent` node weighs both and
+  decides whether to call `request_human_approval`. Each node is a real Gemini call (through
+  `init_chat_model`) executed as a Temporal **activity** recorded in the **parent's** history. If
+  the agent does NOT escalate, the parent calls `_commit_assignment` directly — no child workflow.
+  Only on escalation does `_run_gate(order, driver_id, brief, onum)` spawn a durable child
+  `DispatchGateWorkflow` (`id=gate-<order_id>`) that receives the pre-built `brief` and performs the
+  HITL pause **only** — it does not re-run the agent team. Net: `gate-*` children equal human
+  approvals, not order count. (`_spawn_gate` is gone.)
+  **HITL implementation (two modes, default Temporal), in the gate child:**
+  - **Temporal-signal (default, `HITL_MODE=temporal`):** the gate child signals the parent
     (`dispatch_gate_awaiting`), then `wait_condition`s on the `approve` signal, with a timeout
     (`GATE_ESCALATION_SECONDS`) that escalates to a `backup` approver tier. The human decision is
     a durable Temporal signal; no LangGraph interrupt involved.
   - **Interrupt (back-pocket toggle, `HITL_MODE=interrupt`):** set via `config.INTERRUPT_MODE`,
-    threaded through `DispatchGateInput.use_interrupt`. A workflow-resident node calls LangGraph
-    `interrupt(brief)` to park the workflow; resume via `Command(resume=...)`.
+    threaded through `DispatchGateInput.use_interrupt`. The child drives a dedicated 1-node
+    interrupt graph (`build_human_graph` / `GRAPH_NAME_HUMAN = "human_approval_interrupt"`) that
+    calls LangGraph `interrupt(brief)` to park the workflow; resume via `Command(resume=...)`. The
+    agent team is NOT re-invoked for the pause.
 
   The pending brief is also exposed via the gate's `pending_brief` query. On resume, approve →
   `_commit_assignment`; reject → `_reject_order` (cancels the order, preserves fleet capacity).
-  Gate failures fail open: `_run_gate` commits the assignment with a warning rather than losing
-  the order. LangGraph callables that run inline in the workflow are `async` because LangGraph
+  `DispatchGateWorkflow` has two entry paths keyed on `DispatchGateInput.brief`: `brief is not
+  None` → the HITL-pause-only demo path above; `brief is None` → the full assess+HITL graph in one
+  workflow (the standalone `spikes/langgraph_hitl` path, unchanged). Gate failures fail open:
+  `_run_gate` commits the assignment with a warning rather than losing the order. LangGraph callables that run inline in the workflow are `async` because LangGraph
   offloads sync callables to a thread executor, which Temporal's deterministic event loop forbids.
 - **Server reads FleetState** (`server.py`): WebSocket data comes from `fleet.snapshot()` (SQLite).
   Server also writes disconnect/reconnect state directly. Temporal queries used for structural
@@ -129,8 +139,11 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
 - **3-queue workers** (`worker.py`): workflows + local activities, delivery, agents.
   `GoogleAdkPlugin` is on both workflow and agents workers (sandbox + determinism on
   workflow side, `invoke_model` activity on agents side). `LangGraphPlugin(graphs={...})` is
-  on the **workflow** worker — it runs the Pattern B dispatch-gate graph; its node activities
-  (the fleet/customer/dispatch agent Gemini calls) execute on that worker. `DispatchGateWorkflow` is
+  on the **workflow** worker and registers **three** graphs: `GRAPH_NAME` (the multi-agent
+  assessment, run inline in the parent for every langgraph-tab order), `GRAPH_NAME_HUMAN` (the
+  demo's 1-node HITL-only interrupt pause, run in the gate child), and `GRAPH_NAME_INTERRUPT` (the
+  full assess+interrupt graph for the standalone spike path). Their node activities (the
+  fleet/customer/dispatch agent Gemini calls) execute on that worker. `DispatchGateWorkflow` is
   registered on the workflow worker alongside the others. Agents use the upstream
   `TemporalModel` with `summary_fn=_build_summary` — `_build_summary`
   in `agents.py` generates context-aware summaries (agent name, order, phase) shown
@@ -139,11 +152,11 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   `publish_agent_event` and `publish_agent_events_batch` are registered on the
   workflow worker for local activity execution (UI projection with minimal history).
 - **ADK agents** (`agents.py`): all three kept — Fleet Agent + Customer Agent (parallel) →
-  Dispatch Agent (sequential) — this is the multi-agent reasoning used for **routine** order
-  assignment (Pattern A's substrate). High-value orders (`order_value >= GATE_REVIEW_VALUE`)
-  **bypass ADK entirely** and route to the Pattern B LangGraph gate — ADK runs only on the
-  routine / human-initiated path. Live path runs ADK inline in the workflow via `_run_adk_assignment()`.
-  If an activity fails, Temporal retries. (Dormant disconnect path: Fleet
+  Dispatch Agent (sequential) — this is the multi-agent reasoning used for order assignment when
+  the **adk tab** is selected (Pattern A's substrate). The langgraph tab routes every order to the
+  Pattern B LangGraph team instead; the framework is chosen by the tab, not per-order. The ADK path
+  runs inline in the workflow via `_run_adk_assignment()`, committing to the least-loaded driver
+  with no dispatch gate involved. If an activity fails, Temporal retries. (Dormant disconnect path: Fleet
   Agent tools fail fast when disconnected (2 attempts), error returned to LLM via
   `_activity_tool.py` catch — Dispatch Agent assigns with available data but orders are flagged
   `degraded`.) Workflow publishes short summary events to FleetState via batched local activity
@@ -156,7 +169,8 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   and signals `new_order` — the deliberate trigger for the agent gate), `GET /api/pending-dispatch`
   (queries the parent's `get_status` and reads its `pending_dispatch` dict — populated when the
   gate child signals `dispatch_gate_awaiting`), `POST /api/approve-dispatch`
-  (signals the per-order `gate-<order_id>` `DispatchGateWorkflow.approve`). Dormant disconnect
+  (signals the `gate-<order_id>` `DispatchGateWorkflow.approve` — that child is spawned only on
+  escalation). Dormant disconnect
   endpoints (`/api/disconnect-crew`, `/api/disconnect-agent`, and reconnect variants) still write
   FleetState and signal workflows but are not wired to UI controls.
 - **Frontend** (`frontend/index.html`): single-file SPA with Leaflet map, WebSocket state feed,
@@ -179,7 +193,8 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   legacy field name; values are SF venue names.
 - Drivers use letter IDs: `driver-a` through `driver-e`, displayed as `Driver-A` etc.
 - Ice cream shop is "Ziggy's Ice Cream" = the **Ferry Building** (`WAREHOUSE_LABEL` in `locations.py`)
-- Routine orders stay below `GATE_REVIEW_VALUE` ($2,000) so only the injected premium order gates
+- Auto-generated orders top out at ~$1,950 and the agent escalates only genuinely high-value
+  orders, so routine orders auto-dispatch; only the injected premium order trips the gate
 - Max 50 orders per demo run, drivers batch up to 3 orders (`DRIVER_CAPACITY`)
 
 ## Commands

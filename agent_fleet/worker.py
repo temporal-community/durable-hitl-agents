@@ -46,9 +46,11 @@ from agent_fleet.activities import (
 from agent_fleet.config import TEMPORAL_ADDRESS
 from agent_fleet.dispatch_gate import (
     GRAPH_NAME,
+    GRAPH_NAME_HUMAN,
     GRAPH_NAME_INTERRUPT,
     DispatchGateWorkflow,
     build_gate_graph,
+    build_human_graph,
 )
 from agent_fleet.queues import AGENTS_QUEUE, DELIVERY_QUEUE, WORKFLOWS_QUEUE
 from agent_fleet.workflows import DriverRouteWorkflow, MeltdownDemoWorkflow, OrderGenerationWorkflow
@@ -79,15 +81,20 @@ def create_workflow_worker(client: Client) -> Worker:
             DispatchGateWorkflow,
         ],
         activities=[publish_agent_event, publish_agent_events_batch],
-        # LangGraphPlugin runs the Pattern B dispatch-gate graph; its node
-        # activities (incl. the Gemini assess call) execute on this worker.
-        # Both gate variants are registered so the UI toggle can pick the HITL impl
-        # per dropped order: Temporal-signal (default) or LangGraph interrupt().
+        # LangGraphPlugin runs the Pattern B dispatch-gate graphs; their node
+        # activities (incl. the Gemini assess calls) execute on this worker.
+        # - GRAPH_NAME: the multi-agent assessment, run INLINE in the parent for every
+        #   langgraph-mode order (Fleet ∥ Customer → Dispatch decides whether to escalate).
+        # - GRAPH_NAME_HUMAN: the demo's HITL-only interrupt pause, run in the gate child
+        #   on escalation when the UI toggle picks LangGraph interrupt().
+        # - GRAPH_NAME_INTERRUPT: the full assess+interrupt graph for the standalone
+        #   (spike) path where DispatchGateWorkflow runs everything in one workflow.
         plugins=[
             GoogleAdkPlugin(),
             LangGraphPlugin(
                 graphs={
                     GRAPH_NAME: build_gate_graph(use_interrupt=False),
+                    GRAPH_NAME_HUMAN: build_human_graph(),
                     GRAPH_NAME_INTERRUPT: build_gate_graph(use_interrupt=True),
                 }
             ),
