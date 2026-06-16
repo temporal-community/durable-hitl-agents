@@ -247,6 +247,79 @@ The plugin turns each Gemini inference and each tool invocation into a **separat
 
 **3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs workflows plus `publish_agent_event` as a local activity (UI projection with minimal history). `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). `LangGraphPlugin(graphs={...})` is registered on the **workflow** worker — it now registers **three** LangGraph graphs: the inline multi-agent assessment graph (`GRAPH_NAME`, run inline by the parent workflow), the demo HITL-only interrupt-pause graph (`GRAPH_NAME_HUMAN`), and the full assess+interrupt graph (`GRAPH_NAME_INTERRUPT`, used by the standalone spike path). Their node activities (the Fleet / Customer / Dispatch agent Gemini calls) execute on this worker; the parent workflow runs the assessment graph inline, and `DispatchGateWorkflow` (the `gate-<order_id>` child that does the HITL pause) is registered alongside the other workflows. Agents use the upstream `TemporalModel` with `summary_fn=_build_summary` — `_build_summary` in `agents.py` generates context-aware Temporal UI summaries per LLM call.
 
+### Core mechanism — how the LangGraph path is invoked
+
+On the **🤖 Agent → Human** tab, the *same* multi-agent idea runs on LangGraph instead of ADK — and it runs **inline inside the parent workflow**, exactly like the ADK path. A `gate-<order_id>` child workflow is created **only** when the agent escalates to a human, so gate workflows equal approvals, not orders.
+
+**1. The tab selects the framework** (UI → a Temporal signal — it does *not* start a workflow):
+
+```js
+// frontend/index.html — switching to the agent tab
+api('dispatch-mode', 'POST', { mode: tabName === 'agent' ? 'langgraph' : 'adk' });
+```
+```python
+# server.py — the endpoint just signals the already-running parent workflow
+await handle.signal(MeltdownDemoWorkflow.set_dispatch_mode, body.mode)
+# workflows.py — set_dispatch_mode signal sets a flag on the parent
+self._dispatch_mode = mode
+```
+
+**2. Each new order runs the LangGraph assessment inline in the parent** (`workflows.py` → `_assign_order` → `_run_langgraph_assignment`):
+
+```python
+if self._dispatch_mode == "langgraph":
+    asyncio.create_task(
+        self._run_langgraph_assignment(order, self._least_loaded_driver(), onum)
+    )
+    return
+```
+```python
+# _run_langgraph_assignment — the graph is compiled and invoked HERE, in the parent
+compiled = graph(GRAPH_NAME).compile(checkpointer=InMemorySaver())
+result = await compiled.ainvoke(state, config=config)   # Fleet ∥ Customer → Dispatch
+```
+
+`GRAPH_NAME` is registered on the workflow worker by `LangGraphPlugin` (`worker.py`). Each node carries `metadata={"execute_in": "activity"}`, so the Fleet / Customer / Dispatch Gemini calls run as **Temporal activities recorded in the parent's event history** — not a separate child workflow. It runs as a concurrent task so the fleet keeps moving while the agents deliberate.
+
+**3. The Dispatch agent decides — by calling a tool — whether a human is needed:**
+
+```python
+result = await compiled.ainvoke(state, config=config)
+if not result.get("escalate"):
+    await self._commit_assignment(order, driver_id, False, onum)   # auto-dispatch — no human, no child
+    return
+brief = _build_brief(result, result.get("tool_args", {}))
+await self._run_gate(order, driver_id, brief, onum)                # escalate → spawn the gate child
+```
+
+There is **no code threshold** — escalation is the agent's judgment, guided by `ESCALATION_GUIDANCE` in `dispatch_gate.py` (routine orders dispatch; only exceptional ones escalate).
+
+**4. Escalation spawns the durable HITL gate** (`workflows.py` → `_run_gate`):
+
+```python
+handle = await workflow.start_child_workflow(
+    DispatchGateWorkflow.run,
+    DispatchGateInput(order_id=order.order_id, brief=brief,
+                      escalation_seconds=GATE_ESCALATION_SECONDS, use_interrupt=...),
+    id=f"gate-{order.order_id}",
+)
+result = await handle                       # parent awaits the human's decision
+```
+
+The child receives the **pre-built brief** and performs the human pause only — it does *not* re-run the agent team (`dispatch_gate.py` → `DispatchGateWorkflow.run` branches on `inp.brief`):
+
+```python
+@workflow.run
+async def run(self, inp: DispatchGateInput) -> DispatchGateResult:
+    if inp.brief is not None:               # demo path: HITL pause only
+        return await self._run_hitl_only(inp)
+    # else (brief is None): standalone spike path runs the full assess+HITL graph
+```
+
+The pause is the same durable primitive as Pattern A — a Temporal `approve` signal + `wait_condition`, with a timeout that escalates to a backup approver (see *The two patterns, in code* at the top). `interrupt()` is the back-pocket toggle.
+
+> **In short:** the tab flips a flag → every order runs the LangGraph team inline in `MeltdownDemoWorkflow` (activities in the parent's history) → only an *escalated* order spawns `gate-<order_id>`, which is purely the human's durable async endpoint.
+
 ### What each agent reasons about
 
 | Agent | Reasoning | Tools |
