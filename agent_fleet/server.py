@@ -303,8 +303,9 @@ async def submit_customer_change(body: CustomerChangeRequest):
     try:
         handle = _temporal_client.get_workflow_handle("meltdown-demo")
         await handle.signal(MeltdownDemoWorkflow.customer_change, change)
-    except RPCError as e:
-        return {"error": f"Failed to signal workflow: {e}"}
+    except RPCError:
+        logger.exception("Failed to signal customer-change")
+        return {"error": "Failed to submit customer change"}
 
     # Signal the child workflow directly to hold before delivery —
     # same pattern as disconnect/reconnect. Parent handles the approval
@@ -370,8 +371,9 @@ async def approve_change(body: ChangeDecisionRequest):
     try:
         handle = _temporal_client.get_workflow_handle("meltdown-demo")
         await handle.signal(MeltdownDemoWorkflow.change_approved, body.approved)
-    except RPCError as e:
-        return {"error": f"Failed to signal workflow: {e}"}
+    except RPCError:
+        logger.exception("Failed to signal change-approval")
+        return {"error": "Failed to submit change decision"}
 
     decision = "approved" if body.approved else "rejected"
     return {"status": f"change_{decision}"}
@@ -393,8 +395,9 @@ async def pending_dispatch():
     try:
         handle = _temporal_client.get_workflow_handle("meltdown-demo")
         status = await handle.query(MeltdownDemoWorkflow.get_status)
-    except RPCError as e:
-        return {"error": f"Failed to query workflow: {e}"}
+    except RPCError:
+        logger.exception("Failed to query workflow for pending-dispatch")
+        return {"error": "Failed to query pending dispatch"}
     return {"pending_dispatch": status.get("pending_dispatch", {})}
 
 
@@ -414,8 +417,8 @@ async def approve_dispatch(body: DispatchDecisionRequest):
         await handle.signal(
             MeltdownDemoWorkflow.answer_dispatch, args=[body.order_id, decision]
         )
-    except RPCError as e:
-        logging.exception("Failed to signal dispatch answer")
+    except RPCError:
+        logger.exception("Failed to signal dispatch answer")
         return {"error": "Failed to signal dispatch answer"}
     return {
         "status": "dispatch_approved" if body.approved else "dispatch_rejected",
@@ -468,8 +471,9 @@ async def inject_high_value_order():
                 order_value=value,
             ),
         )
-    except RPCError as e:
-        return {"error": f"Failed to signal workflow: {e}"}
+    except RPCError:
+        logger.exception("Failed to signal inject-order")
+        return {"error": "Failed to inject order"}
     return {
         "status": "injected",
         "order_id": oid,
@@ -490,8 +494,8 @@ async def set_dispatch_mode(body: DispatchModeRequest):
         handle = _temporal_client.get_workflow_handle("meltdown-demo")
         await handle.signal(MeltdownDemoWorkflow.set_dispatch_mode, body.mode)
     except RPCError:
-        logging.exception("Failed to signal workflow")
-        return {"error": "Failed to signal workflow"}
+        logger.exception("Failed to signal set-dispatch-mode")
+        return {"error": "Failed to set dispatch mode"}
     return {"status": "dispatch_mode_set", "mode": body.mode}
 
 
