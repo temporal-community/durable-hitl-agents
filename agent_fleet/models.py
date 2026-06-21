@@ -349,7 +349,6 @@ class AgentDisconnectInput:
 class MeltdownDemoInput:
     escalation_enabled: bool = False
     max_orders: int = 50
-    use_interrupt: bool = False  # Pattern B HITL: False=Temporal signal (default), True=interrupt
 
 
 @dataclass
@@ -373,42 +372,4 @@ class OrderAssignmentResult:
     servings: int = 1
     deadline_minutes: int = 45
     event: str = ""
-    order_value: int = 0  # USD; high values route through the agent-initiated approval gate
-    use_interrupt: bool = False  # per-order HITL impl for the gate (set by the UI toggle)
-
-
-@dataclass
-class DispatchGateInput:
-    """Input to DispatchGateWorkflow (Pattern B: the agent calls the human).
-
-    Two shapes:
-    - Demo path: pass `order_id` + a pre-built `brief` (the multi-agent assessment
-      already ran inline in the parent). The gate child does the HITL pause only.
-    - Standalone path (spikes): pass the order/fleet fields and leave `brief=None`;
-      the workflow runs the full multi-agent graph + HITL in one workflow.
-    """
-
-    order_id: str
-    venue: str = ""
-    order_value: int = 0
-    servings: int = 0
-    deadline_minutes: int = 0
-    proposed_driver_id: str = ""
-    drivers_available: int = 0
-    drivers_total: int = 0
-    pending_orders: int = 0
-    escalation_seconds: int = 3600
-    use_interrupt: bool = False  # False=Temporal-signal HITL (default); True=LangGraph interrupt
-    # Demo path: pre-built decision brief. When set, the child skips assessment and
-    # only performs the human-in-the-loop pause (gate-* children == approvals).
-    brief: dict | None = None
-
-
-@dataclass
-class DispatchGateResult:
-    """Outcome of the gate, returned to the parent workflow."""
-
-    order_id: str
-    approved: bool
-    decision: str  # "approve" | "reject"
-    timed_out: bool = False
+    order_value: int = 0  # USD; high values lead the Dispatch agent to call ask_human

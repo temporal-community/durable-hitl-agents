@@ -27,6 +27,7 @@ with workflow.unsafe.imports_passed_through():
     from google.adk.sessions import InMemorySessionService
     from google.genai.types import Content, Part
     from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Command
     from temporalio.contrib.langgraph import graph
 
     from agent_fleet.activities import (
@@ -44,13 +45,12 @@ with workflow.unsafe.imports_passed_through():
         sync_driver_position,
     )
     from agent_fleet.agents import create_order_assignment_agent
-    from agent_fleet.dispatch_gate import GRAPH_NAME, DispatchGateWorkflow, _build_brief
+    from agent_fleet.langgraph_agents import GRAPH_NAME
     from agent_fleet.locations import WAREHOUSE
     from agent_fleet.models import (
         AgentDisconnectInput,
         CustomerChangeInput,
         DeliverInput,
-        DispatchGateInput,
         DriverDisconnectInput,
         DriverRouteInput,
         DriverRouteOrder,
@@ -847,6 +847,10 @@ class MeltdownDemoWorkflow:
         self._pending_changes: list[CustomerChangeInput] = []
         self._pending_approvals: list[bool] = []
         self._pending_new_orders: list[OrderAssignmentResult] = []
+        # Human→agent HITL (ADK): a human revised an order; the ADK assignment agent
+        # RE-REASONS how to adjust (re-checks the fleet, re-decides driver/priority)
+        # instead of the system applying a fixed change. See _reassign_via_adk.
+        self._pending_revisions: list[CustomerChangeInput] = []
         self._routes_done: bool = False
         self._disconnected_drivers: set[str] = set()
         self._disconnected_agents: set[str] = set()
@@ -863,11 +867,11 @@ class MeltdownDemoWorkflow:
             "customer_agent": True,
             "resolver": True,
         }
-        # Pattern B — agent-initiated dispatch gate state
-        self._gate_tasks: list = []
-        self._gate_handles: dict = {}
-        self._pending_dispatch: dict[str, dict] = {}  # order_id -> brief (awaiting human)
-        self._gate_use_interrupt: bool = False  # HITL impl for the gate (set from input)
+        # Pattern B — LangGraph in-loop ask_human state
+        self._langgraph_tasks: list = []  # concurrent _run_langgraph_assignment tasks
+        self._pending_dispatch: dict[str, dict] = {}  # order_id -> question (awaiting human)
+        # Agent→human in-loop HITL: human answers to an agent's ask_human, keyed by order.
+        self._dispatch_answers: dict[str, str] = {}
         self._dispatch_mode: str = "adk"  # which framework dispatches orders: "adk" | "langgraph"
 
     # --- Signals ---
@@ -875,6 +879,20 @@ class MeltdownDemoWorkflow:
     @workflow.signal
     async def customer_change(self, change: CustomerChangeInput) -> None:
         self._pending_changes.append(change)
+
+    @workflow.signal
+    async def answer_dispatch(self, order_id: str, decision: str) -> None:
+        """Human answers an agent's in-loop ask_human for a specific order (LangGraph path).
+        Resolves the durable interrupt the dispatch team is parked on.
+        """
+        self._dispatch_answers[order_id] = decision
+
+    @workflow.signal
+    async def human_revise_order(self, change: CustomerChangeInput) -> None:
+        """Human→agent HITL (ADK): a human revised an order (new location/priority).
+        The ADK assignment agent will RE-REASON how to adjust — see _reassign_via_adk.
+        """
+        self._pending_revisions.append(change)
 
     @workflow.signal
     async def change_approved(self, approved: bool) -> None:
@@ -929,31 +947,6 @@ class MeltdownDemoWorkflow:
         self._dispatch_mode = mode
         workflow.logger.info(f"Dispatch mode → {mode}")
 
-    @workflow.signal
-    async def dispatch_gate_awaiting(self, brief: dict) -> None:
-        """Signaled by a DispatchGateWorkflow child when its agent escalates to a human.
-
-        Surfaces the pending decision brief so the operator/UI can act on it.
-        """
-        order_id = brief.get("order_id")
-        if not order_id:
-            return
-        self._pending_dispatch[order_id] = brief
-        if order_id in self._orders:
-            self._orders[order_id]["status"] = "awaiting_dispatch_approval"
-        await workflow.execute_local_activity(
-            publish_agent_event,
-            PublishAgentEventInput(
-                agent_name="dispatch_gate",
-                event_type="approval_gate",
-                content=(
-                    f"Agent escalated order {order_id} (${brief.get('order_value', 0):,}) "
-                    f"for human sign-off — {brief.get('reasoning', '')}"
-                ),
-                summary=f"{order_id} awaiting dispatch approval",
-            ),
-            start_to_close_timeout=timedelta(seconds=10),
-        )
 
     # --- Queries ---
 
@@ -1024,7 +1017,6 @@ class MeltdownDemoWorkflow:
     @workflow.run
     async def run(self, inp: MeltdownDemoInput) -> str:
         workflow.logger.info(f"Meltdown demo starting (escalation={inp.escalation_enabled})")
-        self._gate_use_interrupt = inp.use_interrupt
 
         # Initialize driver state
         for driver_id in DRIVER_IDS:
@@ -1066,6 +1058,7 @@ class MeltdownDemoWorkflow:
         # Process new orders and customer changes concurrently
         order_task = asyncio.create_task(self._process_new_orders())
         change_task = asyncio.create_task(self._process_customer_changes())
+        revision_task = asyncio.create_task(self._process_human_revisions())
 
         # Wait for order generation to complete
         await self._order_gen_handle
@@ -1083,24 +1076,15 @@ class MeltdownDemoWorkflow:
             except Exception:
                 pass
 
-        # Reject-resolve any gate child parked on a human so it ends
-        # WorkflowExecutionCompleted with a result ("rejected — order held") instead of
-        # being terminated "by parent close policy" when this workflow closes. Signal
-        # BEFORE cancelling the awaiting tasks: the reject lands in each gate's history
-        # first, so the gate processes it and completes before any cancel takes effect.
-        # (This is the graceful path — a demo run that finishes on its own. Reset/Start
-        # hard-terminate the parent, so those still cascade-terminate parked gates.)
-        for order_id, handle in list(self._gate_handles.items()):
-            try:
-                await handle.signal(DispatchGateWorkflow.approve, "reject")
-            except Exception:
-                pass
-        for task in self._gate_tasks:
+        # Cancel any in-flight LangGraph assignment tasks (a parked ask_human exits cleanly
+        # via _await_dispatch_answer's _routes_done escape) and clear pending questions.
+        for task in self._langgraph_tasks:
             task.cancel()
         self._pending_dispatch.clear()
 
         await change_task
         await order_task
+        revision_task.cancel()
 
         # Wait for drivers to finish current deliveries
         results = []
@@ -1303,7 +1287,7 @@ class MeltdownDemoWorkflow:
         # moving while the agents (and possibly a human) deliberate. "adk" mode uses the
         # ADK assignment path below.
         if self._dispatch_mode == "langgraph":
-            self._gate_tasks.append(
+            self._langgraph_tasks.append(
                 asyncio.create_task(
                     self._run_langgraph_assignment(order, self._least_loaded_driver(), onum)
                 )
@@ -1461,10 +1445,10 @@ class MeltdownDemoWorkflow:
 
         The langgraph-tab counterpart to _run_adk_assignment: the Fleet ∥ Customer →
         Dispatch graph runs in THIS workflow's context (nodes execute as Temporal
-        activities recorded in this history), not a per-order child. The Dispatch agent
-        decides whether to escalate. If it dispatches, commit immediately; if it calls
-        for a human, spawn a durable gate child for the HITL pause ONLY — so gate-*
-        children equal human approvals, not order count.
+        activities recorded in this history), not a per-order child. Agents call ask_human
+        as an IN-LOOP tool — that suspends the graph on a durable interrupt(); we surface
+        the question, wait for the human's `answer_dispatch` signal, and resume the graph
+        via Command(resume=answer). The answer flows back into the agent's reasoning.
         """
         available = sum(
             1
@@ -1485,29 +1469,75 @@ class MeltdownDemoWorkflow:
         }
         compiled = graph(GRAPH_NAME).compile(checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": f"{workflow.info().workflow_id}-{order.order_id}"}}
+
         result = await compiled.ainvoke(state, config=config)
-        await self._publish_langgraph_reasoning(result)
-
-        if not result.get("escalate"):
-            workflow.logger.info(
-                f"[#{onum}] LangGraph agent dispatched {order.order_id} — no human needed"
+        rejected = False
+        # Drive any in-loop ask_human interrupts the agents raise.
+        while result.get("__interrupt__"):
+            payload = result["__interrupt__"][0].value
+            self._pending_dispatch[order.order_id] = payload
+            if order.order_id in self._orders:
+                self._orders[order.order_id]["status"] = "awaiting_dispatch_approval"
+            await workflow.execute_local_activity(
+                publish_agent_event,
+                PublishAgentEventInput(
+                    agent_name="dispatch_gate",
+                    event_type="approval_gate",
+                    content=(
+                        f"{payload.get('agent', 'Agent')} is asking a human about "
+                        f"{order.order_id} (${order.order_value:,}): {payload.get('question', '')}"
+                    ),
+                    summary=f"{order.order_id} — agent asked a human",
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
             )
+            answer = await self._await_dispatch_answer(order.order_id)
+            self._pending_dispatch.pop(order.order_id, None)
+            if answer is None:  # demo shutting down — exit cleanly
+                return
+            if answer == "reject":
+                rejected = True
+            result = await compiled.ainvoke(Command(resume=answer), config=config)
+
+        # Robust decision: the workflow knows the human's answer (rejected flag), so don't
+        # depend on the graph's free-text dispatch_decision (Gemini may return it empty).
+        raw = (result.get("dispatch_decision") or "").strip()
+        asked = bool(result.get("asked_human"))
+        if not raw:
+            raw = (
+                "Held — human rejected"
+                if rejected
+                else ("Approved by human — dispatching" if asked else "Within policy — dispatching")
+            )
+        await self._publish_langgraph_reasoning(result, raw)
+
+        hold = rejected or "HOLD" in raw.upper()
+        if hold:
+            workflow.logger.info(f"[#{onum}] LangGraph dispatch held {order.order_id} (human)")
+            await self._reject_order(order, onum)
+        else:
             await self._commit_assignment(order, driver_id, False, onum)
-            return
 
-        brief = _build_brief(result, result.get("tool_args", {}))
-        await self._run_gate(order, driver_id, brief, onum)
+    async def _await_dispatch_answer(self, order_id: str) -> str | None:
+        """Durable wait for a human's answer to an agent's in-loop ask_human (the
+        `answer_dispatch` signal). Returns None if the demo shuts down while parked, so the
+        team task can exit cleanly instead of blocking the parent's teardown.
+        """
+        while not self._routes_done:
+            await workflow.wait_condition(
+                lambda: order_id in self._dispatch_answers or self._routes_done,
+            )
+            if self._routes_done:
+                return None
+            if order_id in self._dispatch_answers:
+                return self._dispatch_answers.pop(order_id)
+        return None
 
-    async def _publish_langgraph_reasoning(self, result: dict) -> None:
+    async def _publish_langgraph_reasoning(self, result: dict, dispatch_note: str) -> None:
         """Surface the inline LangGraph team's reasoning in the Fleet/Customer/Dispatch panels."""
         fleet = (result.get("fleet_assessment") or "").strip()
         cust = (result.get("customer_assessment") or "").strip()
-        reason = (result.get("tool_args") or {}).get("reason", "")
-        dispatch_note = (
-            f"High-value — calling for human approval. {reason}"
-            if result.get("escalate")
-            else "Within policy — dispatching."
-        )
+        dispatch_note = dispatch_note or "Dispatching."
         await workflow.execute_local_activity(
             publish_agent_events_batch,
             [
@@ -1532,43 +1562,6 @@ class MeltdownDemoWorkflow:
             ],
             start_to_close_timeout=timedelta(seconds=10),
         )
-
-    async def _run_gate(
-        self, order: OrderAssignmentResult, driver_id: str, brief: dict, onum: str
-    ) -> None:
-        """Spawn the durable HITL gate child for an escalated order — the fleet keeps
-        moving while a human decides. Commit on approval, reject on rejection.
-
-        The assessment already ran inline (_run_langgraph_assignment), so the child gets
-        the pre-built brief and performs the human-in-the-loop pause only.
-        """
-        handle = await workflow.start_child_workflow(
-            DispatchGateWorkflow.run,
-            DispatchGateInput(
-                order_id=order.order_id,
-                escalation_seconds=GATE_ESCALATION_SECONDS,
-                use_interrupt=order.use_interrupt or self._gate_use_interrupt,
-                brief=brief,
-            ),
-            id=f"gate-{order.order_id}",
-            static_summary=f"Dispatch gate — {order.order_id} (${order.order_value:,})",
-        )
-        self._gate_handles[order.order_id] = handle
-        try:
-            result = await handle
-        except Exception as e:
-            # Fail open: a gate failure shouldn't lose the order. Commit with a warning.
-            workflow.logger.warning(
-                f"Dispatch gate failed for {order.order_id}: {e} — committing assignment"
-            )
-            result = None
-        self._gate_handles.pop(order.order_id, None)
-        self._pending_dispatch.pop(order.order_id, None)
-
-        if result is None or result.approved:
-            await self._commit_assignment(order, driver_id, False, onum)
-        else:
-            await self._reject_order(order, onum)
 
     async def _reject_order(self, order: OrderAssignmentResult, onum: str) -> None:
         """A supervisor rejected the high-value order — don't commit fleet capacity."""
@@ -1597,6 +1590,142 @@ class MeltdownDemoWorkflow:
             start_to_close_timeout=timedelta(seconds=10),
         )
         workflow.logger.info(f"[#{onum}] {order.order_id} rejected at dispatch gate")
+
+    # --- Human→agent HITL (ADK): re-reason an order when a human revises it ---
+
+    async def _process_human_revisions(self) -> None:
+        """Drain human order-revisions; each one triggers the ADK agent to re-reason."""
+        while not self._routes_done:
+            await workflow.wait_condition(
+                lambda: len(self._pending_revisions) > 0 or self._routes_done,
+            )
+            if self._routes_done:
+                break
+            while self._pending_revisions:
+                await self._reassign_via_adk(self._pending_revisions.pop(0))
+
+    async def _reassign_via_adk(self, change: CustomerChangeInput) -> None:
+        """Human→agent HITL IN the ADK reasoning loop: a human revised this order, so the
+        ADK assignment agent RE-REASONS how to adjust — re-checking the fleet and
+        re-deciding the driver — instead of the system applying a fixed change. The human's
+        edit is input the agent reasons over; the agent decides the response.
+        """
+        order = self._orders.get(change.order_id)
+        if order is None:
+            workflow.logger.info(f"revise: unknown order {change.order_id} — skipping")
+            return
+        onum = change.order_id.split("-", 1)[-1]
+
+        # Apply the human's revision to the order record.
+        if change.new_lat is not None and change.new_lng is not None:
+            order["delivery_lat"] = change.new_lat
+            order["delivery_lng"] = change.new_lng
+        if change.new_hotel is not None:
+            order["hotel"] = change.new_hotel
+
+        await workflow.execute_local_activity(
+            publish_agent_event,
+            PublishAgentEventInput(
+                agent_name="customer_agent",
+                event_type="customer_request",
+                content=(
+                    f"Human revised {change.order_id}: {change.new_details} — "
+                    f"agents re-reasoning the assignment."
+                ),
+                summary=f"Human revised {change.order_id} — re-reasoning",
+            ),
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+
+        # THE HUMAN IS IN THE LOOP: feed the revised order back to the ADK assignment team,
+        # which reasons (Fleet → Customer → Dispatch) over the change and re-decides.
+        assignment = await self._run_adk_assignment(
+            ReasonAboutAssignmentInput(
+                order_id=change.order_id,
+                hotel=order["hotel"],
+                delivery_lat=order["delivery_lat"],
+                delivery_lng=order["delivery_lng"],
+                priority=order.get("priority", "standard"),
+                servings=order.get("servings", 0),
+                deadline_minutes=order.get("deadline_minutes", 0),
+                event=order.get("event", "revised order"),
+                driver_snapshots=self._build_driver_snapshots(),
+                disconnected_agents=list(self._disconnected_agents),
+            )
+        )
+
+        if assignment.agent_events:
+            await workflow.execute_local_activity(
+                publish_agent_events_batch,
+                [
+                    PublishAgentEventInput(
+                        agent_name=e["agent_name"],
+                        event_type=e["event_type"],
+                        content=e["content"],
+                        summary=e.get("summary", ""),
+                    )
+                    for e in assignment.agent_events
+                ],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+
+        # Apply the agent's decision.
+        current_driver = self._find_driver_for_order(change.order_id)
+        new_driver = assignment.driver_id
+        if new_driver not in self._route_handles or new_driver in self._disconnected_drivers:
+            new_driver = current_driver or self._least_loaded_driver()
+
+        order_result = OrderAssignmentResult(
+            order_id=change.order_id,
+            hotel=order["hotel"],
+            delivery_lat=order["delivery_lat"],
+            delivery_lng=order["delivery_lng"],
+            driver_id="",
+            reasoning_summary=assignment.reasoning_summary,
+            priority=order.get("priority", "standard"),
+            servings=order.get("servings", 0),
+            deadline_minutes=order.get("deadline_minutes", 0),
+            event=order.get("event", ""),
+            order_value=order.get("order_value", 0),
+        )
+
+        if current_driver and new_driver and new_driver != current_driver:
+            # Agent reassigned to a better driver: pull from old, give to new.
+            try:
+                await self._route_handles[current_driver].signal(
+                    DriverRouteWorkflow.cancel_order,
+                    OrderUpdateInput(order_id=change.order_id, change_type="cancel"),
+                )
+            except Exception:
+                pass
+            try:
+                self._driver_orders[current_driver].remove(change.order_id)
+            except (KeyError, ValueError):
+                pass
+            await self._commit_assignment(order_result, new_driver, False, onum)
+            workflow.logger.info(
+                f"[#{onum}] agent re-reasoned revision: reassigned "
+                f"{change.order_id} {current_driver} → {new_driver}"
+            )
+        elif current_driver:
+            # Same driver — push the updated destination into its delivery loop.
+            await self._route_handles[current_driver].signal(
+                DriverRouteWorkflow.update_order,
+                OrderUpdateInput(
+                    order_id=change.order_id,
+                    change_type="address_change",
+                    new_lat=order["delivery_lat"],
+                    new_lng=order["delivery_lng"],
+                    new_hotel=order["hotel"],
+                ),
+            )
+            workflow.logger.info(
+                f"[#{onum}] agent re-reasoned revision: kept {current_driver}, updated destination"
+            )
+        else:
+            # Not yet on a driver — commit the agent's fresh choice.
+            await self._commit_assignment(order_result, new_driver, False, onum)
+            workflow.logger.info(f"[#{onum}] agent re-reasoned revision: assigned → {new_driver}")
 
     # --- Signal processing loop ---
 
