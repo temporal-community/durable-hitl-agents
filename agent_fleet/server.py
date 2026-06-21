@@ -350,8 +350,9 @@ async def revise_order(body: CustomerChangeRequest):
     try:
         handle = _temporal_client.get_workflow_handle("meltdown-demo")
         await handle.signal(MeltdownDemoWorkflow.human_revise_order, change)
-    except RPCError as e:
-        return {"error": f"Failed to signal workflow: {e}"}
+    except RPCError:
+        logger.exception("Failed to signal workflow for revise-order")
+        return {"error": "Failed to submit order revision"}
 
     return {"status": "revision_submitted", "order_id": body.order_id}
 
