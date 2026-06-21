@@ -489,8 +489,9 @@ async def set_dispatch_mode(body: DispatchModeRequest):
     try:
         handle = _temporal_client.get_workflow_handle("meltdown-demo")
         await handle.signal(MeltdownDemoWorkflow.set_dispatch_mode, body.mode)
-    except RPCError as e:
-        return {"error": f"Failed to signal workflow: {e}"}
+    except RPCError:
+        logging.exception("Failed to signal workflow")
+        return {"error": "Failed to signal workflow"}
     return {"status": "dispatch_mode_set", "mode": body.mode}
 
 
