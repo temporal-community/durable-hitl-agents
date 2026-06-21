@@ -415,7 +415,8 @@ async def approve_dispatch(body: DispatchDecisionRequest):
             MeltdownDemoWorkflow.answer_dispatch, args=[body.order_id, decision]
         )
     except RPCError as e:
-        return {"error": f"Failed to signal dispatch answer: {e}"}
+        logging.exception("Failed to signal dispatch answer")
+        return {"error": "Failed to signal dispatch answer"}
     return {
         "status": "dispatch_approved" if body.approved else "dispatch_rejected",
         "order_id": body.order_id,
