@@ -1157,6 +1157,10 @@
         <button class="btn btn-change" onclick="submitCustomerChange()">Submit Change</button>
         <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
       </div>
+      <div style="font-size:12px;color:#9fb4c7;margin:8px 0 4px;">Or revise the order and let the agent decide — the human is in the <b>reasoning</b> loop:</div>
+      <div class="btn-row">
+        <button class="btn btn-change" onclick="reviseOrder()" title="Human revises the order; the ADK assignment agent re-reasons and re-decides the driver">↻ Revise → agent re-reasons</button>
+      </div>
       <span id="change-status" style="font-size:14px;color:#fbbf24;display:none;">Awaiting approval...</span>
       <div class="btn-row">
         <button class="btn btn-approve" id="btn-approve" onclick="approveChange(true)" style="display:none;">Approve</button>
@@ -1167,15 +1171,11 @@
     <div class="tab-panel" id="panel-agent">
       <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
       <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
-      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Drop a premium Moscone catering order. The dispatch agent calls the human <b>as a tool</b> (<code>request_human_approval</code>) before committing the fleet — the approval card appears over the map.</div>
+      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Dispatch here runs on the <b>LangGraph</b> looping agent team. Drop a premium Moscone catering order and, mid-reasoning, the dispatch agent calls the human <b>as a tool</b> (<code>ask_human</code>) — the graph pauses on a durable interrupt and the approval card appears over the map; your answer flows back into the agent's loop.</div>
       <div class="btn-row">
         <button class="btn btn-change" onclick="injectHighValueOrder()">Drop high-value order</button>
         <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
       </div>
-      <label style="display:flex;align-items:center;gap:7px;font-size:11px;color:#94a3b8;margin-top:8px;cursor:pointer;">
-        <input type="checkbox" id="hitl-interrupt-toggle" />
-        HITL via LangGraph <code>interrupt()</code> <span style="opacity:.7;">(default: Temporal signal)</span>
-      </label>
       <button class="btn" style="margin-top:8px;font-size:12px;background:#11203a;color:#7dd3fc;border:1px solid #465a78;" onclick="openGraph()">🔗 View the LangGraph</button>
     </div>
   </div>
@@ -1261,26 +1261,26 @@
   <div class="graph-modal-backdrop" onclick="closeAdk()"></div>
   <div class="graph-modal-card">
     <div class="graph-modal-header"><span>🧩 Google ADK · Dispatch Team</span><button onclick="closeAdk()" title="Close">✕</button></div>
-    <div class="graph-modal-sub">The human-in-the-loop pattern's multi-agent assignment. Each agent's LLM call runs as a Temporal activity.</div>
+    <div class="graph-modal-sub">Human → agent. Each agent is a reason → act → observe LOOP (the ADK Runner); every LLM call and tool call runs as a Temporal activity. The human enters the loop two ways — by revising an order (the agent re-reasons) or by changing a delivery (the driver holds).</div>
     <div class="graph-flow">
       <div class="gnode gnode-start">new order</div>
       <div class="garrow">↓</div>
       <div class="gparallel">
-        <div class="gnode gnode-activity">🚚 Fleet Agent<small>activity · Gemini · fleet status, routes</small></div>
-        <div class="gnode gnode-activity">🧑 Customer Agent<small>activity · Gemini · priorities, search</small></div>
+        <div class="gnode gnode-activity">🚚 Fleet Agent<small>reason ⇄ act loop · get_fleet_status / get_route_info (each call an activity)</small></div>
+        <div class="gnode gnode-activity">🧑 Customer Agent<small>reason ⇄ act loop · priorities / search</small></div>
       </div>
-      <div class="garrow">↓&nbsp;&nbsp;run in parallel&nbsp;&nbsp;↓</div>
-      <div class="gnode gnode-activity">🧭 Dispatch Agent<small>activity · weighs both, assigns a driver</small></div>
+      <div class="garrow">↓&nbsp;&nbsp;both loops converge&nbsp;&nbsp;↓</div>
+      <div class="gnode gnode-activity">🧭 Dispatch Agent<small>weighs both, assigns a driver</small></div>
       <div class="garrow">↓</div>
       <div class="gnode gnode-activity">driver assigned · en route</div>
-      <div class="garrow" style="margin-top:8px;">— then, mid-delivery —</div>
-      <div class="gnode gnode-hitl">📝 Customer requests a change<small>human-initiated · operator submits it → signals the workflow</small></div>
+      <div class="garrow" style="margin-top:8px;">— HITL ①: human → agent, in the <b>reasoning</b> loop —</div>
+      <div class="gnode gnode-hitl">📝 Human revises the order (new location)<small>signals human_revise_order → the order's inputs change</small></div>
+      <div class="garrow">↺</div>
+      <div class="gnode gnode-hitl">🔁 ADK team RE-REASONS the assignment<small>Fleet → Customer → Dispatch run again; may reassign / reroute / re-prioritize</small></div>
+      <div class="garrow" style="margin-top:8px;">— HITL ②: human → agent, in the <b>delivery</b> loop —</div>
+      <div class="gnode gnode-hitl">📝 Customer change mid-delivery → ⏸ driver HOLDS at venue<small>durable Temporal signal + wait_condition</small></div>
       <div class="garrow">↓</div>
-      <div class="gnode gnode-hitl">⏸ HITL starts — driver PAUSES (holds at venue)<small>waits on a durable Temporal signal</small></div>
-      <div class="garrow">↓</div>
-      <div class="gnode gnode-hitl">👤 Human approves / rejects<small>→ reroute · cancel · release</small></div>
-      <div class="garrow">↓</div>
-      <div class="gnode gnode-activity">🚚 Driver resumes<small>reroutes, then finishes or cancels the delivery</small></div>
+      <div class="gnode gnode-hitl">👤 Human approves / rejects → 🚚 driver resumes<small>reroute · cancel · release</small></div>
       <div class="garrow">↓</div>
       <div class="gnode gnode-end">END</div>
     </div>
@@ -1295,27 +1295,27 @@
 <div id="graph-modal" class="graph-modal" style="display:none;">
   <div class="graph-modal-backdrop" onclick="closeGraph()"></div>
   <div class="graph-modal-card">
-    <div class="graph-modal-header"><span>🔗 LangGraph · Dispatch Gate</span><button onclick="closeGraph()" title="Close">✕</button></div>
-    <div class="graph-modal-sub">The agent-in-the-loop graph. Each agent node runs as a durable Temporal activity.</div>
+    <div class="graph-modal-header"><span>🔗 LangGraph · Dispatch Team</span><button onclick="closeGraph()" title="Close">✕</button></div>
+    <div class="graph-modal-sub">The looping agent team. Each reason call and each tool call runs as its own durable Temporal activity; the human is a tool the agent calls mid-loop.</div>
     <div class="graph-flow">
       <div class="gnode gnode-start">START</div>
       <div class="garrow">↓</div>
       <div class="gparallel">
-        <div class="gnode gnode-activity">🚚 Fleet Agent<small>activity · Gemini</small></div>
-        <div class="gnode gnode-activity">🧑 Customer Agent<small>activity · Gemini</small></div>
+        <div class="gnode gnode-activity">🚚 Fleet Agent<small>reason ⇄ act loop · get_fleet_status / get_route_info (each call an activity)</small></div>
+        <div class="gnode gnode-activity">🧑 Customer Agent<small>reason ⇄ act loop · get_order_priorities</small></div>
       </div>
-      <div class="garrow">↓&nbsp;&nbsp;run in parallel&nbsp;&nbsp;↓</div>
-      <div class="gnode gnode-activity">🧭 Dispatch Agent<small>activity · weighs both, may call request_human_approval</small></div>
+      <div class="garrow">↓&nbsp;&nbsp;both loops converge&nbsp;&nbsp;↓</div>
+      <div class="gnode gnode-activity">🧭 Dispatch Agent<small>reason ⇄ ask_human loop · weighs both, may call ask_human mid-reasoning</small></div>
       <div class="garrow">↓</div>
-      <div class="gnode gnode-decision">escalate to a human?</div>
+      <div class="gnode gnode-decision">called ask_human?</div>
       <div class="gbranch">
         <div class="gbranch-col">
-          <div class="glabel">yes — agent calls the human ↓</div>
-          <div class="gnode gnode-hitl">⏸ HITL starts — workflow PAUSES<small>agent-initiated · waits on a durable Temporal signal (or LangGraph interrupt) until a human approves / rejects</small></div>
+          <div class="glabel">yes — human as a tool ↓ (loops back)</div>
+          <div class="gnode gnode-hitl">⏸ ask_human — durable interrupt()<small>graph suspends; workflow waits on the answer_dispatch signal, then Command(resume=answer) feeds the answer back into the agent's loop</small></div>
         </div>
         <div class="gbranch-col">
-          <div class="glabel">no ↓</div>
-          <div class="gnode gnode-activity">Dispatch</div>
+          <div class="glabel">no — decided ↓</div>
+          <div class="gnode gnode-activity">Dispatch / Hold</div>
         </div>
       </div>
       <div class="garrow">↓</div>
@@ -1323,7 +1323,7 @@
     </div>
     <div class="graph-legend">
       <span class="lg-activity">node = Temporal activity (durable)</span>
-      <span class="lg-hitl">human-in-the-loop</span>
+      <span class="lg-hitl">human-in-the-loop (ask_human)</span>
     </div>
   </div>
 </div>
@@ -1335,6 +1335,8 @@
 function switchTab(tabName) {
   document.querySelectorAll('.tab-bar .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tabName}`));
+  // The active tab selects which framework dispatches all orders.
+  api('dispatch-mode', 'POST', { mode: tabName === 'agent' ? 'langgraph' : 'adk' });
   // Swap the framework logo to match the active pattern's framework (Temporal stays).
   const brand = document.getElementById('framework-brand');
   if (brand && tabName === 'agent') {
@@ -1885,6 +1887,9 @@ async function api(endpoint, method = 'POST', body = null) {
 async function startDemo() {
   const result = await api('start');
   console.log('Started:', result);
+  // Sync the dispatch framework to whichever tab is active.
+  const mode = document.querySelector('.tab-bar .tab.active')?.dataset.tab === 'agent' ? 'langgraph' : 'adk';
+  await api('dispatch-mode', 'POST', { mode });
 }
 
 async function submitCustomerChange() {
@@ -1949,8 +1954,9 @@ async function pollDispatchGate() {
     if (ids.length === 0) { _gateCurrentOrder = null; card.style.display = 'none'; return; }
     const oid = ids[0], b = pending[oid];
     _gateCurrentOrder = oid;
+    const onum = (b.order_id || oid).replace(/^order-/, '#');
     document.getElementById('dgc-body').innerHTML =
-      `<div class="dgc-order"><b>$${(b.order_value || 0).toLocaleString()}</b> · ${b.venue}</div>`
+      `<div class="dgc-order"><b>Order ${onum}</b> · $${(b.order_value || 0).toLocaleString()} · ${b.venue}</div>`
       + `<div class="dgc-impact">${b.fleet_impact || ''}</div>`
       + `<div class="dgc-rec">Agent recommends <b>${b.recommendation || '—'}</b></div>`;
     card.style.display = 'block';
@@ -1970,9 +1976,25 @@ async function decideDispatch(approved) {
 
 // --- Agent-in-the-loop: drop a high-value order on demand ---
 async function injectHighValueOrder() {
-  const useInterrupt = document.getElementById('hitl-interrupt-toggle')?.checked || false;
-  const result = await api('inject-order', 'POST', { use_interrupt: useInterrupt });
+  const result = await api('inject-order', 'POST', {});
   console.log('Injected high-value order:', result);
+}
+
+// --- Human → Agent, in the reasoning loop: revise an order; the ADK agent re-reasons ---
+async function reviseOrder() {
+  const orderId = document.getElementById('change-order').value;
+  if (!orderId) { alert('Pick an order to revise'); return; }
+  const dest = _rerouteDestination;
+  if (!dest) { alert('Reroute destination not loaded'); return; }
+  showRerouteMarker();
+  const body = {
+    order_id: orderId,
+    change_type: 'address_change',
+    new_details: `${orderId} moved to ${dest.hotel} — agent re-reasoning the assignment`,
+    new_lat: dest.lat, new_lng: dest.lng, new_hotel: dest.hotel,
+  };
+  const result = await api('revise-order', 'POST', body);
+  console.log('Order revised — ADK agent re-reasons:', result);
 }
 
 // --- Graph visualizer modals (LangGraph / ADK) ---

@@ -26,7 +26,7 @@ See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" informati
 ## Pre-flight check
 - Map shows **downtown San Francisco** with three delivery venues — **Moscone Center**, **Fisherman's Wharf**, **Chinatown** — and Ziggy's Ice Cream at the **Ferry Building**
 - All 5 drivers (A–E) are parked at Ziggy's, status idle
-- Two tabs at the top: **Human-in-the-loop** (Operator interrupt) and **Agent-in-the-loop** (Approval gate)
+- Two tabs at the top: **🧑 Human → Agent** (Human-initiated) and **🤖 Agent → Human** (Agent-initiated)
 - "Start Deliveries" button is active on both tabs
 - If you see a stale state from a prior run, click **Reset** first
 
@@ -44,8 +44,9 @@ See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" informati
 
 The demo deliberately uses **two different agent frameworks** on the **same** Temporal runtime, to make the point that the durable-HITL pattern is framework-agnostic.
 
-- **Pattern A (Human-in-the-loop)** is built on **Google ADK** — a multi-agent assignment pipeline (Fleet + Customer Agents in parallel → Dispatch Agent). It runs on **routine** orders.
-- **Pattern B (Agent-in-the-loop)** is built on **LangGraph** via Temporal's `temporalio.contrib.langgraph` integration — a multi-agent team (Fleet + Customer → Dispatch) where the Dispatch agent decides whether to escalate. High-value orders bypass ADK and route here instead.
+- **Pattern A (Human-in-the-loop)** is built on **Google ADK** — a multi-agent assignment pipeline (Fleet + Customer Agents in parallel → Dispatch Agent). It has two flavors: an operator change that gates the *delivery* loop (driver holds at the venue), and a human revision that lands *inside the agent's reasoning loop* — the assignment agent re-reasons the driver.
+- **Pattern B (Agent-in-the-loop)** is built on **LangGraph** via Temporal's `temporalio.contrib.langgraph` integration — a looping multi-agent team (Fleet + Customer → Dispatch) where, mid-reasoning, the Dispatch agent calls an `ask_human` tool to escalate.
+- **The active tab picks the framework for *all* orders** — the dashboard signals `set_dispatch_mode` (`adk` or `langgraph`). There's no value threshold steering orders between them; whichever tab you're on dispatches every order.
 
 ### What is Google ADK? (30 seconds)
 
@@ -53,7 +54,7 @@ The demo deliberately uses **two different agent frameworks** on the **same** Te
 
 ### What is the LangGraph integration? (30 seconds)
 
-> "Pattern B uses LangGraph — a graph of nodes — running *inside* a Temporal workflow via `temporalio.contrib.langgraph`. It's a multi-agent team that mirrors the ADK side: a Fleet node and a Customer node assess in parallel, then a Dispatch node decides. Each node is a real Gemini call, run as its own Temporal activity. When the Dispatch agent decides an order needs sign-off, it calls a `request_human_approval` tool — and on Temporal, that tool call becomes a durable **signal**: the graph hands the escalation back to the workflow, which parks on a `wait_condition` until a human answers (or a timeout escalates to a backup approver). The draft they're approving is exposed through a query. Same durable primitive, completely different framework. LangGraph's own `interrupt()` can drive the pause instead — it's a back-pocket toggle (`HITL_MODE=interrupt`), but the talk leads with the Temporal-signal version."
+> "Pattern B uses LangGraph — a graph of nodes — running *inside* the parent Temporal workflow via `temporalio.contrib.langgraph`. It's a looping multi-agent team that mirrors the ADK side: a Fleet node and a Customer node assess in parallel, then a Dispatch node decides — each node a real Gemini call run as its own Temporal activity, recorded in the parent's history. Here's the headline: the HITL is **inside the reasoning loop**. Mid-reasoning, the Dispatch agent calls an `ask_human` tool. That tool's execution is a durable LangGraph `interrupt()` that suspends the graph; the parent workflow surfaces the question, parks on the `answer_dispatch` Temporal **signal** + `wait_condition` until a human answers, then resumes the agent via `Command(resume=answer)` — so the human's answer flows back as the agent's *next observation*. There's no per-order gate child; the pause lives inside the agent's loop. Same durable primitive as Pattern A, completely different framework."
 
 ---
 
@@ -61,9 +62,9 @@ The demo deliberately uses **two different agent frameworks** on the **same** Te
 
 Optional drop-ins for mid-demo — when the conversation turns to scale or to what "production Temporal" actually looks like. Open the Temporal UI alongside the dashboard.
 
-- **"Open the event history."** Click into any `route-driver-*` workflow and scroll. You'll see ~50–100 events per order: each Gemini call, each tool call, each navigation leg, each delivery. That's **per-call durability** — every one of those is an independent retry unit. Crash the worker mid-Dispatch-Agent and the Fleet Agent's earlier assessment is replayed from history, not re-called.
+- **"Open the event history."** Click into any `route-driver-*` workflow and scroll. You'll see ~50–100 events per order: each Gemini call, each tool call, each navigation leg, each delivery. That's **per-call durability** — every one of those is an independent retry unit. In the LangGraph tab the agent-team activities (Fleet, Customer, Dispatch) run *inline* and are recorded right here in the parent workflow's history, not in a separate per-order child. Crash the worker mid-Dispatch-Agent and the Fleet Agent's earlier assessment is replayed from history, not re-called.
 - **"Where are driver positions in the event log?"** They're not. `navigate_to` heartbeats position to shared state (SQLite here, Redis or Postgres in prod) every ~400ms. None of those writes hit Temporal. The pattern: signals for milestones (delivery complete, new order, human approval), shared state for continuous telemetry.
-- **"What about the approval gate?"** Open the `gate-<order-id>` workflow while the approval card is up. You'll see the LangGraph agent-team activities (Fleet, Customer, Dispatch), then the workflow parked on a `wait_condition` waiting for the `approve` signal. The brief the human sees is surfaced via `/api/pending-dispatch`, which reads the parent workflow's `pending_dispatch` dict (the gate signals it up via `dispatch_gate_awaiting`) — not from any database the UI polls blindly. The gate also exposes its own `pending_brief` query.
+- **"Where does the agent's question to the human live?"** There's **no per-order gate child** — open the `meltdown-demo` parent workflow while the approval card is up. The looping LangGraph team ran inline in the parent; mid-reasoning the Dispatch agent called `ask_human`, which suspended the graph on a durable `interrupt()`. The parent surfaces that question into its `pending_dispatch` dict and parks on the `answer_dispatch` signal + `wait_condition` — that single durable pause is the whole HITL. The brief the human sees is surfaced via `/api/pending-dispatch`, which reads the parent's `pending_dispatch` dict (via the `get_status` query) — not from any database the UI polls blindly. (A legacy `DispatchGateWorkflow` is still registered but unused by the demo.)
 
 Full breakdown lives in [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
 
@@ -115,29 +116,42 @@ This is **operator-initiated**: the change is submitted externally (an operator 
 
 **Temporal concept to highlight:** Dual `wait_condition` (parent + child), cross-workflow signals, durable pause without polling.
 
+### Variant — Human → Agent, in the *reasoning* loop
+
+The flow above gates the *delivery* loop: the change is fixed and a human only says yes/no. This second beat puts the human inside the *agent's* loop — a human revises an order (new location / details) and the ADK assignment agent **re-reasons** how to adjust, instead of the system applying a canned change. Same Pattern A ("the human calls the agent"), but the human's edit is now input the agent reasons over.
+
+- The revision arrives as the `human_revise_order` signal (`POST /api/revise-order`).
+- That hands the revised order back to the **ADK assignment team** (`_reassign_via_adk` → `_run_adk_assignment`): Fleet → Customer → Dispatch run **again** over the change.
+- The agent **re-decides**: re-check the fleet, then either reassign to a better driver (pull from the old driver, give to the new one), keep the same driver and push the new destination into its delivery loop, or assign fresh if it wasn't on a driver yet.
+
+**What to say:**
+> "First time, the operator changed the order and a human just approved a fixed action. Watch this one — I revise the order, and the agents don't apply a script. They re-reason it: Fleet re-checks who's free, Customer re-weighs priority, Dispatch re-decides the driver. The human's edit is just new input the agent reasons over — that's the human *in the agent's loop*, still on the same durable Temporal signal."
+
+> **Note (current build):** `/api/revise-order` and the re-reason path are wired in `server.py`/`workflows.py`, but the Human → Agent tab does not yet expose a dedicated "revise" button — the existing **Submit Change** control drives the gate-the-delivery flow. To demo the re-reason beat live, trigger `POST /api/revise-order` directly (e.g. `curl`) until a UI control is added.
+
 ---
 
 ## Pattern B — Agent-in-the-Loop: "The Agent Calls the Human"
 **Time: 3–4 min | Tab: Agent-in-the-loop | Best for: the headline — the human as a durable async tool call, surviving worker death**
 
-A high-value order **bypasses the ADK pipeline entirely** and routes to a per-order `DispatchGateWorkflow`. Inside it runs a **multi-agent LangGraph team** that mirrors the ADK side — Fleet and Customer nodes assess in parallel, then a Dispatch node decides — each node a real Gemini call run as a Temporal activity. The Dispatch agent **decides for itself** whether to escalate, the way agents naturally express decisions: by calling a tool, `request_human_approval`. By default, that tool call surfaces an escalate flag + brief, and the **workflow** does the human-in-the-loop with a durable Temporal **signal** + `wait_condition`; the draft brief is exposed via a **query**, and a timeout escalates to a backup approver. (LangGraph's own `interrupt()` can drive the pause instead — a back-pocket toggle via `HITL_MODE=interrupt`.) Routine auto-generated orders stay under the $2,000 review threshold and never trip the gate — so this fires only when you choose.
+On the Agent-in-the-loop tab, **every order** runs a **looping multi-agent LangGraph team** inline in the parent workflow — Fleet and Customer nodes assess in parallel, then a Dispatch node decides — each node a real Gemini call run as a Temporal activity (recorded in the parent's own history). The HITL is **inside the reasoning loop**: **mid-reasoning**, the Dispatch agent **decides for itself** to escalate, the way agents naturally express decisions — by calling a tool, `ask_human`. That tool's execution is a durable LangGraph `interrupt()` that **suspends the graph**. The parent workflow (`_run_langgraph_assignment`) surfaces the question into its `pending_dispatch` dict, parks on the `answer_dispatch` Temporal **signal** + `wait_condition`, and resumes the agent with `Command(resume=answer)` — the human's answer flows back as the agent's *next observation*. There is **no per-order gate child**; the pause lives inside the agent's loop. If the agent doesn't escalate, the order commits directly. The agent only escalates genuinely high-value orders, and auto-generated orders top out around ~$1,950 (servings ≤150 × ≤$13), so routine orders auto-dispatch — the approval card fires only when you drop the premium order.
 
 **Setup:** On the **Agent-in-the-loop** tab, click **Start Deliveries** so the fleet is moving.
 
 **Steps:**
-1. Click **Drop high-value order**. This injects a premium **Moscone Center** catering order (well above $2,000) via `POST /api/inject-order`.
-2. The order **bypasses ADK** and routes to a `DispatchGateWorkflow`. Its multi-agent LangGraph team (Fleet + Customer → Dispatch) reasons about the value and fleet impact; the Dispatch agent **decides to call `request_human_approval`**, and the workflow parks on a durable Temporal signal.
-3. An **approval card appears over the map** — "Agent is requesting human approval" — with the agent's reasoning, recommendation, order value, and fleet impact. The brief is surfaced via `GET /api/pending-dispatch`, which reads the parent workflow's `pending_dispatch` dict (populated when the gate child signals `dispatch_gate_awaiting`).
-4. **The durability moment — kill the worker now.** While the card is up, stop the worker process (Ctrl-C in its terminal, or kill the `python -m agent_fleet.worker` process). The fleet freezes — but the *pending approval state is in Temporal, not in the worker's memory.*
-5. **Restart the worker.** The fleet resumes and the approval card is still there, waiting. Nothing was lost. (Optionally show the parked `gate-<order-id>` workflow in the Temporal UI before and after — same `wait_condition`, resumed from history.)
-6. Click **Approve dispatch** or **Reject** (`POST /api/approve-dispatch` signals `DispatchGateWorkflow.approve`):
-   - **Approve:** the order commits to the proposed driver and the fleet delivers it.
-   - **Reject:** the order is not dispatched — fleet capacity is preserved, the order shows as cancelled.
+1. Click **Drop high-value order**. This injects a premium **Moscone Center** catering order (well above the routine ~$1,950 cap) via `POST /api/inject-order`.
+2. The looping LangGraph multi-agent team (Fleet + Customer → Dispatch) — running **inline in the parent workflow** — assesses the value and fleet impact; **mid-reasoning** the Dispatch agent **calls the `ask_human` tool**. That suspends the graph on a durable `interrupt()`, and the parent parks on the `answer_dispatch` signal — no child workflow spawned.
+3. An **approval card appears over the map** — "Agent is requesting human approval" — with the agent's question, reasoning, recommendation, order value, and fleet impact. The brief is surfaced via `GET /api/pending-dispatch`, which reads the parent workflow's `pending_dispatch` dict (populated when the agent's `ask_human` interrupt fires).
+4. **The durability moment — kill the worker now.** While the card is up, stop the worker process (Ctrl-C in its terminal, or kill the `python -m agent_fleet.worker` process). The fleet freezes — but the *pending question is in Temporal, not in the worker's memory.*
+5. **Restart the worker.** The fleet resumes and the approval card is still there, waiting. Nothing was lost. (Optionally show the parked `meltdown-demo` parent workflow in the Temporal UI before and after — same `wait_condition` on `answer_dispatch`, resumed from history. No `gate-*` child to look for.)
+6. Click **Approve dispatch** or **Reject** (`POST /api/approve-dispatch` signals `MeltdownDemoWorkflow.answer_dispatch`):
+   - **Approve:** the answer flows back into the agent's reasoning; the order commits to the proposed driver and the fleet delivers it.
+   - **Reject:** the answer flows back as a reject; the order is held — fleet capacity is preserved, the order shows as cancelled.
 
 **What to say:**
-> "Routine orders, the agents just dispatch. But this one's a big-ticket Moscone catering order — committing the fleet to it bumps other customers and it's costly to get wrong. So the agent does what agents do when they're unsure: it calls a tool. That tool is `request_human_approval`. Here's the thing — that's not a blocking function call. On Temporal it becomes a durable **signal**: the workflow parks on a `wait_condition` and waits for a human, for as long as it takes. Watch: I kill the worker. The agent's 'tool call' is still outstanding — but it's parked in Temporal's event log, not in a process that just died. I restart the worker… and the approval is still right here, waiting for me. The human is just another tool the agent calls — a durable, async one. Now I approve, and the fleet commits."
+> "Routine orders, the agents just dispatch. But this one's a big-ticket Moscone catering order — committing the fleet to it bumps other customers and it's costly to get wrong. So the agent does what agents do when they're unsure, right in the middle of reasoning: it calls a tool. That tool is `ask_human`. Here's the thing — that's not a blocking function call. Its execution is a LangGraph `interrupt()` that suspends the graph, and on Temporal the pause becomes a durable **signal**: the parent workflow parks on a `wait_condition` and waits for a human, for as long as it takes. Watch: I kill the worker. The agent's 'tool call' is still outstanding — but it's parked in Temporal's event log, not in a process that just died. I restart the worker… and the question is still right here, waiting for me. The human is just another tool the agent calls — a durable, async one. Now I approve, the answer flows back as the agent's next observation, and it commits the fleet."
 
-**Temporal concept to highlight:** Agent-initiated escalation mapped to a durable Temporal signal + `wait_condition` (default; `interrupt()` is the back-pocket toggle), query-backed draft, timeout → backup-approver escalation, **survives worker death**.
+**Temporal concept to highlight:** Agent-initiated escalation **inside the reasoning loop** (`ask_human` → LangGraph `interrupt()`) mapped to a durable Temporal signal (`answer_dispatch`) + `wait_condition`, resumed via `Command(resume=answer)`, query-backed brief, **no per-order child**, **survives worker death**.
 
 ---
 
@@ -147,13 +161,13 @@ A high-value order **bypasses the ADK pipeline entirely** and routes to a per-or
 > "A queue gives you one retry per message. Temporal gives you a full execution model — retries, timeouts, backoff, heartbeating, child workflows, signals, queries — all in code, not config. The human pause in both patterns is just a `wait_condition` on a signal; the runtime holds it durably for as long as it takes."
 
 **"Why two frameworks?"**
-> "To show the pattern isn't tied to one. Pattern A is Google ADK, Pattern B is LangGraph. Different agent frameworks, same Temporal primitive: a human decision arrives as a durable async signal. The dispatch gate's model provider is even swappable via env — the pattern is model- and framework-agnostic."
+> "To show the pattern isn't tied to one. Pattern A is Google ADK, Pattern B is LangGraph. Different agent frameworks, same Temporal primitive: a human decision arrives as a durable async signal. In both, the human is a tool the agent's loop reasons over — the pattern is model- and framework-agnostic."
 
 **"What if Gemini returns something unexpected?"**
-> "The ADK agents submit output via structured tool calls — `tool_submit_assignment` writes a typed object the workflow reads. The LangGraph agent's escalation is a tool call too. If a step produces garbage or fails, it's a Temporal activity, so it retries with backoff. There's a clear contract."
+> "The ADK agents submit output via structured tool calls — `tool_submit_assignment` writes a typed object the workflow reads. The LangGraph agent's escalation is a tool call too (`ask_human`). If a step produces garbage or fails, it's a Temporal activity, so it retries with backoff. There's a clear contract."
 
-**"What happens if nobody approves the gate?"**
-> "There's a timeout. The primary approver window elapses, the gate escalates to a backup approver tier, and it keeps waiting durably. The order isn't lost and the fleet isn't blocked — the gate runs concurrently while the rest of the fleet keeps delivering."
+**"What happens if nobody answers the agent?"**
+> "Nothing is lost. The agent's `ask_human` is parked on a durable `wait_condition` in the parent workflow — it keeps waiting for as long as it takes, surviving worker restarts. And the rest of the fleet keeps delivering, because the agent's reasoning task runs concurrently — it doesn't block the parent."
 
 **"Is this production-ready?"**
 > "The pattern is. Temporal runs at Stripe, Netflix, Uber. The integrations shown — `temporalio[google-adk]` and `temporalio.contrib.langgraph` — are the official ones."
@@ -164,5 +178,5 @@ A high-value order **bypasses the ADK pipeline entirely** and routes to a per-or
 
 1. Click **Reset** on the dashboard.
 2. Verify all delivery actors return to idle at Ziggy's Ice Cream (Ferry Building).
-3. If any workflows are stuck, run `temporal workflow list` and cancel manually (including any `gate-*` workflows).
+3. If any workflows are stuck, run `temporal workflow list` and cancel manually (`meltdown-demo`, `order-generation`, `route-driver-*`).
 4. Refresh the browser before the next run.

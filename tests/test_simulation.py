@@ -144,16 +144,18 @@ async def test_assign_order_degraded_flag():
 
 async def test_get_driver_position():
     """sync_driver_position relies on get_driver_position returning actual coords."""
+    from agent_fleet.locations import WAREHOUSE
+
     lat, lng = await fleet.get_driver_position("driver-a")
-    # Should be at warehouse initially (seeded by reset)
-    assert abs(lat - 36.1040) < 0.01
-    assert abs(lng - (-115.1530)) < 0.01
+    # Should be at the shop (Ferry Building) initially (seeded by reset)
+    assert abs(lat - WAREHOUSE.lat) < 0.01
+    assert abs(lng - WAREHOUSE.lng) < 0.01
 
     # Move driver and verify position updates
-    await fleet.update_driver_position("driver-a", 36.12, -115.18)
+    await fleet.update_driver_position("driver-a", 37.78, -122.40)
     lat, lng = await fleet.get_driver_position("driver-a")
-    assert abs(lat - 36.12) < 0.001
-    assert abs(lng - (-115.18)) < 0.001
+    assert abs(lat - 37.78) < 0.001
+    assert abs(lng - (-122.40)) < 0.001
 
 
 async def test_is_order_terminal():

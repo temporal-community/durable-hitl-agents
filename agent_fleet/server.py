@@ -31,8 +31,7 @@ from temporalio.service import RPCError
 
 load_dotenv()
 
-from agent_fleet.config import INTERRUPT_MODE, TEMPORAL_ADDRESS
-from agent_fleet.dispatch_gate import DispatchGateWorkflow
+from agent_fleet.config import TEMPORAL_ADDRESS
 from agent_fleet.locations import COSMOPOLITAN, VENUES, WAREHOUSE, WAREHOUSE_LABEL
 from agent_fleet.models import (
     AgentDisconnectInput,
@@ -109,10 +108,7 @@ async def start_demo():
         try:
             handle = await _temporal_client.start_workflow(
                 MeltdownDemoWorkflow.run,
-                MeltdownDemoInput(
-                    escalation_enabled=_escalation_enabled,
-                    use_interrupt=INTERRUPT_MODE,
-                ),
+                MeltdownDemoInput(escalation_enabled=_escalation_enabled),
                 id="meltdown-demo",
                 task_queue=WORKFLOWS_QUEUE,
                 static_summary="Meltdown — ice cream fleet orchestrator",
@@ -307,8 +303,9 @@ async def submit_customer_change(body: CustomerChangeRequest):
     try:
         handle = _temporal_client.get_workflow_handle("meltdown-demo")
         await handle.signal(MeltdownDemoWorkflow.customer_change, change)
-    except RPCError as e:
-        return {"error": f"Failed to signal workflow: {e}"}
+    except RPCError:
+        logger.exception("Failed to signal customer-change")
+        return {"error": "Failed to submit customer change"}
 
     # Signal the child workflow directly to hold before delivery —
     # same pattern as disconnect/reconnect. Parent handles the approval
@@ -334,6 +331,33 @@ async def submit_customer_change(body: CustomerChangeRequest):
     }
 
 
+@app.post("/api/revise-order")
+async def revise_order(body: CustomerChangeRequest):
+    """Human→agent HITL (ADK, in the reasoning loop): a human revises an order's location/
+    details and the ADK assignment agent RE-REASONS how to adjust — re-checking the fleet
+    and re-deciding the driver — rather than the system applying a fixed change.
+    """
+    if _temporal_client is None:
+        return {"error": "Temporal client not connected"}
+
+    change = CustomerChangeInput(
+        order_id=body.order_id,
+        change_type=body.change_type,
+        new_details=body.new_details,
+        new_lat=body.new_lat,
+        new_lng=body.new_lng,
+        new_hotel=body.new_hotel,
+    )
+    try:
+        handle = _temporal_client.get_workflow_handle("meltdown-demo")
+        await handle.signal(MeltdownDemoWorkflow.human_revise_order, change)
+    except RPCError:
+        logger.exception("Failed to signal workflow for revise-order")
+        return {"error": "Failed to submit order revision"}
+
+    return {"status": "revision_submitted", "order_id": body.order_id}
+
+
 class ChangeDecisionRequest(BaseModel):
     approved: bool
 
@@ -347,8 +371,9 @@ async def approve_change(body: ChangeDecisionRequest):
     try:
         handle = _temporal_client.get_workflow_handle("meltdown-demo")
         await handle.signal(MeltdownDemoWorkflow.change_approved, body.approved)
-    except RPCError as e:
-        return {"error": f"Failed to signal workflow: {e}"}
+    except RPCError:
+        logger.exception("Failed to signal change-approval")
+        return {"error": "Failed to submit change decision"}
 
     decision = "approved" if body.approved else "rejected"
     return {"status": f"change_{decision}"}
@@ -370,52 +395,51 @@ async def pending_dispatch():
     try:
         handle = _temporal_client.get_workflow_handle("meltdown-demo")
         status = await handle.query(MeltdownDemoWorkflow.get_status)
-    except RPCError as e:
-        return {"error": f"Failed to query workflow: {e}"}
+    except RPCError:
+        logger.exception("Failed to query workflow for pending-dispatch")
+        return {"error": "Failed to query pending dispatch"}
     return {"pending_dispatch": status.get("pending_dispatch", {})}
 
 
 @app.post("/api/approve-dispatch")
 async def approve_dispatch(body: DispatchDecisionRequest):
-    """Approve or reject an agent-escalated high-value dispatch.
+    """Answer an agent's in-loop ask_human for a high-value dispatch.
 
-    Signals the per-order DispatchGateWorkflow child — the durable async endpoint
-    the agent's request_human_approval tool is parked on.
+    Signals the demo workflow's `answer_dispatch` — the durable async endpoint the
+    LangGraph Dispatch/Fleet agent's ask_human tool is parked on (via interrupt()). The
+    answer flows back into the agent's reasoning loop.
     """
     if _temporal_client is None:
         return {"error": "Temporal client not connected"}
     decision = "approve" if body.approved else "reject"
     try:
-        gate = _temporal_client.get_workflow_handle(f"gate-{body.order_id}")
-        await gate.signal(DispatchGateWorkflow.approve, decision)
-    except RPCError as e:
-        return {"error": f"Failed to signal dispatch gate: {e}"}
+        handle = _temporal_client.get_workflow_handle("meltdown-demo")
+        await handle.signal(
+            MeltdownDemoWorkflow.answer_dispatch, args=[body.order_id, decision]
+        )
+    except RPCError:
+        logger.exception("Failed to signal dispatch answer")
+        return {"error": "Failed to signal dispatch answer"}
     return {
         "status": "dispatch_approved" if body.approved else "dispatch_rejected",
         "order_id": body.order_id,
     }
 
 
-class InjectOrderRequest(BaseModel):
-    use_interrupt: bool = False  # which HITL impl the gate uses (UI toggle)
-
-
 _injected_order_count = 0
 
 
 @app.post("/api/inject-order")
-async def inject_high_value_order(body: InjectOrderRequest | None = None):
-    """Drop a premium Moscone catering order on demand — the agent will escalate it.
+async def inject_high_value_order():
+    """Drop a premium Moscone catering order on demand — the agent will call ask_human.
 
     This is the deliberate trigger for the agent-in-the-loop (Pattern B) demo:
-    registers the order in FleetState (so it shows on the map) and signals the
-    workflow, which routes it to the dispatch gate because of its value. The
-    `use_interrupt` toggle picks the gate's HITL impl (Temporal signal vs interrupt).
+    registers the order in FleetState (so it shows on the map) and signals the workflow.
+    Because of its value, the LangGraph Dispatch agent calls ask_human mid-reasoning.
     """
     global _injected_order_count
     if _temporal_client is None:
         return {"error": "Temporal client not connected"}
-    use_interrupt = bool(body and body.use_interrupt)
     _injected_order_count += 1
     oid = f"order-vip-{_injected_order_count}"
     venue = next((v for v in VENUES if v["vip_tier"] == "platinum"), VENUES[0])
@@ -445,17 +469,34 @@ async def inject_high_value_order(body: InjectOrderRequest | None = None):
                 deadline_minutes=deadline,
                 event=event,
                 order_value=value,
-                use_interrupt=use_interrupt,
             ),
         )
-    except RPCError as e:
-        return {"error": f"Failed to signal workflow: {e}"}
+    except RPCError:
+        logger.exception("Failed to signal inject-order")
+        return {"error": "Failed to inject order"}
     return {
         "status": "injected",
         "order_id": oid,
         "order_value": value,
-        "use_interrupt": use_interrupt,
     }
+
+
+class DispatchModeRequest(BaseModel):
+    mode: str = "adk"  # "adk" (Human → Agent tab) or "langgraph" (Agent → Human tab)
+
+
+@app.post("/api/dispatch-mode")
+async def set_dispatch_mode(body: DispatchModeRequest):
+    """The active UI tab sets which framework dispatches all orders."""
+    if _temporal_client is None:
+        return {"error": "Temporal client not connected"}
+    try:
+        handle = _temporal_client.get_workflow_handle("meltdown-demo")
+        await handle.signal(MeltdownDemoWorkflow.set_dispatch_mode, body.mode)
+    except RPCError:
+        logger.exception("Failed to signal set-dispatch-mode")
+        return {"error": "Failed to set dispatch mode"}
+    return {"status": "dispatch_mode_set", "mode": body.mode}
 
 
 # --- Demo config endpoints ---

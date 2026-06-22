@@ -3,7 +3,7 @@ ADK agent definitions for the Meltdown ice cream delivery demo.
 
 Order assignment pipeline:
 - Fleet Agent: assesses driver positions, capacity, and ETAs for new orders
-- Customer Agent: evaluates order priority, urgency, and hotel context
+- Customer Agent: evaluates order priority, urgency, and venue context
 - Dispatch Agent: synthesizes both and submits a structured driver assignment
 
 Architecture:
@@ -95,19 +95,19 @@ _TOOL_LABELS = {
     "tool_get_route_info": ("LLM reasoning on route ETA", "route ETA FAILED"),
     "tool_get_order_priorities": ("LLM reasoning on order priorities", "order priorities FAILED"),
     "tool_submit_assignment": ("assignment submitted", "assignment FAILED"),
-    "google_search_agent": ("LLM reasoning on hotel context", "hotel search FAILED"),
+    "google_search_agent": ("LLM reasoning on venue context", "venue search FAILED"),
 }
 
 
 def _extract_order_context(llm_request: LlmRequest) -> tuple[str | None, str | None]:
-    """Extract order number and hotel from the first user message."""
+    """Extract order number and venue from the first user message."""
     if not llm_request.contents:
         return None, None
     first = llm_request.contents[0]
     if first.role == "user" and first.parts:
         text = first.parts[0].text or ""
         num_match = re.search(r"Order ID:\s*order-(\d+)", text)
-        hotel_match = re.search(r"Hotel:\s*(.+)", text)
+        hotel_match = re.search(r"Venue:\s*(.+)", text)
         return (
             num_match.group(1) if num_match else None,
             hotel_match.group(1).strip() if hotel_match else None,
@@ -243,7 +243,7 @@ def create_assignment_fleet_agent() -> Agent:
 def create_assignment_customer_agent() -> Agent:
     """
     Customer Agent for order assignment — evaluates priority, urgency,
-    hotel context, and deadline pressure for a new order.
+    venue context, and deadline pressure for a new order.
     """
     return Agent(
         name="assignment_customer_agent",
@@ -254,17 +254,17 @@ def create_assignment_customer_agent() -> Agent:
         ),
         description=(
             "Customer priority specialist for order assignment. Evaluates order "
-            "priority, urgency, deadline pressure, and hotel context."
+            "priority, urgency, deadline pressure, and venue context."
         ),
         instruction=(
             "You are the Customer Relations AI for Meltdown Ice Cream Delivery. "
             "A new order has arrived — assess its priority and urgency.\n\n"
             "Call tool_get_order_priorities for order details. "
-            "Use Google Search to find current events at the delivery hotel.\n\n"
-            "Assess: VIP or standard? Deadline tight? Hotel events increasing urgency? "
+            "Use Google Search to find current events at the delivery venue.\n\n"
+            "Assess: VIP or standard? Deadline tight? Venue events increasing urgency? "
             "How many servings?\n\n"
             "Respond with ONLY: priority level and key urgency factor. "
-            "Example: 'VIP, tight deadline (25min), Westin St. Francis gala tonight.' "
+            "Example: 'VIP, tight deadline (25min), Moscone Center conference tonight.' "
             "No preamble, no full analysis."
         ),
         tools=[
