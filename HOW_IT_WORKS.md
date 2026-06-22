@@ -152,12 +152,6 @@ cadence (±30% jitter around a 12s base — `ORDER_INTERVAL_SECONDS`, min 5s).
 Auto-generated orders top out around $1,950 (servings ≤150 × ≤$13), so the agent
 never escalates them — only the deliberately injected premium order does.
 
-**`DispatchGateWorkflow`** (in `dispatch_gate.py`) is **legacy / unused-by-demo** — a
-boundary-gate HITL child (`id=gate-<order_id>`) from an earlier design. It's still
-registered on the workflow worker for spikes/back-compat, but the demo's Pattern B
-HITL now happens **inside the reasoning loop** via the `ask_human` tool (see Pattern B
-below), not in a gate child.
-
 The workflows connect through signals in both directions:
 - **Parent → child:** `add_order`, `update_pending` (HITL hold), `resolve_update`
   (HITL decision), `cancel_order`, plus dormant `driver_disconnected` /
@@ -489,7 +483,7 @@ server runs in its own process.
 
 | Queue | Worker | What it runs |
 |---|---|---|
-| `meltdown-workflows` | Workflows + minimal local activities | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow`, `DispatchGateWorkflow` (legacy/unused-by-demo, still registered); `publish_agent_event` / `publish_agent_events_batch` (local activities); the Pattern B node activities (Fleet/Customer/Dispatch Gemini reason calls **and each tool call**, via `LangGraphPlugin`) — these run for the team graph **inline in `MeltdownDemoWorkflow`**. `LangGraphPlugin` registers **two** graphs: `GRAPH_NAME = "dispatch_team"` (the looping multi-agent team with the in-loop `ask_human` tool) and the legacy `GRAPH_NAME_HUMAN` (1-node interrupt pause, for the unused-by-demo `DispatchGateWorkflow`). There is no `GRAPH_NAME_INTERRUPT`. |
+| `meltdown-workflows` | Workflows + minimal local activities | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow`; `publish_agent_event` / `publish_agent_events_batch` (local activities); the Pattern B node activities (Fleet/Customer/Dispatch Gemini reason calls **and each tool call**, via `LangGraphPlugin`) — these run for the team graph **inline in `MeltdownDemoWorkflow`**. `LangGraphPlugin` registers exactly **one** graph: `GRAPH_NAME = "dispatch_team"` (the looping multi-agent team with the in-loop `ask_human` tool). |
 | `meltdown-delivery` | Delivery | `generate_order`, `navigate_to`, `pickup_orders`, `deliver_order`, `execute_customer_change`, `get_route_polyline`, `get_fleet_status`, `get_order_priorities`, `set_driver_idle`, `set_warmup_hidden`, `sync_driver_position` (max 20 concurrent) |
 | `meltdown-agents` | ADK/LLM activities | `register_assignment`, `tool_get_fleet_status`, `tool_get_order_priorities`, `tool_get_route_info`, plus the ADK `invoke_model` activity + `google_search` grounding (max 5 concurrent) |
 
@@ -506,12 +500,10 @@ delivery at 20.
 - `GoogleAdkPlugin` is on **both** the workflow worker (sandbox passthroughs for
   `google.adk` / `google.genai`, deterministic runtime for replay) and the agents
   worker (hosts the `invoke_model` activity that calls Gemini for Pattern A).
-- `LangGraphPlugin(graphs={...})` is on the **workflow** worker, registering two
-  graphs — `GRAPH_NAME: build_dispatch_team_graph()` (the looping multi-agent team) and
-  the legacy `GRAPH_NAME_HUMAN: build_human_graph()` (for the unused-by-demo
-  `DispatchGateWorkflow`). It runs the Pattern B team inline in `MeltdownDemoWorkflow`,
-  and the team's node activities (each agent's reason call and each tool call) execute
-  there.
+- `LangGraphPlugin(graphs={...})` is on the **workflow** worker, registering exactly one
+  graph — `GRAPH_NAME: build_dispatch_team_graph()` (the looping multi-agent team). It
+  runs the Pattern B team inline in `MeltdownDemoWorkflow`, and the team's node activities
+  (each agent's reason call and each tool call) execute there.
 
 `TemporalModel` uses `ActivityConfig(task_queue=AGENTS_QUEUE)` to route Pattern
 A's LLM calls from the workflow to the agents queue.

@@ -1263,30 +1263,76 @@
     <div class="graph-modal-header"><span>🧩 Google ADK · Dispatch Team</span><button onclick="closeAdk()" title="Close">✕</button></div>
     <div class="graph-modal-sub">Human → agent. Each agent is a reason → act → observe LOOP (the ADK Runner); every LLM call and tool call runs as a Temporal activity. The human enters the loop two ways — by revising an order (the agent re-reasons) or by changing a delivery (the driver holds).</div>
     <div class="graph-flow">
-      <div class="gnode gnode-start">new order</div>
-      <div class="garrow">↓</div>
-      <div class="gparallel">
-        <div class="gnode gnode-activity">🚚 Fleet Agent<small>reason ⇄ act loop · get_fleet_status / get_route_info (each call an activity)</small></div>
-        <div class="gnode gnode-activity">🧑 Customer Agent<small>reason ⇄ act loop · priorities / search</small></div>
-      </div>
-      <div class="garrow">↓&nbsp;&nbsp;both loops converge&nbsp;&nbsp;↓</div>
-      <div class="gnode gnode-activity">🧭 Dispatch Agent<small>weighs both, assigns a driver</small></div>
-      <div class="garrow">↓</div>
-      <div class="gnode gnode-activity">driver assigned · en route</div>
-      <div class="garrow" style="margin-top:8px;">— HITL ①: human → agent, in the <b>reasoning</b> loop —</div>
-      <div class="gnode gnode-hitl">📝 Human revises the order (new location)<small>signals human_revise_order → the order's inputs change</small></div>
-      <div class="garrow">↺</div>
-      <div class="gnode gnode-hitl">🔁 ADK team RE-REASONS the assignment<small>Fleet → Customer → Dispatch run again; may reassign / reroute / re-prioritize</small></div>
-      <div class="garrow" style="margin-top:8px;">— HITL ②: human → agent, in the <b>delivery</b> loop —</div>
-      <div class="gnode gnode-hitl">📝 Customer change mid-delivery → ⏸ driver HOLDS at venue<small>durable Temporal signal + wait_condition</small></div>
-      <div class="garrow">↓</div>
-      <div class="gnode gnode-hitl">👤 Human approves / rejects → 🚚 driver resumes<small>reroute · cancel · release</small></div>
-      <div class="garrow">↓</div>
-      <div class="gnode gnode-end">END</div>
+      <svg viewBox="0 0 580 348" width="100%" style="max-width:560px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK: the agent reasoning loop assigns a driver to a delivery loop; a human revises an order so the agent re-reasons, or changes a delivery so the driver holds">
+        <defs>
+          <marker id="adkah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
+          <marker id="adkaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
+        </defs>
+        <g fill="none" stroke="#3fd8e0" stroke-width="1.4" marker-end="url(#adkah)">
+          <path d="M280,33 L270,55"/>
+          <path d="M302,33 L450,55"/>
+          <path d="M277,112 L332,138"/>
+          <path d="M455,112 L402,138"/>
+          <path d="M360,191 L342,221"/>
+          <path d="M335,279 L347,310"/>
+        </g>
+        <!-- self-loops: agent Runner loops + the driver delivery loop -->
+        <g fill="none" stroke="#3fd8e0" stroke-width="1.3" marker-end="url(#adkah)" opacity="0.85">
+          <path d="M200,104 C174,98 174,72 200,68"/>
+          <path d="M535,104 C561,98 561,72 535,68"/>
+          <path d="M275,183 C249,177 249,153 275,149"/>
+          <path d="M235,269 C209,263 209,237 235,233"/>
+        </g>
+        <!-- HITL interjections (amber, dashed) -->
+        <g fill="none" stroke="#fbbf24" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#adkaha)">
+          <path d="M176,114 L272,150"/>
+          <path d="M450,250 L437,250"/>
+        </g>
+        <!-- nodes -->
+        <rect x="240" y="9" width="100" height="24" rx="12" fill="#1e293b" stroke="#465a78"/>
+        <text x="290" y="25" text-anchor="middle" fill="#cbd5e1" font-size="11.5" font-weight="600">new order</text>
+
+        <rect x="200" y="56" width="155" height="54" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="277" y="77" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🚚 Fleet agent</text>
+        <text x="277" y="93" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ act · fleet / route</text>
+        <text x="277" y="105" text-anchor="middle" fill="#7c93ab" font-size="9">Runner loop · each call an activity</text>
+
+        <rect x="375" y="56" width="160" height="54" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="455" y="77" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🧑 Customer agent</text>
+        <text x="455" y="93" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ act · priorities</text>
+        <text x="455" y="105" text-anchor="middle" fill="#7c93ab" font-size="9">Runner loop · each call an activity</text>
+
+        <rect x="275" y="138" width="170" height="50" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="360" y="159" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🧭 Dispatch agent</text>
+        <text x="360" y="175" text-anchor="middle" fill="#9fb4c7" font-size="9.5">weighs both → assigns a driver</text>
+
+        <text x="300" y="208" text-anchor="middle" fill="#4b5d77" font-size="9.5">— reasoning loop assigns → delivery loop runs —</text>
+
+        <rect x="235" y="222" width="200" height="56" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="335" y="243" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🚚 Driver delivery loop</text>
+        <text x="335" y="259" text-anchor="middle" fill="#9fb4c7" font-size="9.5">pick up → drive → deliver → repeat</text>
+        <text x="335" y="271" text-anchor="middle" fill="#7c93ab" font-size="9">DriverRouteWorkflow</text>
+
+        <rect x="300" y="311" width="90" height="24" rx="12" fill="#1e293b" stroke="#465a78"/>
+        <text x="345" y="327" text-anchor="middle" fill="#cbd5e1" font-size="11.5" font-weight="600">delivered</text>
+
+        <!-- HITL ①: human revises → agent re-reasons -->
+        <rect x="14" y="86" width="162" height="58" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
+        <text x="95" y="107" text-anchor="middle" fill="#fde68a" font-size="11.5" font-weight="600">👤 Human revises order</text>
+        <text x="95" y="123" text-anchor="middle" fill="#d9c389" font-size="9.5">new location / priority</text>
+        <text x="95" y="135" text-anchor="middle" fill="#d9c389" font-size="9">human_revise_order</text>
+        <text x="120" y="158" text-anchor="middle" fill="#fbbf24" font-size="9">↳ ① agent RE-REASONS</text>
+
+        <!-- HITL ②: customer change → driver holds -->
+        <rect x="450" y="222" width="122" height="56" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
+        <text x="511" y="243" text-anchor="middle" fill="#fde68a" font-size="11.5" font-weight="600">👤 Customer change</text>
+        <text x="511" y="259" text-anchor="middle" fill="#d9c389" font-size="9.5">② driver HOLDS at venue</text>
+        <text x="511" y="271" text-anchor="middle" fill="#d9c389" font-size="9">signal + wait_condition</text>
+      </svg>
     </div>
     <div class="graph-legend">
-      <span class="lg-activity">node = Temporal activity (durable)</span>
-      <span class="lg-hitl">human-in-the-loop</span>
+      <span class="lg-activity">box = Temporal activity · ↻ = a loop (agent Runner / driver route)</span>
+      <span class="lg-hitl">human interjects: ① revise → re-reason · ② change → driver holds (signal)</span>
     </div>
   </div>
 </div>
@@ -1298,32 +1344,64 @@
     <div class="graph-modal-header"><span>🔗 LangGraph · Dispatch Team</span><button onclick="closeGraph()" title="Close">✕</button></div>
     <div class="graph-modal-sub">The looping agent team. Each reason call and each tool call runs as its own durable Temporal activity; the human is a tool the agent calls mid-loop.</div>
     <div class="graph-flow">
-      <div class="gnode gnode-start">START</div>
-      <div class="garrow">↓</div>
-      <div class="gparallel">
-        <div class="gnode gnode-activity">🚚 Fleet Agent<small>reason ⇄ act loop · get_fleet_status / get_route_info (each call an activity)</small></div>
-        <div class="gnode gnode-activity">🧑 Customer Agent<small>reason ⇄ act loop · get_order_priorities</small></div>
-      </div>
-      <div class="garrow">↓&nbsp;&nbsp;both loops converge&nbsp;&nbsp;↓</div>
-      <div class="gnode gnode-activity">🧭 Dispatch Agent<small>reason ⇄ ask_human loop · weighs both, may call ask_human mid-reasoning</small></div>
-      <div class="garrow">↓</div>
-      <div class="gnode gnode-decision">called ask_human?</div>
-      <div class="gbranch">
-        <div class="gbranch-col">
-          <div class="glabel">yes — human as a tool ↓ (loops back)</div>
-          <div class="gnode gnode-hitl">⏸ ask_human — durable interrupt()<small>graph suspends; workflow waits on the answer_dispatch signal, then Command(resume=answer) feeds the answer back into the agent's loop</small></div>
-        </div>
-        <div class="gbranch-col">
-          <div class="glabel">no — decided ↓</div>
-          <div class="gnode gnode-activity">Dispatch / Hold</div>
-        </div>
-      </div>
-      <div class="garrow">↓</div>
-      <div class="gnode gnode-end">END</div>
+      <svg viewBox="0 0 540 352" width="100%" style="max-width:540px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="LangGraph dispatch team: Fleet and Customer reason-act loops converge on a Dispatch loop that calls the human as a tool via interrupt()">
+        <defs>
+          <marker id="lgah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
+          <marker id="lgaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
+        </defs>
+        <!-- flow edges -->
+        <g fill="none" stroke="#3fd8e0" stroke-width="1.4" marker-end="url(#lgah)">
+          <path d="M255,34 L128,63"/>
+          <path d="M285,34 L412,63"/>
+          <path d="M120,123 L232,192"/>
+          <path d="M420,123 L308,192"/>
+          <path d="M235,253 L266,309"/>
+        </g>
+        <!-- self-loops: reason ⇄ act -->
+        <g fill="none" stroke="#3fd8e0" stroke-width="1.3" marker-end="url(#lgah)" opacity="0.85">
+          <path d="M30,112 C2,106 2,78 30,74"/>
+          <path d="M510,112 C538,106 538,78 510,74"/>
+          <path d="M150,242 C122,236 122,208 150,204"/>
+        </g>
+        <!-- ask_human dashed branch (Dispatch ⇄ Human) -->
+        <g fill="none" stroke="#fbbf24" stroke-width="1.4" stroke-dasharray="5 3">
+          <path d="M320,211 L366,211" marker-end="url(#lgaha)"/>
+          <path d="M366,236 L322,236" marker-end="url(#lgaha)"/>
+        </g>
+        <!-- nodes -->
+        <rect x="225" y="9" width="90" height="26" rx="13" fill="#1e293b" stroke="#465a78"/>
+        <text x="270" y="26" text-anchor="middle" fill="#cbd5e1" font-size="12" font-weight="600">START</text>
+
+        <rect x="30" y="64" width="180" height="58" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="120" y="85" text-anchor="middle" fill="#d6f6f8" font-size="12.5" font-weight="600">🚚 Fleet agent</text>
+        <text x="120" y="101" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ act · fleet_status / route</text>
+        <text x="120" y="114" text-anchor="middle" fill="#7c93ab" font-size="9">each tool call = an activity</text>
+
+        <rect x="330" y="64" width="180" height="58" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="420" y="85" text-anchor="middle" fill="#d6f6f8" font-size="12.5" font-weight="600">🧑 Customer agent</text>
+        <text x="420" y="101" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ act · priorities</text>
+        <text x="420" y="114" text-anchor="middle" fill="#7c93ab" font-size="9">each tool call = an activity</text>
+
+        <text x="270" y="152" text-anchor="middle" fill="#4b5d77" font-size="9.5">fan out, then converge ↓</text>
+
+        <rect x="150" y="194" width="170" height="58" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="235" y="215" text-anchor="middle" fill="#d6f6f8" font-size="12.5" font-weight="600">🧭 Dispatch agent</text>
+        <text x="235" y="231" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ ask_human</text>
+        <text x="235" y="244" text-anchor="middle" fill="#7c93ab" font-size="9">weighs both, decides</text>
+
+        <rect x="370" y="194" width="150" height="58" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
+        <text x="445" y="221" text-anchor="middle" fill="#fde68a" font-size="12.5" font-weight="600">👤 Human</text>
+        <text x="445" y="238" text-anchor="middle" fill="#d9c389" font-size="9.5">approve / reject</text>
+        <text x="445" y="184" text-anchor="middle" fill="#fbbf24" font-size="9.5">ask_human → interrupt() ⏸</text>
+        <text x="445" y="268" text-anchor="middle" fill="#fbbf24" font-size="9.5">answer → Command(resume)</text>
+
+        <rect x="225" y="311" width="90" height="26" rx="13" fill="#1e293b" stroke="#465a78"/>
+        <text x="270" y="328" text-anchor="middle" fill="#cbd5e1" font-size="12" font-weight="600">END</text>
+      </svg>
     </div>
     <div class="graph-legend">
-      <span class="lg-activity">node = Temporal activity (durable)</span>
-      <span class="lg-hitl">human-in-the-loop (ask_human)</span>
+      <span class="lg-activity">box = Temporal activity · ↻ = the agent's reason→act loop</span>
+      <span class="lg-hitl">human = a tool the agent calls mid-loop (interrupt → signal → resume)</span>
     </div>
   </div>
 </div>
@@ -1943,9 +2021,9 @@ async function approveChange(approved) {
   }, 3000);
 }
 
-// --- Pattern B: agent-initiated dispatch approval (polls the gate the agent parked on) ---
+// --- Pattern B: agent called ask_human mid-loop; poll the question it parked on ---
 let _gateCurrentOrder = null;
-async function pollDispatchGate() {
+async function pollPendingDispatch() {
   const card = document.getElementById('dispatch-gate-card');
   try {
     const res = await api('pending-dispatch', 'GET');
@@ -1956,13 +2034,13 @@ async function pollDispatchGate() {
     _gateCurrentOrder = oid;
     const onum = (b.order_id || oid).replace(/^order-/, '#');
     document.getElementById('dgc-body').innerHTML =
-      `<div class="dgc-order"><b>Order ${onum}</b> · $${(b.order_value || 0).toLocaleString()} · ${b.venue}</div>`
-      + `<div class="dgc-impact">${b.fleet_impact || ''}</div>`
-      + `<div class="dgc-rec">Agent recommends <b>${b.recommendation || '—'}</b></div>`;
+      `<div class="dgc-order"><b>Order ${onum}</b> · $${(b.order_value || 0).toLocaleString()} · ${b.venue || ''}</div>`
+      + `<div class="dgc-rec">🤖 <b>${b.agent || 'Agent'}</b> is asking a human:</div>`
+      + `<div class="dgc-reason">"${b.question || ''}"</div>`;
     card.style.display = 'block';
   } catch (e) { /* demo not running yet — leave card hidden */ }
 }
-setInterval(pollDispatchGate, 1500);
+setInterval(pollPendingDispatch, 1500);
 
 async function decideDispatch(approved) {
   if (!_gateCurrentOrder) return;
