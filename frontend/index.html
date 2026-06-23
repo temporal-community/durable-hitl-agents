@@ -1145,21 +1145,20 @@
     <div class="tab-panel active" id="panel-human">
       <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
       <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
-      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Operator submits a change mid-delivery — the driver holds, a human approves.</div>
+      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Customer changes an order mid-delivery — the driver holds, you approve, then the ADK agents <b>re-reason</b> the new location and the driver reroutes.</div>
       <select id="change-order" class="agent-select">
         <option value="">— no active orders —</option>
       </select>
-      <select id="change-type" class="agent-select">
+      <select id="change-type" class="agent-select" onchange="onChangeType()">
         <option value="address_change">Address Change</option>
         <option value="cancel">Cancel Order</option>
+      </select>
+      <select id="reroute-select" class="agent-select">
+        <option value="">— new location —</option>
       </select>
       <div class="btn-row">
         <button class="btn btn-change" onclick="submitCustomerChange()">Submit Change</button>
         <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
-      </div>
-      <div style="font-size:12px;color:#9fb4c7;margin:8px 0 4px;">Or revise the order and let the agent decide — the human is in the <b>reasoning</b> loop:</div>
-      <div class="btn-row">
-        <button class="btn btn-change" onclick="reviseOrder()" title="Human revises the order; the ADK assignment agent re-reasons and re-decides the driver">↻ Revise → agent re-reasons</button>
       </div>
       <span id="change-status" style="font-size:14px;color:#fbbf24;display:none;">Awaiting approval...</span>
       <div class="btn-row">
@@ -1261,9 +1260,9 @@
   <div class="graph-modal-backdrop" onclick="closeAdk()"></div>
   <div class="graph-modal-card">
     <div class="graph-modal-header"><span>🧩 Google ADK · Dispatch Team</span><button onclick="closeAdk()" title="Close">✕</button></div>
-    <div class="graph-modal-sub">Human → agent. Each agent is a reason → act → observe LOOP (the ADK Runner); every LLM call and tool call runs as a Temporal activity. The human enters the loop two ways — by revising an order (the agent re-reasons) or by changing a delivery (the driver holds).</div>
+    <div class="graph-modal-sub">Human → agent. Each agent is a reason → act → observe LOOP (the ADK Runner); every LLM call and tool call runs as a Temporal activity. One customer change feeds <b>both</b> loops: the driver holds, you approve, the agents re-reason the new location, and the driver reroutes.</div>
     <div class="graph-flow">
-      <svg viewBox="0 0 580 348" width="100%" style="max-width:560px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK: the agent reasoning loop assigns a driver to a delivery loop; a human revises an order so the agent re-reasons, or changes a delivery so the driver holds">
+      <svg viewBox="0 0 580 348" width="100%" style="max-width:560px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK: the agent reasoning loop assigns a driver to a delivery loop; one customer change feeds both loops — the driver holds, a human approves, the agents re-reason the new location, and the driver reroutes">
         <defs>
           <marker id="adkah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
           <marker id="adkaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
@@ -1283,10 +1282,10 @@
           <path d="M275,183 C249,177 249,153 275,149"/>
           <path d="M235,269 C209,263 209,237 235,233"/>
         </g>
-        <!-- HITL interjections (amber, dashed) -->
+        <!-- ONE HITL interjection feeding BOTH loops (amber, dashed) -->
         <g fill="none" stroke="#fbbf24" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#adkaha)">
-          <path d="M176,114 L272,150"/>
-          <path d="M450,250 L437,250"/>
+          <path d="M184,172 L273,162"/>
+          <path d="M184,200 L233,242"/>
         </g>
         <!-- nodes -->
         <rect x="240" y="9" width="100" height="24" rx="12" fill="#1e293b" stroke="#465a78"/>
@@ -1316,23 +1315,19 @@
         <rect x="300" y="311" width="90" height="24" rx="12" fill="#1e293b" stroke="#465a78"/>
         <text x="345" y="327" text-anchor="middle" fill="#cbd5e1" font-size="11.5" font-weight="600">delivered</text>
 
-        <!-- HITL ①: human revises → agent re-reasons -->
-        <rect x="14" y="86" width="162" height="58" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
-        <text x="95" y="107" text-anchor="middle" fill="#fde68a" font-size="11.5" font-weight="600">👤 Human revises order</text>
-        <text x="95" y="123" text-anchor="middle" fill="#d9c389" font-size="9.5">new location / priority</text>
-        <text x="95" y="135" text-anchor="middle" fill="#d9c389" font-size="9">human_revise_order</text>
-        <text x="120" y="158" text-anchor="middle" fill="#fbbf24" font-size="9">↳ ① agent RE-REASONS</text>
-
-        <!-- HITL ②: customer change → driver holds -->
-        <rect x="450" y="222" width="122" height="56" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
-        <text x="511" y="243" text-anchor="middle" fill="#fde68a" font-size="11.5" font-weight="600">👤 Customer change</text>
-        <text x="511" y="259" text-anchor="middle" fill="#d9c389" font-size="9.5">② driver HOLDS at venue</text>
-        <text x="511" y="271" text-anchor="middle" fill="#d9c389" font-size="9">signal + wait_condition</text>
+        <!-- ONE HITL box → both loops: customer change, you approve -->
+        <rect x="10" y="150" width="174" height="70" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
+        <text x="97" y="171" text-anchor="middle" fill="#fde68a" font-size="11.5" font-weight="600">👤 Customer change</text>
+        <text x="97" y="187" text-anchor="middle" fill="#d9c389" font-size="9.5">new SF location → you approve</text>
+        <text x="97" y="201" text-anchor="middle" fill="#d9c389" font-size="9">customer_change + wait_condition</text>
+        <text x="97" y="213" text-anchor="middle" fill="#7c93ab" font-size="8.5">driver holds while you decide</text>
+        <text x="232" y="150" text-anchor="middle" fill="#fbbf24" font-size="9">① agents RE-REASON</text>
+        <text x="210" y="236" text-anchor="middle" fill="#fbbf24" font-size="9">② driver reroutes</text>
       </svg>
     </div>
     <div class="graph-legend">
       <span class="lg-activity">box = Temporal activity · ↻ = a loop (agent Runner / driver route)</span>
-      <span class="lg-hitl">human interjects: ① revise → re-reason · ② change → driver holds (signal)</span>
+      <span class="lg-hitl">one human change → both loops: ① agents re-reason · ② driver holds → reroutes</span>
     </div>
   </div>
 </div>
@@ -1633,6 +1628,7 @@ function retroSign(name) {
 // --- Load locations ---
 let DESTINATIONS = {};
 let _rerouteDestination = null;
+let _rerouteOptions = [];
 let _rerouteMarker = null;
 async function loadLocations() {
   const res = await fetch('/api/locations');
@@ -1657,19 +1653,37 @@ async function loadLocations() {
     });
   });
 
-  // Reroute destination (Palace Hotel) — marker shown only during customer change
+  // Reroute destination (default) — marker shown only during a customer change
   if (data.reroute_destination) {
     _rerouteDestination = data.reroute_destination;
+  }
+  // Populate the reroute dropdown with curated downtown-SF destinations
+  if (data.reroute_options) {
+    _rerouteOptions = data.reroute_options;
+    const sel = document.getElementById('reroute-select');
+    if (sel) {
+      sel.innerHTML = _rerouteOptions
+        .map((o, i) => `<option value="${i}">${o.hotel}</option>`)
+        .join('');
+    }
   }
 }
 loadLocations();
 
-function showRerouteMarker() {
-  if (_rerouteMarker || !_rerouteDestination) return;
-  const d = _rerouteDestination;
+function onChangeType() {
+  // The new-location dropdown only applies to an address change.
+  const isAddr = document.getElementById('change-type').value === 'address_change';
+  document.getElementById('reroute-select').style.display = isAddr ? '' : 'none';
+}
+
+function showRerouteMarker(dest) {
+  const d = dest || _rerouteDestination;
+  if (!d) return;
+  // Drop a fresh marker at the chosen destination (clear any prior one).
+  if (_rerouteMarker) { map.removeLayer(_rerouteMarker); _rerouteMarker = null; }
   _rerouteMarker = L.circleMarker([d.lat, d.lng], {
     radius: 7, fillColor: '#a855f7', color: '#a855f7', fillOpacity: 0.3, weight: 2,
-  }).addTo(map).bindTooltip(venueLabel(d.label, 'Reroute'), {
+  }).addTo(map).bindTooltip(venueLabel(d.hotel || d.label, 'Reroute'), {
     permanent: true, direction: 'top', className: 'map-label', offset: [0, -10],
   });
 }
@@ -1984,16 +1998,16 @@ async function submitCustomerChange() {
 
   let body = { order_id: orderId, change_type: changeType };
   if (changeType === 'address_change') {
-    // Always reroute to the Palace Hotel (loaded from /api/locations)
-    const dest = _rerouteDestination;
-    if (!dest) { alert('Reroute destination not loaded'); return; }
+    // Reroute to the chosen downtown-SF destination from the dropdown
+    const idx = document.getElementById('reroute-select').value;
+    const dest = (_rerouteOptions && _rerouteOptions[idx]) || _rerouteDestination;
+    if (!dest) { alert('Pick a new location'); return; }
     body.new_details = `${orderId} rerouted to ${dest.hotel}`;
     body.new_lat = dest.lat;
     body.new_lng = dest.lng;
     body.new_hotel = dest.hotel;
     _pendingChangeDetails = `rerouted to ${dest.hotel}`;
-    // Show Palace Hotel marker on the map if not already visible
-    showRerouteMarker();
+    showRerouteMarker(dest);
   } else {
     body.new_details = `${orderId} cancelled by customer`;
     _pendingChangeDetails = 'order cancelled';
@@ -2064,23 +2078,6 @@ async function decideDispatch(approved) {
 async function injectHighValueOrder() {
   const result = await api('inject-order', 'POST', {});
   console.log('Injected high-value order:', result);
-}
-
-// --- Human → Agent, in the reasoning loop: revise an order; the ADK agent re-reasons ---
-async function reviseOrder() {
-  const orderId = document.getElementById('change-order').value;
-  if (!orderId) { alert('Pick an order to revise'); return; }
-  const dest = _rerouteDestination;
-  if (!dest) { alert('Reroute destination not loaded'); return; }
-  showRerouteMarker();
-  const body = {
-    order_id: orderId,
-    change_type: 'address_change',
-    new_details: `${orderId} moved to ${dest.hotel} — agent re-reasoning the assignment`,
-    new_lat: dest.lat, new_lng: dest.lng, new_hotel: dest.hotel,
-  };
-  const result = await api('revise-order', 'POST', body);
-  console.log('Order revised — ADK agent re-reasons:', result);
 }
 
 // --- Graph visualizer modals (LangGraph / ADK) ---

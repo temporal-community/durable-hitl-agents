@@ -130,8 +130,9 @@ order by the active tab's `_dispatch_mode`: **ADK tab → ADK inline**
 in-loop `ask_human` interrupt with the `answer_dispatch` signal — no gate child). It builds
 `DriverSnapshot`s from its own state, applies the capacity guardrail and
 least-loaded balancing, and handles customer changes — including the human→agent
-re-reason path (`human_revise_order` → `_reassign_via_adk`). It never does delivery
-work directly — it delegates to child workflows.
+re-reason path (`_process_customer_change` → `_rereason_order` on an approved
+address change). It never does delivery work directly — it delegates to child
+workflows.
 
 **`DriverRouteWorkflow`** is the legs. One instance per driver, it batches
 pending orders: navigate to Ziggy's → batch-pickup all orders → deliver
@@ -140,7 +141,7 @@ return to base → loop. It owns its own state (status, is_disconnected,
 is_recovering, path_history, current_orders). The Pattern A HITL hold lives here:
 on `update_pending` the driver navigates to the venue but holds before delivering
 (`awaiting_update`, `wait_condition`); on `resolve_update` it cancels, reroutes
-(to Oracle Park), or releases. Its HITL state is a **per-order dict**
+(to the human's chosen `REROUTE_OPTIONS` location), or releases. Its HITL state is a **per-order dict**
 (`_pending_holds`), so two changes on the same driver for different orders each
 get their own slot.
 
@@ -161,8 +162,9 @@ The workflows connect through signals in both directions:
 - **External → parent (Pattern B):** `answer_dispatch(order_id, decision)` — a human's
   answer to an agent's in-loop `ask_human`, which resumes the suspended LangGraph
   team. (No child workflow involved — the parent runs the team inline.)
-- **External → parent (Pattern A in-loop):** `human_revise_order` — a human revision
-  that triggers the ADK assignment agent to re-reason (`_reassign_via_adk`).
+- **External → parent (Pattern A):** `customer_change` — a customer's order change;
+  the parent holds the driver, waits for human approval, and on an approved address
+  change re-reasons the assignment via the ADK team (`_rereason_order`).
 
 Both child → parent signals are **guarded with try/except** so a terminated
 parent (e.g. during demo reset) can't crash the child mid-delivery.
@@ -171,15 +173,18 @@ parent (e.g. during demo reset) can't crash the child mid-delivery.
 
 ## Pattern A — Human-in-the-loop (Google ADK)
 
-**The human calls the agent.** An operator submits a customer change (address
-change / cancel) mid-delivery; the driver holds at the venue; a human supervisor
-approves or rejects.
+**The human calls the agent.** A customer submits an order change (address
+change → pick a new SF location from a dropdown, or cancel) mid-delivery; the
+driver holds at the venue; a human supervisor approves or rejects. This is **ONE
+human gate that feeds both loops** — the agent reasoning loop (re-reason) and the
+driver delivery loop (hold → reroute).
 
-This is **operator-in-the-loop**, not agent-in-the-loop. The change is initiated
-*externally* (operator submits via REST) and the gate lives in the **workflow**,
-not in any agent tool. The ADK agents never see the change. (Contrast an
-`ask_user`-style `@function_tool` where the LLM itself pauses for clarification —
-that's Pattern B's shape, not this one.)
+This is **customer-in-the-loop**, not agent-in-the-loop. The change is initiated
+*externally* (submitted via REST) and the gate lives in the **workflow**,
+not in any agent tool. The agents don't decide *whether* to act on the change —
+but on an approved address change they **re-reason the assignment** for the new
+location (see below). (Contrast an `ask_user`-style `@function_tool` where the
+LLM itself pauses for clarification — that's Pattern B's shape, not this one.)
 
 The flow:
 1. `POST /api/customer-change` → signals the parent `customer_change` *and*
@@ -188,40 +193,33 @@ The flow:
    (`awaiting_update`, `wait_condition`). The parent waits for the human; the
    child waits for the parent — **two `wait_condition` pauses, both durable**.
 3. `POST /api/approve-change` → signals `change_approved` → `execute_customer_change`
-   activity → parent signals `resolve_update` to the child with the decision:
-   cancel → skip delivery; address_change → reroute to **Oracle Park**; release →
-   deliver normally.
+   activity → for an **address change**, the parent updates the order to the human's
+   chosen location and the **ADK assignment team re-reasons** it (`_rereason_order`,
+   below) → parent signals `resolve_update` to the child with the decision:
+   cancel → skip delivery; address_change → reroute to the chosen location; release →
+   deliver to the original destination.
+
+The same approval drives the **agent's reasoning loop** as well as the driver's.
+On an approved address change, `_process_customer_change` updates the order record
+to the human's chosen location and calls `_rereason_order`, which **re-runs the
+full ADK assignment team** (`_run_adk_assignment` — Fleet ∥ Customer → Dispatch)
+over the revised order: Fleet recomputes ETAs to the new spot, Customer re-reads
+priority, Dispatch reassesses — and the reassessment is published to the agent
+panels. So the human's edit is the new input the agents reason over, not a fixed
+script. The held driver then reroutes to the new destination. **Cancel** is a
+fixed cancel (no re-reason); **reject** releases the driver to deliver to the
+original destination. It's the same durable primitive throughout (signal +
+`wait_condition`), feeding both loops off one approval.
+
+The reroute destinations come from a curated `REROUTE_OPTIONS` list in
+`locations.py` (Oracle Park + Salesforce Tower, Union Square, Coit Tower, Palace
+of Fine Arts), exposed via `/api/locations` as `reroute_options` and shown in the
+customer-change dropdown.
 
 `deliver_order` returns `success=False` when a cancel wins the race, so the
 workflow skips the `order_delivered` signal for cancelled orders. The child's
 HITL hold also escapes on `self._stop` so demo shutdown can't leave a parked
 child hanging the parent's `await handle` join.
-
-### Variant — human → agent, in the *reasoning* loop (ADK)
-
-The change above gates the *delivery* loop (a boundary hold): the system applies a
-fixed decision the human picks. A second ADK flow puts the human **inside the
-agent's reasoning loop** instead: an operator revises an order (new location /
-details) and the ADK assignment agent **re-reasons** how to adjust — re-checking the
-fleet and re-deciding the driver — rather than applying a fixed change. The human's
-edit is input the agent reasons over; the agent decides the response.
-
-The flow:
-1. `POST /api/revise-order` → signals the parent `human_revise_order`, which appends
-   the revision to `self._pending_revisions`.
-2. `_process_human_revisions` (a parent task that parks on `wait_condition`) drains
-   each revision through `_reassign_via_adk`.
-3. `_reassign_via_adk` applies the revision to the order record, then **re-runs the
-   full ADK assignment team** (`_run_adk_assignment` — Fleet → Customer → Dispatch)
-   over the changed order. It then commits the agent's fresh decision: reassign to a
-   better driver (cancel on the old, `add_order` on the new), keep the same driver but
-   push the updated destination into its delivery loop (`update_order`), or assign a
-   fresh choice if the order isn't on a driver yet.
-
-This is the same durable primitive as the boundary hold (signal + `wait_condition`),
-but the human's edit becomes input the agent reasons over — not a fixed change the
-system applies. The existing customer-change delivery-hold (above) is **unchanged**
-and stays; this is an additional flow.
 
 ### Where the ADK agents fit
 
@@ -408,6 +406,12 @@ pending-approval state lives in **Temporal's event log, not the worker's memory*
 Restart the worker: the workflow replays from history, the graph is still suspended on
 its `interrupt()` and the parent is still parked on the `answer_dispatch`
 `wait_condition`, and the approval card is still there. Nothing was lost.
+
+This is **verified**: a `kill -9` of the worker while parked on the in-loop
+`interrupt`, then restart + the `answer_dispatch` signal, resumes the agent
+mid-loop. Temporal replays from event history. Note that LangGraph's `InMemorySaver`
+(the checkpointer the graph compiles with) is **non-durable on its own** — it's
+Temporal's event log that makes the in-loop wait survive the crash.
 
 ---
 

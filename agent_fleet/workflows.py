@@ -847,10 +847,6 @@ class MeltdownDemoWorkflow:
         self._pending_changes: list[CustomerChangeInput] = []
         self._pending_approvals: list[bool] = []
         self._pending_new_orders: list[OrderAssignmentResult] = []
-        # Human→agent HITL (ADK): a human revised an order; the ADK assignment agent
-        # RE-REASONS how to adjust (re-checks the fleet, re-decides driver/priority)
-        # instead of the system applying a fixed change. See _reassign_via_adk.
-        self._pending_revisions: list[CustomerChangeInput] = []
         self._routes_done: bool = False
         self._disconnected_drivers: set[str] = set()
         self._disconnected_agents: set[str] = set()
@@ -886,13 +882,6 @@ class MeltdownDemoWorkflow:
         Resolves the durable interrupt the dispatch team is parked on.
         """
         self._dispatch_answers[order_id] = decision
-
-    @workflow.signal
-    async def human_revise_order(self, change: CustomerChangeInput) -> None:
-        """Human→agent HITL (ADK): a human revised an order (new location/priority).
-        The ADK assignment agent will RE-REASON how to adjust — see _reassign_via_adk.
-        """
-        self._pending_revisions.append(change)
 
     @workflow.signal
     async def change_approved(self, approved: bool) -> None:
@@ -1019,7 +1008,9 @@ class MeltdownDemoWorkflow:
         workflow.logger.info(f"Meltdown demo starting (escalation={inp.escalation_enabled})")
         # Seed dispatch mode from the active tab at start so the first orders don't race a
         # later set_dispatch_mode signal ("the tab chooses the framework for all orders").
-        self._dispatch_mode = inp.dispatch_mode
+        # getattr-with-default so a workflow STARTED before this field existed still replays
+        # cleanly (Temporal replays old inputs against new code — don't read new fields raw).
+        self._dispatch_mode = getattr(inp, "dispatch_mode", "adk")
 
         # Initialize driver state
         for driver_id in DRIVER_IDS:
@@ -1061,7 +1052,6 @@ class MeltdownDemoWorkflow:
         # Process new orders and customer changes concurrently
         order_task = asyncio.create_task(self._process_new_orders())
         change_task = asyncio.create_task(self._process_customer_changes())
-        revision_task = asyncio.create_task(self._process_human_revisions())
 
         # Wait for order generation to complete
         await self._order_gen_handle
@@ -1099,7 +1089,6 @@ class MeltdownDemoWorkflow:
 
         await change_task
         await order_task
-        revision_task.cancel()
 
         # Wait for drivers to finish current deliveries
         results = []
@@ -1616,75 +1605,32 @@ class MeltdownDemoWorkflow:
         )
         workflow.logger.info(f"[#{onum}] {order.order_id} rejected at dispatch gate")
 
-    # --- Human→agent HITL (ADK): re-reason an order when a human revises it ---
+    # --- Human→agent HITL (ADK): re-reason an order when a human revises its location ---
 
-    async def _process_human_revisions(self) -> None:
-        """Drain human order-revisions; each one triggers the ADK agent to re-reason."""
-        while not self._routes_done:
-            await workflow.wait_condition(
-                lambda: len(self._pending_revisions) > 0 or self._routes_done,
-            )
-            if self._routes_done:
-                break
-            while self._pending_revisions:
-                await self._reassign_via_adk(self._pending_revisions.pop(0))
-
-    async def _reassign_via_adk(self, change: CustomerChangeInput) -> None:
-        """Human→agent HITL IN the ADK reasoning loop: a human revised this order, so the
-        ADK assignment agent RE-REASONS how to adjust — re-checking the fleet and
-        re-deciding the driver — instead of the system applying a fixed change. The human's
-        edit is input the agent reasons over; the agent decides the response.
+    async def _rereason_order(self, order_id: str, note: str) -> None:
+        """Human→agent HITL, IN the ADK reasoning loop: the human approved a new location,
+        so feed the revised order back to the ADK assignment team — Fleet recomputes ETAs to
+        the new spot, Customer re-reads priority, Dispatch reassesses — and publish that
+        reassessment to the agent panels. The caller applies the operational result (the
+        held driver reroutes to the new destination). Reads the order's *current* coords, so
+        the caller must update them first.
         """
-        order = self._orders.get(change.order_id)
+        order = self._orders.get(order_id)
         if order is None:
-            workflow.logger.info(f"revise: unknown order {change.order_id} — skipping")
             return
-        onum = change.order_id.split("-", 1)[-1]
-
-        # Apply the human's revision to the order record.
-        if change.new_lat is not None and change.new_lng is not None:
-            order["delivery_lat"] = change.new_lat
-            order["delivery_lng"] = change.new_lng
-        if change.new_hotel is not None:
-            order["hotel"] = change.new_hotel
-
-        # Sync the new destination into FleetState so the map + order cards update (the
-        # agent re-reasons over the new coords; without this the UI shows the old location).
-        if change.new_lat is not None and change.new_lng is not None:
-            await workflow.execute_activity(
-                execute_customer_change,
-                ExecuteCustomerChangeInput(
-                    order_id=change.order_id,
-                    change_type="address_change",
-                    new_lat=change.new_lat,
-                    new_lng=change.new_lng,
-                    new_hotel=change.new_hotel,
-                ),
-                task_queue=DELIVERY_QUEUE,
-                summary=f"[#{onum}] Sync revised destination for {change.order_id}",
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=FAST_RETRY,
-            )
-
         await workflow.execute_local_activity(
             publish_agent_event,
             PublishAgentEventInput(
                 agent_name="customer_agent",
                 event_type="customer_request",
-                content=(
-                    f"Human revised {change.order_id}: {change.new_details} — "
-                    f"agents re-reasoning the assignment."
-                ),
-                summary=f"Human revised {change.order_id} — re-reasoning",
+                content=f"Human revised {order_id}: {note} — agents re-reasoning the assignment.",
+                summary=f"Human revised {order_id} — re-reasoning",
             ),
             start_to_close_timeout=timedelta(seconds=10),
         )
-
-        # THE HUMAN IS IN THE LOOP: feed the revised order back to the ADK assignment team,
-        # which reasons (Fleet → Customer → Dispatch) over the change and re-decides.
         assignment = await self._run_adk_assignment(
             ReasonAboutAssignmentInput(
-                order_id=change.order_id,
+                order_id=order_id,
                 hotel=order["hotel"],
                 delivery_lat=order["delivery_lat"],
                 delivery_lng=order["delivery_lng"],
@@ -1696,7 +1642,6 @@ class MeltdownDemoWorkflow:
                 disconnected_agents=list(self._disconnected_agents),
             )
         )
-
         if assignment.agent_events:
             await workflow.execute_local_activity(
                 publish_agent_events_batch,
@@ -1711,64 +1656,6 @@ class MeltdownDemoWorkflow:
                 ],
                 start_to_close_timeout=timedelta(seconds=10),
             )
-
-        # Apply the agent's decision.
-        current_driver = self._find_driver_for_order(change.order_id)
-        new_driver = assignment.driver_id
-        if new_driver not in self._route_handles or new_driver in self._disconnected_drivers:
-            new_driver = current_driver or self._least_loaded_driver()
-
-        order_result = OrderAssignmentResult(
-            order_id=change.order_id,
-            hotel=order["hotel"],
-            delivery_lat=order["delivery_lat"],
-            delivery_lng=order["delivery_lng"],
-            driver_id="",
-            reasoning_summary=assignment.reasoning_summary,
-            priority=order.get("priority", "standard"),
-            servings=order.get("servings", 0),
-            deadline_minutes=order.get("deadline_minutes", 0),
-            event=order.get("event", ""),
-            order_value=order.get("order_value", 0),
-        )
-
-        if current_driver and new_driver and new_driver != current_driver:
-            # Agent reassigned to a better driver: pull from old, give to new.
-            try:
-                await self._route_handles[current_driver].signal(
-                    DriverRouteWorkflow.cancel_order,
-                    OrderUpdateInput(order_id=change.order_id, change_type="cancel"),
-                )
-            except Exception:
-                pass
-            try:
-                self._driver_orders[current_driver].remove(change.order_id)
-            except (KeyError, ValueError):
-                pass
-            await self._commit_assignment(order_result, new_driver, False, onum)
-            workflow.logger.info(
-                f"[#{onum}] agent re-reasoned revision: reassigned "
-                f"{change.order_id} {current_driver} → {new_driver}"
-            )
-        elif current_driver:
-            # Same driver — push the updated destination into its delivery loop.
-            await self._route_handles[current_driver].signal(
-                DriverRouteWorkflow.update_order,
-                OrderUpdateInput(
-                    order_id=change.order_id,
-                    change_type="address_change",
-                    new_lat=order["delivery_lat"],
-                    new_lng=order["delivery_lng"],
-                    new_hotel=order["hotel"],
-                ),
-            )
-            workflow.logger.info(
-                f"[#{onum}] agent re-reasoned revision: kept {current_driver}, updated destination"
-            )
-        else:
-            # Not yet on a driver — commit the agent's fresh choice.
-            await self._commit_assignment(order_result, new_driver, False, onum)
-            workflow.logger.info(f"[#{onum}] agent re-reasoned revision: assigned → {new_driver}")
 
     # --- Signal processing loop ---
 
@@ -1874,6 +1761,19 @@ class MeltdownDemoWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=FAST_RETRY,
             )
+
+            # Human → agent, IN the reasoning loop: for an address change, update the order
+            # record to the new location and let the ADK team RE-REASON it (Fleet recomputes
+            # ETAs, Dispatch reassesses) before the held driver reroutes below. The human's
+            # approved location is the new input the agents reason over.
+            if change.change_type == "address_change" and change.new_lat is not None:
+                o = self._orders.get(change.order_id)
+                if o is not None:
+                    o["delivery_lat"] = change.new_lat
+                    o["delivery_lng"] = change.new_lng
+                    if change.new_hotel is not None:
+                        o["hotel"] = change.new_hotel
+                await self._rereason_order(change.order_id, change.new_details)
 
             # Signal child with the approved decision.
             # Send update_pending again ONLY if the driver changed during the

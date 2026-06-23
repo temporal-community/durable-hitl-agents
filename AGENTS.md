@@ -8,14 +8,13 @@ human-in-the-loop patterns on Temporal, visualized as an ice cream delivery
 fleet in **downtown San Francisco**:
 
 - **Pattern A — Human-in-the-loop ("The Human Calls the Agent")** — built on
-  **Google ADK** (multi-agent assignment). An operator submits a customer change
-  (address change / cancel) mid-delivery; the driver holds at the venue; a human
-  supervisor approves or rejects; the order reroutes / cancels / releases.
-  Durable primitive: signal → `wait_condition` hold → resolve. **Variant (human →
-  agent, in the reasoning loop):** a `human_revise_order` signal feeds an order
-  revision back into the ADK assignment agent — `_reassign_via_adk` re-runs
-  `_run_adk_assignment` so the agent RE-REASONS the assignment (re-checks the fleet,
-  re-decides the driver) instead of applying a fixed change.
+  **Google ADK** (multi-agent assignment). A customer submits a change mid-delivery
+  (address change → a new SF location from a dropdown, or cancel); the driver holds
+  at the venue; a human supervisor approves or rejects. Durable primitive: signal →
+  `wait_condition` hold → resolve. One gate feeds **both** loops: on an approved
+  address change the ADK team RE-REASONS the order for the new location
+  (`_rereason_order` → `_run_adk_assignment`: Fleet recomputes ETAs, Dispatch
+  reassesses) and then the held driver reroutes. Cancel stays a fixed cancel.
 - **Pattern B — Agent-in-the-loop ("The Agent Calls the Human")** — built on
   **LangGraph** via `temporalio.contrib.langgraph`. The framework is chosen by the
   UI **tab** (`set_dispatch_mode` → `"langgraph"`), applying to all orders. The
@@ -154,9 +153,9 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   the **adk tab** is selected (Pattern A's substrate). The langgraph tab routes every order to the
   Pattern B LangGraph team instead; the framework is chosen by the tab, not per-order. The ADK path
   runs inline in the workflow via `_run_adk_assignment()`, committing to the least-loaded driver
-  with no dispatch gate involved. The same team is re-run for the **human → agent re-reason** path:
-  a `human_revise_order` signal queues a revision that `_reassign_via_adk` drains, applying the edit
-  and calling `_run_adk_assignment` again so the agent re-reasons the assignment. If an activity
+  with no dispatch gate involved. The same team is re-run on an approved customer **address change**:
+  `_process_customer_change` calls `_rereason_order` → `_run_adk_assignment` again so the agents
+  re-reason the order for the new location, then the held driver reroutes. If an activity
   fails, Temporal retries. (Dormant disconnect path: Fleet
   Agent tools fail fast when disconnected (2 attempts), error returned to LLM via
   `_activity_tool.py` catch — Dispatch Agent assigns with available data but orders are flagged
@@ -165,8 +164,8 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   **separate multi-agent LangGraph team** (`langgraph_agents.py`), not part of the ADK pipeline.
 - **Server** (`server.py`): signal-only / query-only REST API plus the WebSocket state feed.
   Pattern A endpoints: `POST /api/customer-change` (signals parent `customer_change` + signals
-  the child `update_pending` to hold), `POST /api/approve-change` (signals `change_approved`), and
-  `POST /api/revise-order` (the in-loop re-reason variant — signals parent `human_revise_order`).
+  the child `update_pending` to hold) and `POST /api/approve-change` (signals `change_approved`;
+  an approved address change triggers the in-loop re-reason before the held driver reroutes).
   Pattern B endpoints: `POST /api/inject-order` (registers a premium Moscone order in FleetState
   and signals `new_order` — the deliberate trigger for the agent's `ask_human`), `GET /api/pending-dispatch`
   (queries the parent's `get_status` and reads its `pending_dispatch` dict — populated when an agent

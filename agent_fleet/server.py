@@ -32,7 +32,13 @@ from temporalio.service import RPCError
 load_dotenv()
 
 from agent_fleet.config import TEMPORAL_ADDRESS
-from agent_fleet.locations import COSMOPOLITAN, VENUES, WAREHOUSE, WAREHOUSE_LABEL
+from agent_fleet.locations import (
+    COSMOPOLITAN,
+    REROUTE_OPTIONS,
+    VENUES,
+    WAREHOUSE,
+    WAREHOUSE_LABEL,
+)
 from agent_fleet.models import (
     AgentDisconnectInput,
     CustomerChangeInput,
@@ -336,33 +342,6 @@ async def submit_customer_change(body: CustomerChangeRequest):
     }
 
 
-@app.post("/api/revise-order")
-async def revise_order(body: CustomerChangeRequest):
-    """Human→agent HITL (ADK, in the reasoning loop): a human revises an order's location/
-    details and the ADK assignment agent RE-REASONS how to adjust — re-checking the fleet
-    and re-deciding the driver — rather than the system applying a fixed change.
-    """
-    if _temporal_client is None:
-        return {"error": "Temporal client not connected"}
-
-    change = CustomerChangeInput(
-        order_id=body.order_id,
-        change_type=body.change_type,
-        new_details=body.new_details,
-        new_lat=body.new_lat,
-        new_lng=body.new_lng,
-        new_hotel=body.new_hotel,
-    )
-    try:
-        handle = _temporal_client.get_workflow_handle("meltdown-demo")
-        await handle.signal(MeltdownDemoWorkflow.human_revise_order, change)
-    except RPCError:
-        logger.exception("Failed to signal workflow for revise-order")
-        return {"error": "Failed to submit order revision"}
-
-    return {"status": "revision_submitted", "order_id": body.order_id}
-
-
 class ChangeDecisionRequest(BaseModel):
     approved: bool
 
@@ -562,6 +541,15 @@ async def get_locations():
             "lng": COSMOPOLITAN["coords"].lng,
             "label": COSMOPOLITAN["map_label"],
         },
+        # Curated downtown-SF reroute choices for the customer-change dropdown.
+        "reroute_options": [
+            {
+                "hotel": opt["hotel"],
+                "lat": opt["coords"].lat,
+                "lng": opt["coords"].lng,
+            }
+            for opt in REROUTE_OPTIONS
+        ],
     }
 
 

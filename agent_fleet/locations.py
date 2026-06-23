@@ -55,6 +55,17 @@ COSMOPOLITAN = {
     "vip_tier": "standard",
 }
 
+# Reroute destinations offered in the customer-change dropdown — recognizable downtown-SF
+# landmarks NOT already in VENUES, so a reroute is a visible move on the map. Oracle Park
+# (COSMOPOLITAN) is the default first option.
+REROUTE_OPTIONS: list[dict] = [
+    COSMOPOLITAN,
+    {"hotel": "Salesforce Tower", "coords": Coords(lat=37.7897, lng=-122.3972)},
+    {"hotel": "Union Square", "coords": Coords(lat=37.7880, lng=-122.4074)},
+    {"hotel": "Coit Tower", "coords": Coords(lat=37.8024, lng=-122.4058)},
+    {"hotel": "Palace of Fine Arts", "coords": Coords(lat=37.8029, lng=-122.4484)},
+]
+
 
 def generate_random_order(order_number: int) -> dict:
     """Generate a random order from the venue pool.
