@@ -1017,6 +1017,9 @@ class MeltdownDemoWorkflow:
     @workflow.run
     async def run(self, inp: MeltdownDemoInput) -> str:
         workflow.logger.info(f"Meltdown demo starting (escalation={inp.escalation_enabled})")
+        # Seed dispatch mode from the active tab at start so the first orders don't race a
+        # later set_dispatch_mode signal ("the tab chooses the framework for all orders").
+        self._dispatch_mode = inp.dispatch_mode
 
         # Initialize driver state
         for driver_id in DRIVER_IDS:
@@ -1076,10 +1079,22 @@ class MeltdownDemoWorkflow:
             except Exception:
                 pass
 
-        # Cancel any in-flight LangGraph assignment tasks (a parked ask_human exits cleanly
-        # via _await_dispatch_answer's _routes_done escape) and clear pending questions.
-        for task in self._langgraph_tasks:
-            task.cancel()
+        # Let in-flight LangGraph assignment tasks finish committing/rejecting before we go.
+        # _routes_done is set, so a task parked on ask_human exits cleanly via
+        # _await_dispatch_answer's escape; an actively-reasoning task gets a grace window to
+        # commit. Only stragglers past the window are cancelled. (Exceptions are surfaced by
+        # the per-task done callback in _assign_order, not swallowed.)
+        if self._langgraph_tasks:
+            try:
+                await workflow.wait_condition(
+                    lambda: all(t.done() for t in self._langgraph_tasks),
+                    timeout=timedelta(seconds=30),
+                )
+            except TimeoutError:
+                workflow.logger.warning("LangGraph tasks still running at shutdown — cancelling")
+            for task in self._langgraph_tasks:
+                if not task.done():
+                    task.cancel()
         self._pending_dispatch.clear()
 
         await change_task
@@ -1287,11 +1302,11 @@ class MeltdownDemoWorkflow:
         # moving while the agents (and possibly a human) deliberate. "adk" mode uses the
         # ADK assignment path below.
         if self._dispatch_mode == "langgraph":
-            self._langgraph_tasks.append(
-                asyncio.create_task(
-                    self._run_langgraph_assignment(order, self._least_loaded_driver(), onum)
-                )
+            task = asyncio.create_task(
+                self._run_langgraph_assignment(order, self._least_loaded_driver(), onum)
             )
+            task.add_done_callback(self._on_langgraph_task_done)
+            self._langgraph_tasks.append(task)
             return
 
         assignment_input = ReasonAboutAssignmentInput(
@@ -1437,6 +1452,16 @@ class MeltdownDemoWorkflow:
             )
 
         workflow.logger.info(f"Order {self._orders_generated}: {order.order_id} → {driver_id}")
+
+    def _on_langgraph_task_done(self, task: asyncio.Task) -> None:
+        """Surface failures from the fire-and-forget LangGraph assignment tasks instead of
+        letting them be swallowed (the exception is retrieved here so it can't go unobserved).
+        """
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            workflow.logger.warning(f"LangGraph assignment task failed: {exc!r}")
 
     async def _run_langgraph_assignment(
         self, order: OrderAssignmentResult, driver_id: str, onum: str
@@ -1622,6 +1647,24 @@ class MeltdownDemoWorkflow:
             order["delivery_lng"] = change.new_lng
         if change.new_hotel is not None:
             order["hotel"] = change.new_hotel
+
+        # Sync the new destination into FleetState so the map + order cards update (the
+        # agent re-reasons over the new coords; without this the UI shows the old location).
+        if change.new_lat is not None and change.new_lng is not None:
+            await workflow.execute_activity(
+                execute_customer_change,
+                ExecuteCustomerChangeInput(
+                    order_id=change.order_id,
+                    change_type="address_change",
+                    new_lat=change.new_lat,
+                    new_lng=change.new_lng,
+                    new_hotel=change.new_hotel,
+                ),
+                task_queue=DELIVERY_QUEUE,
+                summary=f"[#{onum}] Sync revised destination for {change.order_id}",
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=FAST_RETRY,
+            )
 
         await workflow.execute_local_activity(
             publish_agent_event,

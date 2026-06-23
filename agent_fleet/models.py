@@ -349,6 +349,7 @@ class AgentDisconnectInput:
 class MeltdownDemoInput:
     escalation_enabled: bool = False
     max_orders: int = 50
+    dispatch_mode: str = "adk"  # "adk" | "langgraph" — set from the active UI tab at start
 
 
 @dataclass

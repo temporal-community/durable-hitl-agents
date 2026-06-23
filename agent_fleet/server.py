@@ -97,18 +97,23 @@ app = FastAPI(title="Meltdown Ice Cream Delivery", lifespan=lifespan)
 # --- Demo control endpoints ---
 
 
+class StartRequest(BaseModel):
+    mode: str = "adk"  # active UI tab: "adk" (Human→Agent) or "langgraph" (Agent→Human)
+
+
 @app.post("/api/start")
-async def start_demo():
+async def start_demo(body: StartRequest | None = None):
     """Start the Meltdown demo workflow."""
     if _temporal_client is None:
         return {"error": "Temporal client not connected"}
 
+    mode = body.mode if body and body.mode in ("adk", "langgraph") else "adk"
     # Try to start — if a stale workflow exists, terminate and retry
     for attempt in range(3):
         try:
             handle = await _temporal_client.start_workflow(
                 MeltdownDemoWorkflow.run,
-                MeltdownDemoInput(escalation_enabled=_escalation_enabled),
+                MeltdownDemoInput(escalation_enabled=_escalation_enabled, dispatch_mode=mode),
                 id="meltdown-demo",
                 task_queue=WORKFLOWS_QUEUE,
                 static_summary="Meltdown — ice cream fleet orchestrator",

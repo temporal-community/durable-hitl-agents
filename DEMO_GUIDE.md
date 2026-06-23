@@ -64,7 +64,7 @@ Optional drop-ins for mid-demo — when the conversation turns to scale or to wh
 
 - **"Open the event history."** Click into any `route-driver-*` workflow and scroll. You'll see ~50–100 events per order: each Gemini call, each tool call, each navigation leg, each delivery. That's **per-call durability** — every one of those is an independent retry unit. In the LangGraph tab the agent-team activities (Fleet, Customer, Dispatch) run *inline* and are recorded right here in the parent workflow's history, not in a separate per-order child. Crash the worker mid-Dispatch-Agent and the Fleet Agent's earlier assessment is replayed from history, not re-called.
 - **"Where are driver positions in the event log?"** They're not. `navigate_to` heartbeats position to shared state (SQLite here, Redis or Postgres in prod) every ~400ms. None of those writes hit Temporal. The pattern: signals for milestones (delivery complete, new order, human approval), shared state for continuous telemetry.
-- **"Where does the agent's question to the human live?"** There's **no per-order gate child** — open the `meltdown-demo` parent workflow while the approval card is up. The looping LangGraph team ran inline in the parent; mid-reasoning the Dispatch agent called `ask_human`, which suspended the graph on a durable `interrupt()`. The parent surfaces that question into its `pending_dispatch` dict and parks on the `answer_dispatch` signal + `wait_condition` — that single durable pause is the whole HITL. The brief the human sees is surfaced via `/api/pending-dispatch`, which reads the parent's `pending_dispatch` dict (via the `get_status` query) — not from any database the UI polls blindly. (A legacy `DispatchGateWorkflow` is still registered but unused by the demo.)
+- **"Where does the agent's question to the human live?"** There's **no per-order gate child** — open the `meltdown-demo` parent workflow while the approval card is up. The looping LangGraph team ran inline in the parent; mid-reasoning the Dispatch agent called `ask_human`, which suspended the graph on a durable `interrupt()`. The parent surfaces that question into its `pending_dispatch` dict and parks on the `answer_dispatch` signal + `wait_condition` — that single durable pause is the whole HITL. The brief the human sees is surfaced via `/api/pending-dispatch`, which reads the parent's `pending_dispatch` dict (via the `get_status` query) — not from any database the UI polls blindly.
 
 Full breakdown lives in [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
 
@@ -127,7 +127,7 @@ The flow above gates the *delivery* loop: the change is fixed and a human only s
 **What to say:**
 > "First time, the operator changed the order and a human just approved a fixed action. Watch this one — I revise the order, and the agents don't apply a script. They re-reason it: Fleet re-checks who's free, Customer re-weighs priority, Dispatch re-decides the driver. The human's edit is just new input the agent reasons over — that's the human *in the agent's loop*, still on the same durable Temporal signal."
 
-> **Note (current build):** `/api/revise-order` and the re-reason path are wired in `server.py`/`workflows.py`, but the Human → Agent tab does not yet expose a dedicated "revise" button — the existing **Submit Change** control drives the gate-the-delivery flow. To demo the re-reason beat live, trigger `POST /api/revise-order` directly (e.g. `curl`) until a UI control is added.
+> **How to trigger it:** on the Human → Agent tab, pick an order and click **↻ Revise → agent re-reasons** (next to **Submit Change**). It moves the order to a new venue and re-runs the ADK assignment team (`/api/revise-order` → `human_revise_order`). **Submit Change** still drives the separate gate-the-delivery flow (driver holds, human approves).
 
 ---
 
@@ -153,6 +153,8 @@ On the Agent-in-the-loop tab, **every order** runs a **looping multi-agent LangG
 
 **Temporal concept to highlight:** Agent-initiated escalation **inside the reasoning loop** (`ask_human` → LangGraph `interrupt()`) mapped to a durable Temporal signal (`answer_dispatch`) + `wait_condition`, resumed via `Command(resume=answer)`, query-backed brief, **no per-order child**, **survives worker death**.
 
+**Why `interrupt()` and not just the signal?** Because this HITL lives *inside* the loop, the human's answer has to flow **back into the running graph** as the agent's next observation — and `interrupt()` is the only LangGraph primitive that can suspend and resume a graph **mid-node** and inject that answer via `Command(resume=answer)`. There's **no "signal-only, no interrupt" option** for the in-loop pattern: the `answer_dispatch` signal + `wait_condition` is the durable *wait*, but `interrupt()` is the graph plumbing that lets the answer rejoin the loop.
+
 ---
 
 ## Handling Questions
@@ -162,6 +164,9 @@ On the Agent-in-the-loop tab, **every order** runs a **looping multi-agent LangG
 
 **"Why two frameworks?"**
 > "To show the pattern isn't tied to one. Pattern A is Google ADK, Pattern B is LangGraph. Different agent frameworks, same Temporal primitive: a human decision arrives as a durable async signal. In both, the human is a tool the agent's loop reasons over — the pattern is model- and framework-agnostic."
+
+**"Why does the LangGraph code look so much heavier than the ADK code?"**
+> "Because in LangGraph **you own the loop**. `langgraph_agents.py` hand-builds it from primitives — the reason↔act loop and routing, per-tool-call activities (`_run_tools`), message parsing (`_coerce_text` / `_last_text`), the `interrupt()` human node (`_human_node`), and model + tool binding (`_chat_model`). **ADK doesn't need any of that**: its `Runner` bakes the loop in. `TemporalModel` + `activity_tool` run the reason→act→observe cycle and tool-calls-as-activities for you, and structured output comes back through session state. So it's the same durable contract underneath — LangGraph just exposes more of the plumbing. **LangGraph = assemble the loop from primitives; ADK = batteries-included.**"
 
 **"What if Gemini returns something unexpected?"**
 > "The ADK agents submit output via structured tool calls — `tool_submit_assignment` writes a typed object the workflow reads. The LangGraph agent's escalation is a tool call too (`ask_human`). If a step produces garbage or fails, it's a Temporal activity, so it retries with backoff. There's a clear contract."

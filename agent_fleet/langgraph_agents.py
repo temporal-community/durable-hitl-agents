@@ -181,6 +181,20 @@ def _last_text(messages: list | None) -> str:
     return ""
 
 
+def _node_summary(agent: str, phase: str) -> str:
+    """Temporal-UI label for an agent reason node.
+
+    PLACEHOLDER SEAM: today this returns a static string (the installed LangGraph plugin
+    only accepts a static ``summary`` in node metadata). When ``temporalio[langgraph]``
+    ships per-call ``summary_fn`` support — the LangGraph analog of ADK's ``TemporalModel``
+    ``summary_fn`` (see ``_build_summary`` in agents.py) — swap these for a callable that
+    inspects the node's state/messages to produce context-aware labels (e.g.
+    "Fleet Agent — ETA for driver-c"). TODO(summary_fn): pass ``summary_fn=...`` in the
+    ``add_node`` metadata once the plugin supports it; the static string stays the fallback.
+    """
+    return f"{agent} — {phase}"
+
+
 def _tool_summary(agent_label: str, name: str, args: dict[str, Any]) -> str:
     """Human-readable label for the per-call activity in the Temporal UI."""
     dest = args.get("destination_name") or ""
@@ -492,20 +506,31 @@ def build_dispatch_team_graph() -> StateGraph:
     g = StateGraph(TeamState)
 
     g.add_node(
-        "fleet_reason", fleet_reason, metadata={**activity, "summary": "Fleet Agent — reason"}
+        "fleet_reason",
+        fleet_reason,
+        metadata={**activity, "summary": _node_summary("Fleet Agent", "reason")},
     )
     g.add_node("fleet_act", fleet_act, metadata=workflow_node)
     g.add_node("fleet_human", fleet_human, metadata=workflow_node)
     g.add_node(
         "customer_reason",
         customer_reason,
-        metadata={**activity, "summary": "Customer Agent — reason"},
+        metadata={**activity, "summary": _node_summary("Customer Agent", "reason")},
     )
     g.add_node("customer_act", customer_act, metadata=workflow_node)
+    # defer=True makes Dispatch a true fan-in BARRIER: it runs once, only after BOTH the
+    # Fleet and Customer branches reach it — never early on partial state and then again
+    # (the default LangGraph behavior when one branch loops longer than the other).
+    # This does NOT block on agent availability: a degraded agent's branch still completes
+    # (its tool call fails, _run_tools catches it, the agent concludes with degraded output),
+    # so Dispatch still runs with both assessments — one possibly degraded. The barrier only
+    # holds if every branch eventually reaches it; if we ever *skip* a disconnected agent's
+    # node entirely, switch to a timeout-based join instead.
     g.add_node(
         "dispatch_reason",
         dispatch_reason,
-        metadata={**activity, "summary": "Dispatch Agent — decide / ask human"},
+        defer=True,
+        metadata={**activity, "summary": _node_summary("Dispatch Agent", "decide / ask human")},
     )
     g.add_node("dispatch_human", dispatch_human, metadata=workflow_node)
 

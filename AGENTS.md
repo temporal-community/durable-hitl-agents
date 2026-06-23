@@ -127,15 +127,6 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   unblocks on `_routes_done` (returns `None`) so demo shutdown can't hang a parked workflow.
   LangGraph callables that run inline in the workflow are `async` because LangGraph offloads sync
   callables to a thread executor, which Temporal's deterministic event loop forbids.
-- **Legacy dispatch gate** (`dispatch_gate.py`): `DispatchGateWorkflow` + a 1-node interrupt graph
-  (`build_human_graph` / `GRAPH_NAME_HUMAN = "human_approval_interrupt"`) for a boundary HITL pause —
-  the human via a durable Temporal `approve` signal (default, with timeout → `backup` approver tier)
-  or a LangGraph `interrupt()` toggle (`config.INTERRUPT_MODE` / `DispatchGateInput.use_interrupt`),
-  pending brief exposed via `pending_brief` query. This is the **old** Pattern B path and is **no
-  longer used by the demo** — the in-loop `ask_human` flow above replaced it. The workflow is still
-  registered (kept for spikes / the standalone `spikes/langgraph_hitl` path) but the demo never spawns
-  a `gate-<order_id>` child. (`request_human_approval`, `escalate`, `_run_gate`, `_spawn_gate`, and
-  `build_gate_graph` are gone.)
 - **Server reads FleetState** (`server.py`): WebSocket data comes from `fleet.snapshot()` (SQLite).
   Server also writes disconnect/reconnect state directly. Temporal queries used for structural
   state during development — FleetState is the display authority.
@@ -147,13 +138,11 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
 - **3-queue workers** (`worker.py`): workflows + local activities, delivery, agents.
   `GoogleAdkPlugin` is on both workflow and agents workers (sandbox + determinism on
   workflow side, `invoke_model` activity on agents side). `LangGraphPlugin(graphs={...})` is
-  on the **workflow** worker and registers **two** graphs: `GRAPH_NAME = "dispatch_team"` (the
+  on the **workflow** worker and registers exactly **one** graph: `GRAPH_NAME = "dispatch_team"` (the
   looping multi-agent team — Fleet ∥ Customer reason→act→eval loops → Dispatch, run inline in the
-  parent for every langgraph-tab order, with the in-loop `ask_human` tool), and the legacy
-  `GRAPH_NAME_HUMAN` (the 1-node interrupt pause for the unused-by-demo `DispatchGateWorkflow`).
-  Their node activities (the fleet/customer/dispatch agent Gemini reason calls and each tool call)
-  execute on that worker. `DispatchGateWorkflow` is still registered on the workflow worker
-  alongside the others but is legacy/unused-by-demo. Agents use the upstream
+  parent for every langgraph-tab order, with the in-loop `ask_human` tool).
+  Its node activities (the fleet/customer/dispatch agent Gemini reason calls and each tool call)
+  execute on that worker. Agents use the upstream
   `TemporalModel` with `summary_fn=_build_summary` — `_build_summary`
   in `agents.py` generates context-aware summaries (agent name, order, phase) shown
   in the Temporal UI per invoke_model activity. `_activity_tool.py` builds its own

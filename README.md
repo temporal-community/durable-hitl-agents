@@ -186,7 +186,6 @@ The dashboard has two tabs — one per pattern. Both start the same way.
 │      (each reason call + each tool call a Temporal activity)          │
 │      agents call ask_human mid-loop → durable interrupt(); the parent │
 │      parks on the answer_dispatch signal — no per-order gate child    │
-│      (DispatchGateWorkflow still registered; legacy/unused-by-demo)   │
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────┐      ┌───────────────────────────────────────┐
@@ -255,7 +254,7 @@ The plugin turns each Gemini inference and each tool invocation into a **separat
 
 **Two processes**: `run.sh` starts a worker process and a server process (plus Temporal dev server). The server builds the frontend snapshot from FleetState (`_build_snapshot()` → `fleet.snapshot()`, SQLite shared across processes) and otherwise sends signals / runs queries only — it runs no workers. Workers run three Temporal workers on three task queues.
 
-**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs workflows plus `publish_agent_event` as a local activity (UI projection with minimal history). `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). `LangGraphPlugin(graphs={...})` is registered on the **workflow** worker — it registers **two** LangGraph graphs: the looping multi-agent team (`GRAPH_NAME = "dispatch_team"`, Fleet ∥ Customer reason→act→eval loops → Dispatch, run inline by the parent workflow with the in-loop `ask_human` tool), and a legacy one-node interrupt-pause graph (`GRAPH_NAME_HUMAN`) for the unused-by-demo `DispatchGateWorkflow`. The team's node activities (the Fleet / Customer / Dispatch agent Gemini reason calls and each tool call) execute on this worker; the parent workflow runs the team graph inline. `DispatchGateWorkflow` is still registered alongside the other workflows but is legacy — the demo's Pattern B HITL now happens in-loop via `ask_human`, not a gate child. Agents use the upstream `TemporalModel` with `summary_fn=_build_summary` — `_build_summary` in `agents.py` generates context-aware Temporal UI summaries per LLM call.
+**3-queue separation**: LLM calls are slow (3–5s). Without separate queues, assignment requests could starve navigation activities and cause heartbeat timeouts. The agents queue caps at 5 concurrent; delivery at 20. The workflows queue runs workflows plus `publish_agent_event` as a local activity (UI projection with minimal history). `GoogleAdkPlugin` is registered on **both** the workflow worker (sandbox passthroughs + deterministic runtime for replay) and the agents worker (`invoke_model` activity registration). `LangGraphPlugin(graphs={...})` is registered on the **workflow** worker — it registers exactly **one** LangGraph graph: the looping multi-agent team (`GRAPH_NAME = "dispatch_team"`, Fleet ∥ Customer reason→act→eval loops → Dispatch, run inline by the parent workflow with the in-loop `ask_human` tool). The team's node activities (the Fleet / Customer / Dispatch agent Gemini reason calls and each tool call) execute on this worker; the parent workflow runs the team graph inline. The demo's Pattern B HITL happens in-loop via `ask_human`, not a gate child. Agents use the upstream `TemporalModel` with `summary_fn=_build_summary` — `_build_summary` in `agents.py` generates context-aware Temporal UI summaries per LLM call.
 
 ### Core mechanism — how the LangGraph path is invoked
 
@@ -326,7 +325,13 @@ async def answer_dispatch(self, order_id: str, decision: str):   # the human res
 
 The pause is the same durable primitive as Pattern A — a Temporal signal (`answer_dispatch`) + `wait_condition` (see *The two patterns, in code* at the top). The difference: it fires **inside** the agent's reasoning loop (via `interrupt()`), not at a boundary gate — so the human's answer becomes the observation the agent reasons on next.
 
+Why `interrupt()` specifically? For an in-loop pattern, the human's answer has to flow **back into the running graph** as the agent's next observation — and `interrupt()` is the only LangGraph primitive that can suspend and resume a graph **mid-node** and inject that answer via `Command(resume=answer)`. So there's **no "signal-only, no interrupt" option** here: the Temporal `answer_dispatch` signal + `wait_condition` is the durable *wait*, but `interrupt()` is the graph plumbing that lets the answer rejoin the loop.
+
 > **In short:** the tab flips a flag → every order runs the looping LangGraph team inline in `MeltdownDemoWorkflow` (each reason call + tool call an activity in the parent's history) → mid-loop an agent calls `ask_human`, which suspends the graph on a durable `interrupt()`, and the parent resolves it with the `answer_dispatch` signal. No per-order child.
+
+#### Why LangGraph and ADK look so different — you own the loop vs. batteries-included
+
+The two framework files diverge on purpose. **In LangGraph, you own the loop**, so `langgraph_agents.py` carries the helpers that hand-build it: the reason↔act loop and its routing, per-tool-call activities (`_run_tools`), message parsing (`_coerce_text` / `_last_text`), the `interrupt()` human node (`_human_node`), and model + tool binding (`_chat_model`). **ADK doesn't need any of that** — its `Runner` bakes the loop in. `TemporalModel` + `activity_tool` run the reason→act→observe cycle and tool-calls-as-activities for you, and structured output comes back through ADK session state. So: **LangGraph = assemble the loop from primitives; ADK = the loop is batteries-included** — same durable contract underneath, different amount of plumbing on top.
 
 ### What each agent reasons about
 
@@ -364,7 +369,6 @@ The worker is live-only and requires `GOOGLE_API_KEY` (ADK + all API activities)
 | `agent_fleet/workflows.py` | Temporal workflows — owns driver state, signals, queries, Temporal-native retry for disconnect. Drives both in-loop HITL flows: `_run_langgraph_assignment` (Pattern B — surfaces `ask_human`, waits on `answer_dispatch`, resumes via `Command`) and `_reassign_via_adk`/`human_revise_order` (Pattern A in-loop re-reason). Includes `OrderGenerationWorkflow` |
 | `agent_fleet/agents.py` | ADK agent composition — Fleet, Customer, Dispatch Agent (the human→agent re-reason path re-runs this team via `_run_adk_assignment`) |
 | `agent_fleet/langgraph_agents.py` | Pattern B — the looping LangGraph multi-agent team (mirror of `agents.py`): Fleet ∥ Customer reason→act→eval ReAct loops → Dispatch loop, each tool call its own Temporal activity. Agents call the in-loop `ask_human` tool, whose execution is a durable `interrupt()` |
-| `agent_fleet/dispatch_gate.py` | **Legacy / unused-by-demo** — `DispatchGateWorkflow` + one-node interrupt graph for a boundary HITL pause (durable Temporal `approve` signal; `interrupt()` toggle). Kept for spikes; the demo's Pattern B HITL now happens in-loop via `ask_human` (see `langgraph_agents.py`) |
 | `agent_fleet/config.py` | Centralized env config — `GOOGLE_API_KEY`, `GOOGLE_MAPS_API_KEY`, `DEFAULT_MODEL`, `TEMPORAL_ADDRESS` |
 | `agent_fleet/queues.py` | Task queue name constants (workflows / delivery / agents) |
 | `agent_fleet/worker.py` | Three Temporal workers — workflow-only, delivery, agents. Live-only; requires `GOOGLE_API_KEY` |
