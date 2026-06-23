@@ -44,7 +44,7 @@ See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" informati
 
 The demo deliberately uses **two different agent frameworks** on the **same** Temporal runtime, to make the point that the durable-HITL pattern is framework-agnostic.
 
-- **Pattern A (Human-in-the-loop)** is built on **Google ADK** — a multi-agent assignment pipeline (Fleet + Customer Agents in parallel → Dispatch Agent). It has two flavors: an operator change that gates the *delivery* loop (driver holds at the venue), and a human revision that lands *inside the agent's reasoning loop* — the assignment agent re-reasons the driver.
+- **Pattern A (Human-in-the-loop)** is built on **Google ADK** — a multi-agent assignment pipeline (Fleet + Customer Agents in parallel → Dispatch Agent). One human gate feeds *both* loops: a customer change makes the driver hold at the venue (the *delivery* loop), and on an approved address change the ADK assignment team **re-reasons** the new location (the *agent's reasoning* loop) before the held driver reroutes.
 - **Pattern B (Agent-in-the-loop)** is built on **LangGraph** via Temporal's `temporalio.contrib.langgraph` integration — a looping multi-agent team (Fleet + Customer → Dispatch) where, mid-reasoning, the Dispatch agent calls an `ask_human` tool to escalate.
 - **The active tab picks the framework for *all* orders** — the dashboard signals `set_dispatch_mode` (`adk` or `langgraph`). There's no value threshold steering orders between them; whichever tab you're on dispatches every order.
 
@@ -93,41 +93,30 @@ Full breakdown lives in [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
 ## Pattern A — Human-in-the-Loop: "The Human Calls the Agent"
 **Time: 2–3 min | Tab: Human-in-the-loop | Best for: signals, `wait_condition`, cross-workflow coordination**
 
-This is **operator-initiated**: the change is submitted externally (an operator acting for the customer), and a human supervisor approves it. The ADK agents never see the change — the gate lives in the workflow, not in any agent tool. Contrast that with Pattern B, where the *agent* initiates the escalation.
+This is **customer-initiated**: the change is submitted externally, and a human supervisor approves it. The gate lives in the workflow, not in any agent tool — but it's **one human gate that feeds both loops**: the driver holds, you approve, and on an address change the ADK agents **re-reason** the new location before the driver reroutes. Contrast that with Pattern B, where the *agent* initiates the escalation.
 
 **Setup:** On the **Human-in-the-loop** tab, click **Start Deliveries** and wait for a driver to be en route to a venue.
 
 **Steps:**
 1. In the order dropdown, pick an active order being delivered.
-2. Select **Address Change** or **Cancel Order** and click **Submit Change**.
+2. Select **Address Change** (then pick a new SF location from the dropdown) or **Cancel Order**, and click **Submit Change**.
 3. Watch the driver: it **arrives at the venue but holds before delivering** — status shows `awaiting_update`. The parent workflow is waiting for your approval; the child workflow is waiting for the parent's decision. Two `wait_condition` pauses, both durable.
 4. Meanwhile, everything else keeps running — other orders still come in, other drivers still deliver.
 5. Click **Approve** (or **Reject**):
-   - **Cancel:** the driver skips delivery entirely and moves to its next order (or returns to Ziggy's).
-   - **Address change:** the driver reroutes from the venue to **Oracle Park** — a new marker appears on the map, the order card updates.
+   - **Cancel:** the driver skips delivery entirely and moves to its next order (or returns to Ziggy's). (Fixed cancel — no re-reason.)
+   - **Address change:** the **ADK assignment team re-reasons** the order for the new location — Fleet recomputes ETAs, Customer re-reads priority, Dispatch reassesses (watch the agent panels update) — then the held driver reroutes from the venue to the chosen location; a new marker appears on the map, the order card updates.
    - **Reject:** the driver delivers normally to the original venue.
 
 **What to say:**
-> "An operator just changed this order, and look — the driver arrived but it's holding. It won't deliver until we decide. That's two `wait_condition` pauses working together: the parent waits for the human, the child waits for the parent. Meanwhile the rest of the fleet keeps running, unaffected. We approve the cancel — and the driver skips delivery, no race, because delivery never started. Temporal held both workflows in that waiting state, fully durable. No polling, no timeout hacks."
+> "A customer just changed this order, and look — the driver arrived but it's holding. It won't deliver until we decide. That's two `wait_condition` pauses working together: the parent waits for the human, the child waits for the parent. Now watch — I approve the new address, and the agents don't apply a script: they *re-reason* it. Fleet re-checks ETAs to the new spot, Customer re-weighs priority, Dispatch re-decides — and *then* the held driver reroutes. One approval feeds both loops: the agents re-reason, and the driver reroutes. Meanwhile the rest of the fleet keeps running, unaffected. Temporal held both workflows in that waiting state, fully durable. No polling, no timeout hacks."
 
 **What you'll see in the Temporal UI:**
-- `meltdown-demo`: `WorkflowExecutionSignaled` (`customer_change`) → `update_pending` to child → `WorkflowExecutionSignaled` (`change_approved`) → `execute_customer_change` activity → `resolve_update` to child
+- `meltdown-demo`: `WorkflowExecutionSignaled` (`customer_change`) → `update_pending` to child → `WorkflowExecutionSignaled` (`change_approved`) → `execute_customer_change` activity → (address change) `_rereason_order` re-runs the ADK team → `resolve_update` to child
 - `route-driver-X`: `WorkflowExecutionSignaled` (`update_pending`) → driver holds `awaiting_update` → `WorkflowExecutionSignaled` (`resolve_update`) → cancel skips `deliver_order` / reroute triggers a new `navigate_to`
 
-**Temporal concept to highlight:** Dual `wait_condition` (parent + child), cross-workflow signals, durable pause without polling.
+**Temporal concept to highlight:** One human gate feeding both loops (agent re-reason + driver reroute), dual `wait_condition` (parent + child), cross-workflow signals, durable pause without polling.
 
-### Variant — Human → Agent, in the *reasoning* loop
-
-The flow above gates the *delivery* loop: the change is fixed and a human only says yes/no. This second beat puts the human inside the *agent's* loop — a human revises an order (new location / details) and the ADK assignment agent **re-reasons** how to adjust, instead of the system applying a canned change. Same Pattern A ("the human calls the agent"), but the human's edit is now input the agent reasons over.
-
-- The revision arrives as the `human_revise_order` signal (`POST /api/revise-order`).
-- That hands the revised order back to the **ADK assignment team** (`_reassign_via_adk` → `_run_adk_assignment`): Fleet → Customer → Dispatch run **again** over the change.
-- The agent **re-decides**: re-check the fleet, then either reassign to a better driver (pull from the old driver, give to the new one), keep the same driver and push the new destination into its delivery loop, or assign fresh if it wasn't on a driver yet.
-
-**What to say:**
-> "First time, the operator changed the order and a human just approved a fixed action. Watch this one — I revise the order, and the agents don't apply a script. They re-reason it: Fleet re-checks who's free, Customer re-weighs priority, Dispatch re-decides the driver. The human's edit is just new input the agent reasons over — that's the human *in the agent's loop*, still on the same durable Temporal signal."
-
-> **How to trigger it:** on the Human → Agent tab, pick an order and click **↻ Revise → agent re-reasons** (next to **Submit Change**). It moves the order to a new venue and re-runs the ADK assignment team (`/api/revise-order` → `human_revise_order`). **Submit Change** still drives the separate gate-the-delivery flow (driver holds, human approves).
+The reroute choices come from a curated `REROUTE_OPTIONS` list (Oracle Park + Salesforce Tower, Union Square, Coit Tower, Palace of Fine Arts), served via `/api/locations` and shown in the **Address Change** dropdown.
 
 ---
 

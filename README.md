@@ -14,7 +14,7 @@ Both human-in-the-loop patterns reduce to the **same durable Temporal primitive*
 
 ### Pattern A — The Human Calls the Agent (Google ADK)
 
-An operator interrupts a delivery mid-flight; the driver **halts gracefully at the venue** and waits for a human decision, then continues. *Human-initiated interrupt with graceful halt and resumption.*
+A customer submits an order change mid-delivery (address change → pick a new SF location from a dropdown, or cancel); the driver **halts gracefully at the venue** and waits for a human to approve. ONE human gate feeds **both** loops: for an address change the **ADK assignment team re-reasons** the order for the new location (Fleet recomputes ETAs, Customer re-reads priority, Dispatch reassesses), and the **held driver reroutes** to it. Cancel is a fixed cancel (no re-reason); reject → deliver to the original destination. *Human-initiated interrupt with graceful halt, agent re-reasoning, and resumption.*
 
 ```python
 # DriverRouteWorkflow (workflows.py) — driver reaches the venue, then PAUSES until a human resolves it
@@ -26,7 +26,7 @@ if order.order_id in self._pending_holds:
     # decision: "cancel" | "address_change" | "release"  → skip / reroute / deliver
 
 @workflow.signal
-async def update_pending(self, inp):   # operator submits the change   (human → agent)
+async def update_pending(self, inp):   # customer submits the change → driver holds
     self._pending_holds.setdefault(inp.order_id, PendingHold())
 
 @workflow.signal
@@ -34,18 +34,14 @@ async def resolve_update(self, inp):   # the human's decision resumes the driver
     self._pending_holds[inp.order_id].decision = inp.change_type
 ```
 
-**Variant — human → agent, in the *reasoning* loop (ADK).** The change above gates the *delivery* loop. A second ADK flow puts the human inside the *agent's* loop: an operator revises an order (new location / priority) and the assignment agent **re-reasons** how to adjust — re-checking the fleet and re-deciding the driver — instead of the system applying a fixed change. The human's edit is input the agent reasons over; the agent decides the response.
+The *same* approval also drives the agent's reasoning loop. On an approved address change, the parent (`_process_customer_change`) updates the order to the human's chosen location and feeds it back to the ADK assignment team via `_rereason_order` — so the human's edit is the new input the agents reason over, and the agents (not a fixed script) decide how to adjust before the held driver reroutes:
 
 ```python
-# workflows.py — a human revision re-invokes the ADK assignment agent
-@workflow.signal
-async def human_revise_order(self, change):          # human → agent
-    self._pending_revisions.append(change)
-
-async def _reassign_via_adk(self, change):           # the agent RE-REASONS the assignment
-    ...                                              # apply the revision, then:
-    assignment = await self._run_adk_assignment(...)  # Fleet → Customer → Dispatch run again
-    # commit the agent's new driver / destination decision (reassign / reroute / re-prioritize)
+# workflows.py — an approved address change re-invokes the ADK assignment team
+async def _rereason_order(self, order_id, note):     # human → agent, in the reasoning loop
+    # ...the order's coords are already updated to the human's chosen location, then:
+    assignment = await self._run_adk_assignment(...)  # Fleet ∥ Customer → Dispatch run again
+    # publish the re-assessment to the agent panels; the held driver then reroutes
 ```
 
 ### Pattern B — The Agent Calls the Human (LangGraph)
@@ -63,16 +59,19 @@ async def _human_node(messages, agent_label, state):     # the ask_human "execut
     answer = interrupt({"question": ..., "order_id": state["order_id"], ...})  # ⏸ suspend the graph
     return [ToolMessage(content=str(answer), ...)]        # answer flows back as the observation
 
-# workflows.py — _run_langgraph_assignment drives the interrupt with a durable signal
+# workflows.py — the durable wait IS a Temporal primitive
 while result.get("__interrupt__"):
-    self._pending_dispatch[order.order_id] = result["__interrupt__"][0].value
-    answer = await self._await_dispatch_answer(order.order_id)   # ⏸ wait_condition on the signal
-    result = await compiled.ainvoke(Command(resume=answer), config=config)  # resume the agent
+    self._pending_dispatch[oid] = result["__interrupt__"][0].value          # exposed via @workflow.query
+    await workflow.wait_condition(lambda: oid in self._dispatch_answers)    # ⏸ durable pause
+    answer = self._dispatch_answers.pop(oid)
+    result = await compiled.ainvoke(Command(resume=answer), config=config)  # resume the graph
 
 @workflow.signal
-async def answer_dispatch(self, order_id: str, decision: str):  # the human responds → resolves it
-    self._dispatch_answers[order_id] = decision
+async def answer_dispatch(self, oid, decision):            # human → flips the wait_condition
+    self._dispatch_answers[oid] = decision
 ```
+
+*(The real `_await_dispatch_answer` adds a `_routes_done` shutdown escape; the snippet shows the bare `wait_condition` so the durable primitive is visible.)*
 
 > **Two frameworks, one durable contract — the human is a tool the agent calls, and on Temporal that tool call is a signal.** (The `ask_human` "execution" is a LangGraph `interrupt()`; the durable wait + resume is a Temporal `wait_condition` + `answer_dispatch` signal.)
 
@@ -92,7 +91,7 @@ Built with **Google ADK** (multi-agent reasoning for Pattern A), **LangGraph** v
 
 | Pattern | "The Human..." | Built on | What Happens | Durable primitive |
 |---------|----------------|----------|--------------|-------------------|
-| **A — Human-in-the-loop** | ...calls the agent | **Google ADK** (multi-agent) | An operator submits a customer change (address change / cancel) mid-delivery. The change is **operator-initiated** — the gate lives in the workflow, not in any LLM tool. The driver navigates to the venue but holds before delivering (`awaiting_update`). A human approves or rejects: approve cancel → delivery skipped; approve reroute → driver navigates to Oracle Park; reject → deliver normally. | Signal → `wait_condition` hold → resolve (two `wait_condition`s: parent waits for human, child waits for parent) |
+| **A — Human-in-the-loop** | ...calls the agent | **Google ADK** (multi-agent) | A customer submits an order change mid-delivery — an address change (pick a new SF location from a dropdown) or cancel. The change is **customer-initiated** — the gate lives in the workflow, not in any LLM tool. The driver navigates to the venue but holds before delivering (`awaiting_update`). One human approval feeds **both** loops: approve cancel → delivery skipped; approve address change → the ADK assignment team **re-reasons** the order for the new location (Fleet recomputes ETAs, Customer re-reads priority, Dispatch reassesses), then the held driver reroutes to it; reject → deliver to the original destination. | Signal → `wait_condition` hold → resolve, then re-reason via ADK (two `wait_condition`s: parent waits for human, child waits for parent) |
 | **B — Agent-in-the-loop** | ...gets called by the agent | **LangGraph** (`temporalio.contrib.langgraph`) | On the LangGraph tab, **every** order runs a looping **multi-agent** LangGraph team inline in the parent workflow (Fleet ∥ Customer are real reason→act→eval ReAct loops → Dispatch decides) — each Gemini reason call and **each tool call** run as its own Temporal **activity** recorded in the parent's history. **Mid-loop**, the Dispatch or Fleet agent can call the `ask_human` tool; that tool's execution is a durable LangGraph `interrupt()` that suspends the graph. The parent workflow (`_run_langgraph_assignment`) surfaces the question, parks on the `answer_dispatch` Temporal **signal** + `wait_condition`, and resumes the agent via `Command(resume=answer)` — the answer flows back as the agent's next observation. No per-order gate child; the HITL is inside the reasoning loop. Survives worker death. | The human is literally a tool the agent calls (`ask_human`) — but a durable, async one. On Temporal, that tool call's pause is a signal. |
 
 The active framework is chosen by the UI tab and applies to all orders. On the LangGraph tab, routine auto-generated orders top out around $1,950 (servings ≤150 × ≤$13), so the Dispatch agent commits them directly; only a genuinely high-value order escalates. The **Drop high-value order** button injects a premium Moscone order the agent escalates — so the agent-in-the-loop demo fires when you choose, not at random.
@@ -148,7 +147,7 @@ uv run --env-file .env python -m agent_fleet.worker
 The dashboard has two tabs — one per pattern. Both start the same way.
 
 1. **Start Deliveries** — Ziggy's (the Ferry Building) opens for business. Orders flow in from Moscone Center, Fisherman's Wharf, and Chinatown. The ADK agents reason per-order and assign to the least-loaded driver. Drivers batch-pickup and deliver sequentially.
-2. **Pattern A — Human-in-the-loop tab:** pick an active order, choose **Address Change** or **Cancel Order**, click **Submit Change**. The driver arrives at the venue but holds (`awaiting_update`) while a human decides. Click **Approve** / **Reject** — cancel skips delivery, address change reroutes to Oracle Park, reject delivers normally.
+2. **Pattern A — Human-in-the-loop tab:** pick an active order, choose **Address Change** (pick a new SF location from the dropdown) or **Cancel Order**, click **Submit Change**. The driver arrives at the venue but holds (`awaiting_update`) while a human decides. Click **Approve** / **Reject** — cancel skips delivery; address change has the ADK team **re-reason** the new location (Fleet/Customer/Dispatch reassess) before the held driver reroutes to it; reject delivers normally.
 3. **Pattern B — Agent-in-the-loop tab:** click **Drop high-value order** to inject a premium Moscone catering order. The looping LangGraph team (Fleet ∥ Customer → Dispatch) assesses it inline in the parent workflow; **mid-reasoning** the Dispatch agent calls the `ask_human` tool, which suspends the graph on a durable `interrupt()` while the parent parks on the `answer_dispatch` signal; an approval card appears over the map. Approve or reject — the answer flows back into the agent's reasoning. To show durability, **kill the worker while the card is up** — the paused workflow survives; restart the worker and the pending question is still there.
 
 
@@ -325,6 +324,8 @@ async def answer_dispatch(self, order_id: str, decision: str):   # the human res
 
 The pause is the same durable primitive as Pattern A — a Temporal signal (`answer_dispatch`) + `wait_condition` (see *The two patterns, in code* at the top). The difference: it fires **inside** the agent's reasoning loop (via `interrupt()`), not at a boundary gate — so the human's answer becomes the observation the agent reasons on next.
 
+This durability is **verified**: the in-loop `interrupt` survives a worker kill — `kill -9` the worker while parked on the question, restart, then signal the answer, and the agent resumes. Temporal replays from event history; LangGraph's `InMemorySaver` is non-durable on its own — Temporal is what makes the wait survive the crash.
+
 Why `interrupt()` specifically? For an in-loop pattern, the human's answer has to flow **back into the running graph** as the agent's next observation — and `interrupt()` is the only LangGraph primitive that can suspend and resume a graph **mid-node** and inject that answer via `Command(resume=answer)`. So there's **no "signal-only, no interrupt" option** here: the Temporal `answer_dispatch` signal + `wait_condition` is the durable *wait*, but `interrupt()` is the graph plumbing that lets the answer rejoin the loop.
 
 > **In short:** the tab flips a flag → every order runs the looping LangGraph team inline in `MeltdownDemoWorkflow` (each reason call + tool call an activity in the parent's history) → mid-loop an agent calls `ask_human`, which suspends the graph on a durable `interrupt()`, and the parent resolves it with the `answer_dispatch` signal. No per-order child.
@@ -366,8 +367,8 @@ The worker is live-only and requires `GOOGLE_API_KEY` (ADK + all API activities)
 | `agent_fleet/models.py` | Dataclass models for all Temporal payloads (incl. `DriverSnapshot`) |
 | `agent_fleet/simulation.py` | FleetState — SQLite WAL-backed write-only UI projection (`fleet_state.db`, cross-process) |
 | `agent_fleet/activities.py` | Temporal activities — navigation, delivery, Maps API, agent tools |
-| `agent_fleet/workflows.py` | Temporal workflows — owns driver state, signals, queries, Temporal-native retry for disconnect. Drives both in-loop HITL flows: `_run_langgraph_assignment` (Pattern B — surfaces `ask_human`, waits on `answer_dispatch`, resumes via `Command`) and `_reassign_via_adk`/`human_revise_order` (Pattern A in-loop re-reason). Includes `OrderGenerationWorkflow` |
-| `agent_fleet/agents.py` | ADK agent composition — Fleet, Customer, Dispatch Agent (the human→agent re-reason path re-runs this team via `_run_adk_assignment`) |
+| `agent_fleet/workflows.py` | Temporal workflows — owns driver state, signals, queries, Temporal-native retry for disconnect. Drives both in-loop HITL flows: `_run_langgraph_assignment` (Pattern B — surfaces `ask_human`, waits on `answer_dispatch`, resumes via `Command`) and `_process_customer_change`/`_rereason_order` (Pattern A — one approval gate that holds the driver and, on an address change, re-reasons via the ADK team). Includes `OrderGenerationWorkflow` |
+| `agent_fleet/agents.py` | ADK agent composition — Fleet, Customer, Dispatch Agent (an approved address change re-runs this team via `_rereason_order` → `_run_adk_assignment`) |
 | `agent_fleet/langgraph_agents.py` | Pattern B — the looping LangGraph multi-agent team (mirror of `agents.py`): Fleet ∥ Customer reason→act→eval ReAct loops → Dispatch loop, each tool call its own Temporal activity. Agents call the in-loop `ask_human` tool, whose execution is a durable `interrupt()` |
 | `agent_fleet/config.py` | Centralized env config — `GOOGLE_API_KEY`, `GOOGLE_MAPS_API_KEY`, `DEFAULT_MODEL`, `TEMPORAL_ADDRESS` |
 | `agent_fleet/queues.py` | Task queue name constants (workflows / delivery / agents) |
