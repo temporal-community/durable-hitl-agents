@@ -328,6 +328,23 @@ ADK's `activity_tool` granularity. The tools are the same ones the ADK team uses
 `get_fleet_status`, `get_route_info`, `get_order_priorities`. Fleet and Dispatch also bind
 the `ask_human` tool; Customer does not.
 
+**Fan-in barrier (`defer=True`).** `dispatch_reason` is registered with `defer=True` so it
+is a true convergence point: it runs **once, only after both** the Fleet and Customer
+branches reach it. Without `defer`, LangGraph would run the downstream node *early* on
+partial state (when one branch loops longer than the other) and then *again* when the
+slower branch finishes — Dispatch would decide on half-arrived input. Note `defer` waits
+for both *branches to complete*, not for an agent to be "available": a degraded agent's
+branch still completes (its tool call fails, `_run_tools` catches it, the agent concludes
+with degraded output), so Dispatch still runs with both assessments — one possibly
+degraded. (If we ever *skipped* a disconnected agent's node entirely, `defer` would block;
+we'd switch to a timeout-based join then.)
+
+> **Temporal-UI labels (`summary`) — placeholder.** Each reason node gets a static
+> `summary` string via `_node_summary(...)`. That helper is a seam: when the LangGraph
+> plugin ships per-call `summary_fn` support (the analog of ADK's `TemporalModel`
+> `summary_fn` / `_build_summary`), swap the static string for a callable that builds
+> context-aware labels (e.g. "Fleet Agent — ETA for driver-c"). Inert until that lands.
+
 ### The human is a tool — `ask_human` and the durable interrupt
 
 When an agent decides it needs a human, it calls the `ask_human(question)` tool. The
@@ -526,6 +543,54 @@ server).
   otherwise sends **signals** and runs **queries** only (e.g. `get_status` for
   `/api/pending-dispatch`). It has no GoogleAdkPlugin and no activity
   registration.
+
+---
+
+## When does an agent become its own Temporal workflow?
+
+Today the whole agent team runs **inside one workflow** (`MeltdownDemoWorkflow`): ADK via
+the `Runner` inline, LangGraph via the graph inline, with each LLM/tool call as an
+activity. That's the right default — but a natural question is whether each *agent* should
+be its own child workflow. Use this test, per agent:
+
+| Make it a **child workflow** when it… | Keep it an **activity / graph node** when it… |
+|---|---|
+| has an independent lifecycle / failure-and-retry domain | is a short, stateless step in a tightly-coupled flow |
+| needs its own **signals or queries** (e.g. a HITL pause) | needs no independent interaction |
+| should **scale on its own** task queue | scales fine with the parent |
+| is **reused** by other workflows | is only ever used here |
+| must be **independently observable** in the Temporal UI | doesn't warrant its own history |
+
+Applied here: the **Dispatch** agent is the strongest candidate — it parks on a human
+signal (`ask_human`), which is exactly "a workflow as a durable async endpoint." **Fleet**
+and **Customer** are short, tool-calling, no-HITL — making them separate workflows is
+mostly overhead. So the rule of thumb: **HITL pauses and long-lived/independent units →
+workflow; quick stateless reasoning/tool steps → activity or graph node.** Don't split for
+tidiness; split when one of the rows above is actually true.
+
+### Splitting moves orchestration from the framework to Temporal
+
+A key consequence: today the **framework** (LangGraph graph / ADK `Runner`) owns
+*inter-agent* orchestration (fan-out, converge, sequence). If each agent becomes a child
+workflow, **Temporal** owns inter-agent orchestration (parent spawns children, `gather`-
+joins, sequences) and the framework keeps only the *intra-agent* loop. ADK is the
+opinionated one here — its `SequentialAgent`/`ParallelAgent` + shared session assume one
+`Runner`, so splitting fights its design; LangGraph decomposes more naturally because its
+nodes already run as separate activities. Neither is impossible; both hand the team layer
+to Temporal.
+
+### Follow-up: multi-framework (cross-harness) orchestration
+
+The compelling reason to split is **heterogeneous agents**: one agent built on ADK, another
+on LangGraph, in one system. No agent *framework* (harness) can orchestrate *across*
+harnesses — ADK orchestrates ADK agents, LangGraph orchestrates LangGraph nodes. The moment
+you mix them, **Temporal is the orchestration layer** (each agent is a workflow; Temporal
+does fan-out / join / HITL between them, regardless of what harness runs inside each).
+
+Planned as a separate follow-up (after the current cleanup lands): start with
+**Dispatch-as-its-own-workflow** (the HITL agent), then a 2-agent proof with an **ADK agent
+∥ a LangGraph agent** orchestrated by Temporal — the `defer` barrier above becomes a plain
+`asyncio.gather(fleet_child, customer_child)` child-workflow join.
 
 ---
 

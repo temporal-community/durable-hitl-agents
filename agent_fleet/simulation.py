@@ -433,6 +433,12 @@ class FleetState:
             ),
         )
         if cursor.rowcount > 0:
+            # Clear any prior owner first so a re-assignment (e.g. the ADK re-reason flow)
+            # can't leave the order owned by two drivers in the join table.
+            await conn.execute(
+                "DELETE FROM driver_orders WHERE order_id=? AND driver_id<>?",
+                (order_id, driver_id),
+            )
             await conn.execute(
                 "INSERT OR IGNORE INTO driver_orders (driver_id, order_id) VALUES (?, ?)",
                 (driver_id, order_id),

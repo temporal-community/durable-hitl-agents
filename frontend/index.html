@@ -1409,6 +1409,14 @@
 <!-- driver-disconnect banner removed (not part of the two demos) -->
 
 <script>
+// Escape model/tool-derived text before inserting into innerHTML (the ask_human
+// question and agent-event content come from the LLM, so treat them as untrusted).
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 // --- Tab switching ---
 function switchTab(tabName) {
   document.querySelectorAll('.tab-bar .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
@@ -1931,9 +1939,9 @@ function updateAgentEvents(events, agentHealth) {
         }
         html += `
           <div class="agent-box-entry${typingClass}">
-            <div class="entry-type">${e.event_type}</div>
+            <div class="entry-type">${escapeHtml(e.event_type)}</div>
             <div class="entry-content">
-              ${displayText.replace(/\n/g, '<br>')}
+              ${escapeHtml(displayText).replace(/\n/g, '<br>')}
             </div>
           </div>
         `;
@@ -1963,11 +1971,11 @@ async function api(endpoint, method = 'POST', body = null) {
 }
 
 async function startDemo() {
-  const result = await api('start');
-  console.log('Started:', result);
-  // Sync the dispatch framework to whichever tab is active.
+  // Send the active tab's framework AT start so the first orders can't race a later
+  // dispatch-mode signal ("the tab chooses the framework for all orders").
   const mode = document.querySelector('.tab-bar .tab.active')?.dataset.tab === 'agent' ? 'langgraph' : 'adk';
-  await api('dispatch-mode', 'POST', { mode });
+  const result = await api('start', 'POST', { mode });
+  console.log('Started:', result);
 }
 
 async function submitCustomerChange() {
@@ -2034,9 +2042,9 @@ async function pollPendingDispatch() {
     _gateCurrentOrder = oid;
     const onum = (b.order_id || oid).replace(/^order-/, '#');
     document.getElementById('dgc-body').innerHTML =
-      `<div class="dgc-order"><b>Order ${onum}</b> · $${(b.order_value || 0).toLocaleString()} · ${b.venue || ''}</div>`
-      + `<div class="dgc-rec">🤖 <b>${b.agent || 'Agent'}</b> is asking a human:</div>`
-      + `<div class="dgc-reason">"${b.question || ''}"</div>`;
+      `<div class="dgc-order"><b>Order ${escapeHtml(onum)}</b> · $${(b.order_value || 0).toLocaleString()} · ${escapeHtml(b.venue || '')}</div>`
+      + `<div class="dgc-rec">🤖 <b>${escapeHtml(b.agent || 'Agent')}</b> is asking a human:</div>`
+      + `<div class="dgc-reason">"${escapeHtml(b.question || '')}"</div>`;
     card.style.display = 'block';
   } catch (e) { /* demo not running yet — leave card hidden */ }
 }

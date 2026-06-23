@@ -127,7 +127,7 @@ The flow above gates the *delivery* loop: the change is fixed and a human only s
 **What to say:**
 > "First time, the operator changed the order and a human just approved a fixed action. Watch this one — I revise the order, and the agents don't apply a script. They re-reason it: Fleet re-checks who's free, Customer re-weighs priority, Dispatch re-decides the driver. The human's edit is just new input the agent reasons over — that's the human *in the agent's loop*, still on the same durable Temporal signal."
 
-> **Note (current build):** `/api/revise-order` and the re-reason path are wired in `server.py`/`workflows.py`, but the Human → Agent tab does not yet expose a dedicated "revise" button — the existing **Submit Change** control drives the gate-the-delivery flow. To demo the re-reason beat live, trigger `POST /api/revise-order` directly (e.g. `curl`) until a UI control is added.
+> **How to trigger it:** on the Human → Agent tab, pick an order and click **↻ Revise → agent re-reasons** (next to **Submit Change**). It moves the order to a new venue and re-runs the ADK assignment team (`/api/revise-order` → `human_revise_order`). **Submit Change** still drives the separate gate-the-delivery flow (driver holds, human approves).
 
 ---
 
