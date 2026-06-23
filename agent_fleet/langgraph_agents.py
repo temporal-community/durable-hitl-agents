@@ -54,6 +54,12 @@ with workflow.unsafe.imports_passed_through():
 
 # Graph name registered with LangGraphPlugin (see worker.py).
 GRAPH_NAME = "dispatch_team"  # the looping multi-agent team; agents call ask_human in-loop
+# Dispatch-ONLY graph for the cross-harness tab (3rd tab): the LangGraph half of a
+# split where Fleet+Customer run on ADK (a separate child workflow) and only the
+# Dispatch agent runs on LangGraph. Seeded with the ADK-produced assessments; the
+# Dispatch agent reasons on them and may call ask_human in-loop. No Fleet/Customer
+# nodes, no fan-in barrier.
+DISPATCH_ONLY_GRAPH_NAME = "dispatch_only"
 
 # Each tool call is scheduled as its own activity with these knobs. Failures after retry
 # surface to the LLM as an error string (see _run_tools) so an agent can reason around a
@@ -560,6 +566,37 @@ def build_dispatch_team_graph() -> StateGraph:
     g.add_edge("customer_act", "customer_reason")
 
     # Dispatch loop: reason → {ask human → reason | done → END}
+    g.add_conditional_edges(
+        "dispatch_reason", dispatch_route, {"dispatch_human": "dispatch_human", "end": END}
+    )
+    g.add_edge("dispatch_human", "dispatch_reason")
+
+    return g
+
+
+def build_dispatch_only_graph() -> StateGraph:
+    """Dispatch agent ALONE — the LangGraph half of the cross-harness tab.
+
+    START → dispatch_reason → {ask human → reason | done → END}. The graph is SEEDED
+    with the ADK-produced ``fleet_assessment`` / ``customer_assessment`` (dispatch_reason
+    already reads them from state and only falls back to message threads when empty), so
+    no Fleet/Customer nodes are needed. The Dispatch agent can call ask_human mid-loop —
+    that suspends the graph on a durable interrupt() the child workflow drives via its own
+    answer_dispatch signal + Command(resume). There is a single entry node and no parallel
+    branches, so no ``defer`` fan-in barrier (unlike the full team graph).
+    """
+    activity = {"execute_in": "activity", "start_to_close_timeout": timedelta(seconds=60)}
+    workflow_node = {"execute_in": "workflow"}
+    g = StateGraph(TeamState)
+
+    g.add_node(
+        "dispatch_reason",
+        dispatch_reason,
+        metadata={**activity, "summary": _node_summary("Dispatch Agent", "decide / ask human")},
+    )
+    g.add_node("dispatch_human", dispatch_human, metadata=workflow_node)
+
+    g.add_edge(START, "dispatch_reason")
     g.add_conditional_edges(
         "dispatch_reason", dispatch_route, {"dispatch_human": "dispatch_human", "end": END}
     )

@@ -44,10 +44,11 @@ with workflow.unsafe.imports_passed_through():
         set_warmup_hidden,
         sync_driver_position,
     )
-    from agent_fleet.agents import create_order_assignment_agent
-    from agent_fleet.langgraph_agents import GRAPH_NAME
+    from agent_fleet.agents import create_assessment_team_agent, create_order_assignment_agent
+    from agent_fleet.langgraph_agents import DISPATCH_ONLY_GRAPH_NAME, GRAPH_NAME
     from agent_fleet.locations import WAREHOUSE
     from agent_fleet.models import (
+        AdkAssessmentOutput,
         AgentDisconnectInput,
         CustomerChangeInput,
         DeliverInput,
@@ -57,6 +58,8 @@ with workflow.unsafe.imports_passed_through():
         DriverSnapshot,
         ExecuteCustomerChangeInput,
         GenerateOrderInput,
+        LgDispatchInput,
+        LgDispatchOutput,
         MeltdownDemoInput,
         NavigateInput,
         NavigateOutput,
@@ -94,6 +97,15 @@ ORDER_INTERVAL_SECONDS = 12
 # _WARMUP_ORDERS), so the burst fills A-C without overwhelming the agent team.
 WARMUP_BURST_ORDERS = 5
 WARMUP_BURST_SECONDS = 2
+
+# Cross-harness tab: each order spawns TWO child workflows (an ADK assess child + a
+# LangGraph dispatch child), so the full 50-order auto-flow floods the Temporal UI with
+# ~100 short-lived executions. The per-order model is intentional (each agent unit is its
+# own durable workflow) — we just generate fewer, slower orders in this mode so the demo
+# stays legible and you can point at a single assess-/dispatch- pair. Drop a high-value
+# order to drive the ask_human gate on demand. Tunable; ADK/LangGraph tabs are unaffected.
+CROSSHARNESS_MAX_ORDERS = 8
+CROSSHARNESS_ORDER_INTERVAL_SECONDS = 20
 
 DRIVER_CAPACITY = 3
 DRIVER_IDS = ["driver-a", "driver-b", "driver-c", "driver-d", "driver-e"]
@@ -826,6 +838,184 @@ class OrderGenerationWorkflow:
         return f"Order generation complete — {inp.max_orders} orders generated"
 
 
+# --- Cross-harness agent child workflows (3rd tab) ---
+#
+# The cross-harness tab proves that only Temporal can orchestrate ACROSS agent
+# harnesses: Fleet+Customer run on ADK (AdkAssessmentWorkflow), the Dispatch agent
+# runs on LangGraph (LgDispatchWorkflow), and the parent (MeltdownDemoWorkflow) joins
+# them as child workflows. Each child is its own Temporal history in the UI — the
+# visible cross-harness boundary. Children DECIDE; the parent APPLIES (owns driver
+# state, signals drivers); driver workflows EXECUTE.
+
+
+@workflow.defn
+class AdkAssessmentWorkflow:
+    """ADK harness child: Fleet ∥ Customer assessment ONLY (no dispatch).
+
+    Mirrors the front half of MeltdownDemoWorkflow._run_adk_assignment, but runs the
+    assessment-only ParallelAgent and returns just the two assessment strings. Runs on
+    the parent's task queue (where GoogleAdkPlugin is registered). Returns plain strings
+    — never ADK objects — so the result crosses the child boundary cleanly.
+    """
+
+    @workflow.run
+    async def run(self, inp: ReasonAboutAssignmentInput) -> AdkAssessmentOutput:
+        workflow.logger.info(f"ADK assessment child for {inp.order_id}")
+        agent = create_assessment_team_agent()
+
+        session_service = InMemorySessionService()
+        runner = Runner(
+            agent=agent,
+            app_name="meltdown_demo",
+            session_service=session_service,
+        )
+        session = await session_service.create_session(
+            app_name="meltdown_demo",
+            user_id="workflow",
+        )
+
+        agent_status_lines = []
+        if inp.disconnected_agents:
+            for name in inp.disconnected_agents:
+                agent_status_lines.append(f"⚠️ {name} is OFFLINE — compensate with available data.")
+        agent_context = "\n".join(agent_status_lines) + "\n\n" if agent_status_lines else ""
+
+        # Keep the "Order ID:" / "Venue:" lines — _build_summary parses them for UI labels.
+        prompt = (
+            f"{agent_context}"
+            f"NEW ORDER — assess it:\n"
+            f"Order ID: {inp.order_id}\n"
+            f"Venue: {inp.hotel}\n"
+            f"Event: {inp.event}\n"
+            f"Priority: {inp.priority}\n"
+            f"Servings: {inp.servings}\n"
+            f"Deadline: {inp.deadline_minutes} minutes\n"
+            f"Coordinates: ({inp.delivery_lat}, {inp.delivery_lng})\n\n"
+            f"Fleet Agent: assess capacity and recommend the best driver. "
+            f"Customer Agent: assess priority and urgency."
+        )
+
+        async for _ in runner.run_async(
+            user_id="workflow",
+            session_id=session.id,
+            new_message=Content(parts=[Part(text=prompt)]),
+        ):
+            pass
+
+        updated_session = await session_service.get_session(
+            app_name="meltdown_demo",
+            user_id="workflow",
+            session_id=session.id,
+        )
+        state = updated_session.state or {}
+        out = AdkAssessmentOutput(
+            fleet_assessment=(state.get("fleet_assessment") or "").strip(),
+            customer_assessment=(state.get("customer_assessment") or "").strip(),
+        )
+        workflow.logger.info(f"ADK assessment child done for {inp.order_id}")
+        return out
+
+
+@workflow.defn
+class LgDispatchWorkflow:
+    """LangGraph harness child: the Dispatch agent, with its OWN in-loop HITL.
+
+    Seeded with the ADK-produced assessments, it runs the dispatch-only graph and may
+    call ask_human mid-loop. The human signals THIS workflow directly (`answer_dispatch`);
+    the durable wait is a Temporal signal + wait_condition + Command(resume) — interrupt()
+    only suspends the graph, Temporal history is the durability. Returns the decision.
+    """
+
+    def __init__(self) -> None:
+        self._answer: str | None = None
+        self._pending_question: dict | None = None
+        self._stop: bool = False
+
+    @workflow.signal
+    async def answer_dispatch(self, decision: str) -> None:
+        """Human answers this dispatch agent's ask_human. The child IS the order, so no
+        order_id is needed — resolves the durable interrupt the graph is parked on."""
+        self._answer = decision
+
+    @workflow.signal
+    async def stop(self) -> None:
+        """Demo shutdown escape — lets a parked run return a HOLD-default cleanly."""
+        self._stop = True
+
+    @workflow.query
+    def pending_question(self) -> dict | None:
+        """The ask_human payload the agent is currently parked on (None if not parked).
+        The server polls this to render the approval card and find this child."""
+        return self._pending_question
+
+    @workflow.run
+    async def run(self, inp: LgDispatchInput) -> LgDispatchOutput:
+        workflow.logger.info(f"LangGraph dispatch child for {inp.order_id}")
+        state = {
+            "order_id": inp.order_id,
+            "venue": inp.venue,
+            "order_value": inp.order_value,
+            "servings": inp.servings,
+            "deadline_minutes": inp.deadline_minutes,
+            "proposed_driver_id": inp.proposed_driver_id,
+            "drivers_available": inp.drivers_available,
+            "drivers_total": inp.drivers_total,
+            "pending_orders": inp.pending_orders,
+            # Seed the ADK assessments — dispatch_reason reads these directly.
+            "fleet_assessment": inp.fleet_assessment,
+            "customer_assessment": inp.customer_assessment,
+        }
+        compiled = graph(DISPATCH_ONLY_GRAPH_NAME).compile(checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": workflow.info().workflow_id}}
+
+        result = await compiled.ainvoke(state, config=config)
+        rejected = False
+        # Drive any in-loop ask_human interrupts the dispatch agent raises.
+        while result.get("__interrupt__"):
+            self._pending_question = result["__interrupt__"][0].value
+            await workflow.wait_condition(lambda: self._answer is not None or self._stop)
+            if self._stop:
+                self._pending_question = None
+                workflow.logger.info(f"Dispatch child stopping while parked — HOLD {inp.order_id}")
+                return LgDispatchOutput(
+                    decision="HOLD",
+                    reasoning="Held — demo shut down before approval",
+                    fleet_assessment=inp.fleet_assessment,
+                    customer_assessment=inp.customer_assessment,
+                    asked_human=True,
+                )
+            answer = self._answer
+            self._answer = None
+            self._pending_question = None
+            if answer == "reject":
+                rejected = True
+            result = await compiled.ainvoke(Command(resume=answer), config=config)
+
+        # Robust decision: trust the human's answer (rejected flag) over the graph's
+        # free-text dispatch_decision (Gemini may return it empty).
+        raw = (result.get("dispatch_decision") or "").strip()
+        asked = bool(result.get("asked_human"))
+        if not raw:
+            raw = (
+                "Held — human rejected"
+                if rejected
+                else ("Approved by human — dispatching" if asked else "Within policy — dispatching")
+            )
+        hold = rejected or "HOLD" in raw.upper()
+        workflow.logger.info(
+            f"LangGraph dispatch child decided {inp.order_id}: {'HOLD' if hold else 'DISPATCH'}"
+        )
+        return LgDispatchOutput(
+            decision="HOLD" if hold else "DISPATCH",
+            reasoning=raw,
+            fleet_assessment=(result.get("fleet_assessment") or inp.fleet_assessment or "").strip(),
+            customer_assessment=(
+                result.get("customer_assessment") or inp.customer_assessment or ""
+            ).strip(),
+            asked_human=asked,
+        )
+
+
 # --- Main demo orchestrator ---
 
 
@@ -868,7 +1058,15 @@ class MeltdownDemoWorkflow:
         self._pending_dispatch: dict[str, dict] = {}  # order_id -> question (awaiting human)
         # Agent→human in-loop HITL: human answers to an agent's ask_human, keyed by order.
         self._dispatch_answers: dict[str, str] = {}
-        self._dispatch_mode: str = "adk"  # which framework dispatches orders: "adk" | "langgraph"
+        # which framework dispatches orders: "adk" | "langgraph" | "crossharness"
+        self._dispatch_mode: str = "adk"
+        # Cross-harness mode: live LgDispatchWorkflow child handles, keyed by order_id, so
+        # shutdown can signal them to stop. The dispatch CHILD owns its own answer_dispatch
+        # signal + pending_question query (the human signals the agent's own workflow).
+        self._dispatch_children: dict[str, workflow.ChildWorkflowHandle] = {}
+        # Per-order re-reason counter so cross-harness re-reason spawns fresh child ids
+        # (Temporal rejects a duplicate id for an already-closed workflow).
+        self._rereason_count: dict[str, int] = {}
 
     # --- Signals ---
 
@@ -1038,12 +1236,20 @@ class MeltdownDemoWorkflow:
             )
             self._route_handles[driver_id] = handle
 
-        # Start order generation as a child workflow
+        # Start order generation as a child workflow. Cross-harness mode generates fewer,
+        # slower orders (each order = 2 child workflows) so the Temporal UI stays legible;
+        # the ADK/LangGraph tabs keep the full fleet flow. Seeded from the start-time mode.
+        if self._dispatch_mode == "crossharness":
+            gen_max = min(inp.max_orders, CROSSHARNESS_MAX_ORDERS)
+            gen_interval = CROSSHARNESS_ORDER_INTERVAL_SECONDS
+        else:
+            gen_max = inp.max_orders
+            gen_interval = ORDER_INTERVAL_SECONDS
         self._order_gen_handle = await workflow.start_child_workflow(
             OrderGenerationWorkflow.run,
             OrderGenerationInput(
-                max_orders=inp.max_orders,
-                order_interval_seconds=ORDER_INTERVAL_SECONDS,
+                max_orders=gen_max,
+                order_interval_seconds=gen_interval,
             ),
             id="order-generation",
             static_summary="Order generation + agent assignment",
@@ -1075,6 +1281,14 @@ class MeltdownDemoWorkflow:
         # commit. Only stragglers past the window are cancelled. (Exceptions are surfaced by
         # the per-task done callback in _assign_order, not swallowed.)
         if self._langgraph_tasks:
+            # Cross-harness mode parks its durable wait INSIDE the dispatch child, so
+            # _routes_done can't unblock it — signal each parked child to stop so it returns
+            # a HOLD-default and the parent task's `await lg_handle` unblocks cleanly.
+            for handle in list(self._dispatch_children.values()):
+                try:
+                    await handle.signal(LgDispatchWorkflow.stop)
+                except Exception:
+                    pass
             try:
                 await workflow.wait_condition(
                     lambda: all(t.done() for t in self._langgraph_tasks),
@@ -1293,6 +1507,19 @@ class MeltdownDemoWorkflow:
         if self._dispatch_mode == "langgraph":
             task = asyncio.create_task(
                 self._run_langgraph_assignment(order, self._least_loaded_driver(), onum)
+            )
+            task.add_done_callback(self._on_langgraph_task_done)
+            self._langgraph_tasks.append(task)
+            return
+
+        # Cross-harness mode: Temporal orchestrates across harnesses — an ADK child
+        # produces the assessments, a LangGraph child makes the dispatch decision. Run
+        # concurrently (reusing _langgraph_tasks so the existing shutdown drain covers it)
+        # so the order loop and fleet keep moving while the agents (and maybe a human)
+        # deliberate in their child workflows.
+        if self._dispatch_mode == "crossharness":
+            task = asyncio.create_task(
+                self._run_crossharness_assignment(order, self._least_loaded_driver(), onum)
             )
             task.add_done_callback(self._on_langgraph_task_done)
             self._langgraph_tasks.append(task)
@@ -1605,6 +1832,158 @@ class MeltdownDemoWorkflow:
         )
         workflow.logger.info(f"[#{onum}] {order.order_id} rejected at dispatch gate")
 
+    # --- Cross-harness assignment (3rd tab): ADK assess child ∥ LangGraph dispatch child ---
+
+    async def _run_crossharness_assignment(
+        self, order: OrderAssignmentResult, driver_id: str, onum: str
+    ) -> None:
+        """Temporal orchestrates ACROSS harnesses: an ADK child produces the Fleet+Customer
+        assessments, then a LangGraph child (which owns its own ask_human HITL) makes the
+        dispatch decision. The children DECIDE; this parent APPLIES the result via the same
+        _commit_assignment / _reject_order used by the other tabs (the parent owns driver
+        state and signals the DriverRouteWorkflow). Sequential: the dispatch child needs the
+        assessments as input. Child ids `assess-`/`dispatch-<order_id>` give each harness its
+        own visible Temporal history — the cross-harness boundary.
+        """
+        await self._dispatch_via_children(order, driver_id, onum, suffix="")
+
+    async def _dispatch_via_children(
+        self,
+        order: OrderAssignmentResult,
+        driver_id: str,
+        onum: str,
+        suffix: str,
+        apply: bool = True,
+    ) -> None:
+        """Shared core for cross-harness dispatch — used for the initial assignment and for
+        human→agent re-reason (which passes a revision `suffix` to get fresh child ids).
+
+        apply=True commits/rejects via the parent (initial assignment). apply=False only
+        re-reasons + publishes (re-reason: the held driver reroutes via the caller's
+        update_order/resolve_update signals, so committing here would double-assign)."""
+        available = sum(
+            1
+            for d in DRIVER_IDS
+            if d not in self._disconnected_drivers
+            and len(self._driver_orders.get(d, [])) < DRIVER_CAPACITY
+        )
+
+        # 1. ADK harness child — Fleet ∥ Customer assessment only.
+        adk_handle = await workflow.start_child_workflow(
+            AdkAssessmentWorkflow.run,
+            ReasonAboutAssignmentInput(
+                order_id=order.order_id,
+                hotel=order.hotel,
+                delivery_lat=order.delivery_lat,
+                delivery_lng=order.delivery_lng,
+                priority=order.priority,
+                servings=order.servings,
+                deadline_minutes=order.deadline_minutes,
+                event=order.event,
+                driver_snapshots=self._build_driver_snapshots(),
+                disconnected_agents=list(self._disconnected_agents),
+            ),
+            id=f"assess-{order.order_id}{suffix}",
+            static_summary=f"[#{onum}] ADK harness — Fleet ∥ Customer assessment",
+        )
+        assessment = await adk_handle
+
+        # 2. LangGraph harness child — dispatch decision + its own ask_human HITL.
+        child_id = f"dispatch-{order.order_id}{suffix}"
+        lg_handle = await workflow.start_child_workflow(
+            LgDispatchWorkflow.run,
+            LgDispatchInput(
+                order_id=order.order_id,
+                venue=order.hotel,
+                order_value=order.order_value,
+                servings=order.servings,
+                deadline_minutes=order.deadline_minutes,
+                proposed_driver_id=driver_id,
+                drivers_available=available,
+                drivers_total=len(DRIVER_IDS),
+                pending_orders=len(self._pending_new_orders),
+                fleet_assessment=assessment.fleet_assessment,
+                customer_assessment=assessment.customer_assessment,
+            ),
+            id=child_id,
+            static_summary=f"[#{onum}] LangGraph harness — dispatch decision",
+        )
+        self._dispatch_children[order.order_id] = lg_handle
+        # Roll-up for the server: child_id + order context. The actual ask_human question
+        # lives on the child (server queries LgDispatchWorkflow.pending_question per entry).
+        self._pending_dispatch[order.order_id] = {
+            "child_id": child_id,
+            "order_id": order.order_id,
+            "venue": order.hotel,
+            "order_value": order.order_value,
+            "via_child": True,
+        }
+        if order.order_id in self._orders:
+            self._orders[order.order_id]["status"] = "awaiting_dispatch_approval"
+        try:
+            result = await lg_handle
+        finally:
+            self._dispatch_children.pop(order.order_id, None)
+            self._pending_dispatch.pop(order.order_id, None)
+
+        # 3. Surface reasoning in the agent panels, then APPLY (parent owns driver state).
+        await self._publish_langgraph_reasoning(
+            {
+                "fleet_assessment": result.fleet_assessment,
+                "customer_assessment": result.customer_assessment,
+            },
+            result.reasoning,
+        )
+        if not apply:
+            return
+        if result.decision == "HOLD":
+            workflow.logger.info(f"[#{onum}] cross-harness held {order.order_id} (human)")
+            await self._reject_order(order, onum)
+        else:
+            await self._commit_assignment(order, driver_id, False, onum)
+
+    async def _rereason_crossharness(self, order_id: str, note: str) -> None:
+        """Human→agent HITL across harnesses: the human approved a new location, so re-run
+        the CROSS-HARNESS flow — ADK Fleet+Customer reassess the new spot, then the LangGraph
+        Dispatch agent re-decides — and publish that reassessment to the agent panels. Like
+        _rereason_order (the ADK-tab version), this is reasoning-only: the held driver reroutes
+        via the caller's update_order/resolve_update signals, so we pass apply=False. Reads the
+        order's CURRENT coords, so the caller must update them first. Fresh child ids per
+        revision avoid colliding with the original assess-/dispatch- children.
+        """
+        o = self._orders.get(order_id)
+        if o is None:
+            return
+        await workflow.execute_local_activity(
+            publish_agent_event,
+            PublishAgentEventInput(
+                agent_name="customer_agent",
+                event_type="customer_request",
+                content=f"Human revised {order_id}: {note} — agents re-reasoning across harnesses.",
+                summary=f"Human revised {order_id} — re-reasoning",
+            ),
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        self._rereason_count[order_id] = self._rereason_count.get(order_id, 0) + 1
+        suffix = f"-rev{self._rereason_count[order_id]}"
+        onum = order_id.split("-", 1)[-1]
+        revised = OrderAssignmentResult(
+            order_id=order_id,
+            hotel=o["hotel"],
+            delivery_lat=o["delivery_lat"],
+            delivery_lng=o["delivery_lng"],
+            driver_id="",
+            reasoning_summary="",
+            priority=o.get("priority", "standard"),
+            servings=o.get("servings", 0),
+            deadline_minutes=o.get("deadline_minutes", 0),
+            event=o.get("event", "revised order"),
+            order_value=o.get("order_value", 0),
+        )
+        await self._dispatch_via_children(
+            revised, self._least_loaded_driver(), onum, suffix=suffix, apply=False
+        )
+
     # --- Human→agent HITL (ADK): re-reason an order when a human revises its location ---
 
     async def _rereason_order(self, order_id: str, note: str) -> None:
@@ -1773,7 +2152,10 @@ class MeltdownDemoWorkflow:
                     o["delivery_lng"] = change.new_lng
                     if change.new_hotel is not None:
                         o["hotel"] = change.new_hotel
-                await self._rereason_order(change.order_id, change.new_details)
+                if self._dispatch_mode == "crossharness":
+                    await self._rereason_crossharness(change.order_id, change.new_details)
+                else:
+                    await self._rereason_order(change.order_id, change.new_details)
 
             # Signal child with the approved decision.
             # Send update_pending again ONLY if the driver changed during the

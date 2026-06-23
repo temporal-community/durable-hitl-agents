@@ -44,9 +44,20 @@ from agent_fleet.activities import (
     tool_get_route_info,
 )
 from agent_fleet.config import TEMPORAL_ADDRESS
-from agent_fleet.langgraph_agents import GRAPH_NAME, build_dispatch_team_graph
+from agent_fleet.langgraph_agents import (
+    DISPATCH_ONLY_GRAPH_NAME,
+    GRAPH_NAME,
+    build_dispatch_only_graph,
+    build_dispatch_team_graph,
+)
 from agent_fleet.queues import AGENTS_QUEUE, DELIVERY_QUEUE, WORKFLOWS_QUEUE
-from agent_fleet.workflows import DriverRouteWorkflow, MeltdownDemoWorkflow, OrderGenerationWorkflow
+from agent_fleet.workflows import (
+    AdkAssessmentWorkflow,
+    DriverRouteWorkflow,
+    LgDispatchWorkflow,
+    MeltdownDemoWorkflow,
+    OrderGenerationWorkflow,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -71,6 +82,10 @@ def create_workflow_worker(client: Client) -> Worker:
             MeltdownDemoWorkflow,
             DriverRouteWorkflow,
             OrderGenerationWorkflow,
+            # Cross-harness tab: per-order agent child workflows (ADK assessment ∥
+            # LangGraph dispatch), joined by MeltdownDemoWorkflow.
+            AdkAssessmentWorkflow,
+            LgDispatchWorkflow,
         ],
         activities=[publish_agent_event, publish_agent_events_batch],
         # LangGraphPlugin runs the looping multi-agent team (Fleet ∥ Customer reason→act→eval
@@ -80,7 +95,13 @@ def create_workflow_worker(client: Client) -> Worker:
         # resume. See agent_fleet/langgraph_agents.py.
         plugins=[
             GoogleAdkPlugin(),
-            LangGraphPlugin(graphs={GRAPH_NAME: build_dispatch_team_graph()}),
+            LangGraphPlugin(
+                graphs={
+                    GRAPH_NAME: build_dispatch_team_graph(),
+                    # Dispatch-only graph for the cross-harness tab's LangGraph child.
+                    DISPATCH_ONLY_GRAPH_NAME: build_dispatch_only_graph(),
+                }
+            ),
         ],
     )
 

@@ -1132,6 +1132,7 @@
 <div class="tab-bar">
   <button class="tab active" data-tab="human" onclick="switchTab('human')">🧑 Human → Agent <span class="tab-scenario">Human-initiated</span></button>
   <button class="tab" data-tab="agent" onclick="switchTab('agent')">🤖 Agent → Human <span class="tab-scenario">Agent-initiated</span></button>
+  <button class="tab" data-tab="cross" onclick="switchTab('cross')">🔀 Cross-Harness <span class="tab-scenario">ADK + LangGraph</span></button>
   <div class="status-area">
     <div id="worker-status" class="worker-indicator online">
       <div class="worker-dot"></div>
@@ -1146,24 +1147,24 @@
       <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
       <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
       <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Customer changes an order mid-delivery — the driver holds, you approve, then the ADK agents <b>re-reason</b> the new location and the driver reroutes.</div>
-      <select id="change-order" class="agent-select">
+      <select id="change-order" data-role="change-order" class="agent-select">
         <option value="">— no active orders —</option>
       </select>
-      <select id="change-type" class="agent-select" onchange="onChangeType()">
+      <select id="change-type" data-role="change-type" class="agent-select" onchange="onChangeType()">
         <option value="address_change">Address Change</option>
         <option value="cancel">Cancel Order</option>
       </select>
-      <select id="reroute-select" class="agent-select">
+      <select id="reroute-select" data-role="reroute-select" class="agent-select">
         <option value="">— new location —</option>
       </select>
       <div class="btn-row">
         <button class="btn btn-change" onclick="submitCustomerChange()">Submit Change</button>
         <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
       </div>
-      <span id="change-status" style="font-size:14px;color:#fbbf24;display:none;">Awaiting approval...</span>
+      <span id="change-status" data-role="change-status" style="font-size:14px;color:#fbbf24;display:none;">Awaiting approval...</span>
       <div class="btn-row">
-        <button class="btn btn-approve" id="btn-approve" onclick="approveChange(true)" style="display:none;">Approve</button>
-        <button class="btn btn-reject" id="btn-reject" onclick="approveChange(false)" style="display:none;">Reject</button>
+        <button class="btn btn-approve" id="btn-approve" data-role="btn-approve" onclick="approveChange(true)" style="display:none;">Approve</button>
+        <button class="btn btn-reject" id="btn-reject" data-role="btn-reject" onclick="approveChange(false)" style="display:none;">Reject</button>
       </div>
       <button class="btn" style="margin-top:8px;font-size:12px;background:#1a2342;color:#8ea2ff;border:1px solid #465a78;" onclick="openAdk()">🧩 View the ADK agents</button>
     </div>
@@ -1176,6 +1177,36 @@
         <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
       </div>
       <button class="btn" style="margin-top:8px;font-size:12px;background:#11203a;color:#7dd3fc;border:1px solid #465a78;" onclick="openGraph()">🔗 View the LangGraph</button>
+    </div>
+    <div class="tab-panel" id="panel-cross">
+      <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
+      <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
+      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">One system, <b>two harnesses</b>: Fleet + Customer assess on <b>Google ADK</b>, the Dispatch agent runs on <b>LangGraph</b> — each its own Temporal <b>child workflow</b>, joined by Temporal (no agent framework can orchestrate across harnesses). Both HITL directions work: drop a high-value order → the LangGraph dispatch agent calls <code>ask_human</code>; or change an order → the ADK team re-reasons and the driver reroutes.</div>
+      <div style="font-size:11px;color:#7dd3fc;margin-bottom:6px;">🤖 Agent → Human</div>
+      <div class="btn-row">
+        <button class="btn btn-change" onclick="injectHighValueOrder()">Drop high-value order</button>
+      </div>
+      <div style="font-size:11px;color:#8ea2ff;margin:8px 0 4px;">🧑 Human → Agent</div>
+      <select data-role="change-order" class="agent-select" aria-label="Order to change">
+        <option value="">— no active orders —</option>
+      </select>
+      <select data-role="change-type" class="agent-select" onchange="onChangeType()" aria-label="Change type">
+        <option value="address_change">Address Change</option>
+        <option value="cancel">Cancel Order</option>
+      </select>
+      <select data-role="reroute-select" class="agent-select" aria-label="New location">
+        <option value="">— new location —</option>
+      </select>
+      <div class="btn-row">
+        <button class="btn btn-change" onclick="submitCustomerChange()">Submit Change</button>
+        <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
+      </div>
+      <span data-role="change-status" style="font-size:14px;color:#fbbf24;display:none;">Awaiting approval...</span>
+      <div class="btn-row">
+        <button class="btn btn-approve" data-role="btn-approve" onclick="approveChange(true)" style="display:none;">Approve</button>
+        <button class="btn btn-reject" data-role="btn-reject" onclick="approveChange(false)" style="display:none;">Reject</button>
+      </div>
+      <button class="btn" style="margin-top:8px;font-size:12px;background:#15182e;color:#c4b5fd;border:1px solid #465a78;" onclick="openCross()">🔀 View the cross-harness graph</button>
     </div>
   </div>
 
@@ -1262,67 +1293,68 @@
     <div class="graph-modal-header"><span>🧩 Google ADK · Dispatch Team</span><button onclick="closeAdk()" title="Close">✕</button></div>
     <div class="graph-modal-sub">Human → agent. Each agent is a reason → act → observe LOOP (the ADK Runner); every LLM call and tool call runs as a Temporal activity. One customer change feeds <b>both</b> loops: the driver holds, you approve, the agents re-reason the new location, and the driver reroutes.</div>
     <div class="graph-flow">
-      <svg viewBox="0 0 580 348" width="100%" style="max-width:560px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK: the agent reasoning loop assigns a driver to a delivery loop; one customer change feeds both loops — the driver holds, a human approves, the agents re-reason the new location, and the driver reroutes">
+      <svg viewBox="0 0 560 358" width="100%" style="max-width:560px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK dispatch team: a new order fans to the Fleet and Customer agents (each a reason-act loop), they converge on the Dispatch agent which assigns a driver to the delivery loop ending in delivered; a customer-change HITL box off to the left feeds both loops — the agents re-reason and the driver reroutes">
         <defs>
           <marker id="adkah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
           <marker id="adkaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
         </defs>
+        <!-- spine (centered on x=280): new order → agents → dispatch → driver loop → delivered -->
         <g fill="none" stroke="#3fd8e0" stroke-width="1.4" marker-end="url(#adkah)">
-          <path d="M280,33 L270,55"/>
-          <path d="M302,33 L450,55"/>
-          <path d="M277,112 L332,138"/>
-          <path d="M455,112 L402,138"/>
-          <path d="M360,191 L342,221"/>
-          <path d="M335,279 L347,310"/>
+          <path d="M268,34 L207,60"/>
+          <path d="M292,34 L353,60"/>
+          <path d="M185,116 L238,144"/>
+          <path d="M375,116 L322,144"/>
+          <path d="M280,196 L280,230"/>
+          <path d="M280,288 L280,318"/>
         </g>
-        <!-- self-loops: agent Runner loops + the driver delivery loop -->
+        <!-- self-loops: agent Runner loops + the driver delivery loop, pointing outward -->
         <g fill="none" stroke="#3fd8e0" stroke-width="1.3" marker-end="url(#adkah)" opacity="0.85">
-          <path d="M200,104 C174,98 174,72 200,68"/>
-          <path d="M535,104 C561,98 561,72 535,68"/>
-          <path d="M275,183 C249,177 249,153 275,149"/>
-          <path d="M235,269 C209,263 209,237 235,233"/>
+          <path d="M110,108 C84,102 84,76 110,72"/>
+          <path d="M450,108 C476,102 476,76 450,72"/>
+          <path d="M365,188 C391,182 391,158 365,154"/>
+          <path d="M380,278 C406,272 406,248 380,244"/>
         </g>
         <!-- ONE HITL interjection feeding BOTH loops (amber, dashed) -->
         <g fill="none" stroke="#fbbf24" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#adkaha)">
-          <path d="M184,172 L273,162"/>
-          <path d="M184,200 L233,242"/>
+          <path d="M168,176 L191,180"/>
+          <path d="M168,202 L177,244"/>
         </g>
         <!-- nodes -->
-        <rect x="240" y="9" width="100" height="24" rx="12" fill="#1e293b" stroke="#465a78"/>
-        <text x="290" y="25" text-anchor="middle" fill="#cbd5e1" font-size="11.5" font-weight="600">new order</text>
+        <rect x="230" y="10" width="100" height="24" rx="12" fill="#1e293b" stroke="#465a78"/>
+        <text x="280" y="26" text-anchor="middle" fill="#cbd5e1" font-size="11.5" font-weight="600">new order</text>
 
-        <rect x="200" y="56" width="155" height="54" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
-        <text x="277" y="77" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🚚 Fleet agent</text>
-        <text x="277" y="93" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ act · fleet / route</text>
-        <text x="277" y="105" text-anchor="middle" fill="#7c93ab" font-size="9">Runner loop · each call an activity</text>
+        <rect x="110" y="62" width="150" height="54" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="185" y="83" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🚚 Fleet agent</text>
+        <text x="185" y="99" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ act · fleet / route</text>
+        <text x="185" y="111" text-anchor="middle" fill="#7c93ab" font-size="9">Runner loop · each call an activity</text>
 
-        <rect x="375" y="56" width="160" height="54" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
-        <text x="455" y="77" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🧑 Customer agent</text>
-        <text x="455" y="93" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ act · priorities</text>
-        <text x="455" y="105" text-anchor="middle" fill="#7c93ab" font-size="9">Runner loop · each call an activity</text>
+        <rect x="300" y="62" width="150" height="54" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="375" y="83" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🧑 Customer agent</text>
+        <text x="375" y="99" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ act · priorities</text>
+        <text x="375" y="111" text-anchor="middle" fill="#7c93ab" font-size="9">Runner loop · each call an activity</text>
 
-        <rect x="275" y="138" width="170" height="50" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
-        <text x="360" y="159" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🧭 Dispatch agent</text>
-        <text x="360" y="175" text-anchor="middle" fill="#9fb4c7" font-size="9.5">weighs both → assigns a driver</text>
+        <rect x="195" y="146" width="170" height="50" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="280" y="167" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🧭 Dispatch agent</text>
+        <text x="280" y="183" text-anchor="middle" fill="#9fb4c7" font-size="9.5">weighs both → assigns a driver</text>
 
-        <text x="300" y="208" text-anchor="middle" fill="#4b5d77" font-size="9.5">— reasoning loop assigns → delivery loop runs —</text>
+        <text x="280" y="216" text-anchor="middle" fill="#4b5d77" font-size="9.5">— reasoning loop assigns → delivery loop runs —</text>
 
-        <rect x="235" y="222" width="200" height="56" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
-        <text x="335" y="243" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🚚 Driver delivery loop</text>
-        <text x="335" y="259" text-anchor="middle" fill="#9fb4c7" font-size="9.5">pick up → drive → deliver → repeat</text>
-        <text x="335" y="271" text-anchor="middle" fill="#7c93ab" font-size="9">DriverRouteWorkflow</text>
+        <rect x="180" y="232" width="200" height="56" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="280" y="253" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🚚 Driver delivery loop</text>
+        <text x="280" y="269" text-anchor="middle" fill="#9fb4c7" font-size="9.5">pick up → drive → deliver → repeat</text>
+        <text x="280" y="281" text-anchor="middle" fill="#7c93ab" font-size="9">DriverRouteWorkflow</text>
 
-        <rect x="300" y="311" width="90" height="24" rx="12" fill="#1e293b" stroke="#465a78"/>
-        <text x="345" y="327" text-anchor="middle" fill="#cbd5e1" font-size="11.5" font-weight="600">delivered</text>
+        <rect x="235" y="320" width="90" height="24" rx="12" fill="#1e293b" stroke="#465a78"/>
+        <text x="280" y="336" text-anchor="middle" fill="#cbd5e1" font-size="11.5" font-weight="600">delivered</text>
 
-        <!-- ONE HITL box → both loops: customer change, you approve -->
-        <rect x="10" y="150" width="174" height="70" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
-        <text x="97" y="171" text-anchor="middle" fill="#fde68a" font-size="11.5" font-weight="600">👤 Customer change</text>
-        <text x="97" y="187" text-anchor="middle" fill="#d9c389" font-size="9.5">new SF location → you approve</text>
-        <text x="97" y="201" text-anchor="middle" fill="#d9c389" font-size="9">customer_change + wait_condition</text>
-        <text x="97" y="213" text-anchor="middle" fill="#7c93ab" font-size="8.5">driver holds while you decide</text>
-        <text x="232" y="150" text-anchor="middle" fill="#fbbf24" font-size="9">① agents RE-REASON</text>
-        <text x="210" y="236" text-anchor="middle" fill="#fbbf24" font-size="9">② driver reroutes</text>
+        <!-- ONE HITL box → both loops: customer change, you approve (hangs off the spine, left) -->
+        <rect x="8" y="156" width="160" height="66" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
+        <text x="88" y="177" text-anchor="middle" fill="#fde68a" font-size="11.5" font-weight="600">👤 Customer change</text>
+        <text x="88" y="193" text-anchor="middle" fill="#d9c389" font-size="9.5">new SF location → you approve</text>
+        <text x="88" y="206" text-anchor="middle" fill="#d9c389" font-size="9">customer_change + wait_condition</text>
+        <text x="88" y="217" text-anchor="middle" fill="#7c93ab" font-size="8.5">driver holds while you decide</text>
+        <text x="200" y="172" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="700">①</text>
+        <text x="188" y="242" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="700">②</text>
       </svg>
     </div>
     <div class="graph-legend">
@@ -1401,6 +1433,97 @@
   </div>
 </div>
 
+<div id="cross-modal" class="graph-modal" style="display:none;">
+  <div class="graph-modal-backdrop" onclick="closeCross()"></div>
+  <div class="graph-modal-card">
+    <div class="graph-modal-header"><span>🔀 Cross-Harness · ADK + LangGraph</span><button onclick="closeCross()" title="Close">✕</button></div>
+    <div class="graph-modal-sub">One system, <b>two harnesses</b>. Temporal's parent workflow spawns a <b>Google ADK</b> child (Fleet ∥ Customer assess) and a <b>LangGraph</b> child (Dispatch + ask_human), then joins them — no agent framework can orchestrate <i>across</i> harnesses, only Temporal can. The dispatch agent calls the human as an in-loop tool; a customer change re-runs both children.</div>
+    <div class="graph-flow">
+      <svg viewBox="0 0 580 372" width="100%" style="max-width:560px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="Cross-harness flow: a Temporal parent workflow spawns a Google ADK child (Fleet parallel Customer assessment) and a LangGraph child (Dispatch agent with an in-loop ask_human human gate), joins their results, commits to the driver delivery loop, and ends in delivered">
+        <defs>
+          <marker id="cxah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
+          <marker id="cxaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
+          <marker id="cxg" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#8595ab"/></marker>
+        </defs>
+        <!-- straight spine (x=290): new order → ADK child → LangGraph child → driver loop → delivered -->
+        <g fill="none" stroke="#3fd8e0" stroke-width="1.4" marker-end="url(#cxah)">
+          <path d="M290,34 L290,52"/>
+          <path d="M290,128 L290,150"/>
+          <path d="M290,216 L290,248"/>
+          <path d="M290,308 L290,338"/>
+        </g>
+        <!-- driver delivery loop self-loop (points right) -->
+        <g fill="none" stroke="#3fd8e0" stroke-width="1.3" marker-end="url(#cxah)" opacity="0.85">
+          <path d="M390,298 C416,292 416,268 390,264"/>
+        </g>
+        <!-- agent → human ask_human gate (amber, call + resume) -->
+        <g fill="none" stroke="#fbbf24" stroke-width="1.4" stroke-dasharray="5 3">
+          <path d="M410,176 L428,176" marker-end="url(#cxaha)"/>
+          <path d="M428,196 L412,196" marker-end="url(#cxaha)"/>
+        </g>
+        <!-- Temporal parent spawns the two harness children (gray, dashed) -->
+        <g fill="none" stroke="#8595ab" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#cxg)" opacity="0.9">
+          <path d="M134,92 L148,92"/>
+          <path d="M134,184 L168,184"/>
+        </g>
+
+        <!-- new order -->
+        <rect x="240" y="10" width="100" height="24" rx="12" fill="#1e293b" stroke="#465a78"/>
+        <text x="290" y="26" text-anchor="middle" fill="#cbd5e1" font-size="11.5" font-weight="600">new order</text>
+
+        <!-- Temporal parent bracket (off-spine, left) -->
+        <rect x="10" y="58" width="124" height="158" rx="10" fill="rgba(160,180,210,0.05)" stroke="rgba(160,180,210,0.35)" stroke-dasharray="4 3"/>
+        <text x="72" y="118" text-anchor="middle" fill="#aab8cc" font-size="10.5" font-weight="600">⏳ Temporal</text>
+        <text x="72" y="132" text-anchor="middle" fill="#aab8cc" font-size="10.5" font-weight="600">parent</text>
+        <text x="72" y="150" text-anchor="middle" fill="#9fb4c7" font-size="8.5">start_child × 2</text>
+        <text x="72" y="162" text-anchor="middle" fill="#9fb4c7" font-size="8.5">gather · apply</text>
+        <text x="72" y="180" text-anchor="middle" fill="#7c93ab" font-size="8">orchestrates</text>
+        <text x="72" y="191" text-anchor="middle" fill="#7c93ab" font-size="8">across harnesses</text>
+
+        <!-- ADK child workflow (Fleet ∥ Customer) -->
+        <rect x="150" y="54" width="280" height="74" rx="10" fill="rgba(142,162,255,0.07)" stroke="rgba(142,162,255,0.5)"/>
+        <text x="290" y="70" text-anchor="middle" fill="#b9c4ff" font-size="9.5" font-weight="600">🧩 Google ADK · AdkAssessmentWorkflow (child)</text>
+        <rect x="164" y="82" width="120" height="38" rx="8" fill="rgba(0,255,255,0.06)" stroke="rgba(0,255,255,0.4)"/>
+        <text x="224" y="100" text-anchor="middle" fill="#d6f6f8" font-size="10.5" font-weight="600">🚚 Fleet</text>
+        <text x="224" y="113" text-anchor="middle" fill="#9fb4c7" font-size="8.5">reason ⇄ act</text>
+        <text x="290" y="105" text-anchor="middle" fill="#7c93ab" font-size="11">∥</text>
+        <rect x="296" y="82" width="120" height="38" rx="8" fill="rgba(0,255,255,0.06)" stroke="rgba(0,255,255,0.4)"/>
+        <text x="356" y="100" text-anchor="middle" fill="#d6f6f8" font-size="10.5" font-weight="600">🧑 Customer</text>
+        <text x="356" y="113" text-anchor="middle" fill="#9fb4c7" font-size="8.5">reason ⇄ act</text>
+
+        <text x="298" y="144" text-anchor="start" fill="#7c93ab" font-size="9">assessments →</text>
+
+        <!-- LangGraph child workflow (Dispatch + ask_human) -->
+        <rect x="170" y="152" width="240" height="64" rx="10" fill="rgba(125,211,252,0.07)" stroke="rgba(125,211,252,0.5)"/>
+        <text x="290" y="170" text-anchor="middle" fill="#bae6fd" font-size="9.5" font-weight="600">🔗 LangGraph · LgDispatchWorkflow (child)</text>
+        <text x="290" y="189" text-anchor="middle" fill="#d6f6f8" font-size="10.5" font-weight="600">🧭 Dispatch agent · decide / ask_human</text>
+        <text x="290" y="204" text-anchor="middle" fill="#7c93ab" font-size="8.5">owns answer_dispatch signal + pending_question query</text>
+
+        <!-- ask_human gate (off-spine, right) -->
+        <rect x="430" y="158" width="132" height="54" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
+        <text x="496" y="177" text-anchor="middle" fill="#fde68a" font-size="10" font-weight="600">👤 human approves</text>
+        <text x="496" y="191" text-anchor="middle" fill="#d9c389" font-size="8.5">ask_human (in-loop)</text>
+        <text x="496" y="203" text-anchor="middle" fill="#7c93ab" font-size="8">interrupt → signal → resume</text>
+
+        <text x="298" y="236" text-anchor="start" fill="#7c93ab" font-size="9">DISPATCH → commit</text>
+
+        <!-- driver delivery loop -->
+        <rect x="190" y="250" width="200" height="58" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
+        <text x="290" y="271" text-anchor="middle" fill="#d6f6f8" font-size="12" font-weight="600">🚚 Driver delivery loop</text>
+        <text x="290" y="287" text-anchor="middle" fill="#9fb4c7" font-size="9.5">pick up → drive → deliver → repeat</text>
+        <text x="290" y="299" text-anchor="middle" fill="#7c93ab" font-size="9">DriverRouteWorkflow</text>
+
+        <rect x="245" y="340" width="90" height="24" rx="12" fill="#1e293b" stroke="#465a78"/>
+        <text x="290" y="356" text-anchor="middle" fill="#cbd5e1" font-size="11.5" font-weight="600">delivered</text>
+      </svg>
+    </div>
+    <div class="graph-legend">
+      <span class="lg-activity">each child = its own Temporal workflow (its own history) · ↻ = a loop</span>
+      <span class="lg-hitl">Temporal joins the two harnesses · human = the agent's in-loop ask_human</span>
+    </div>
+  </div>
+</div>
+
 <!-- driver-disconnect banner removed (not part of the two demos) -->
 
 <script>
@@ -1417,16 +1540,29 @@ function switchTab(tabName) {
   document.querySelectorAll('.tab-bar .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tabName}`));
   // The active tab selects which framework dispatches all orders.
-  api('dispatch-mode', 'POST', { mode: tabName === 'agent' ? 'langgraph' : 'adk' });
+  api('dispatch-mode', 'POST', { mode: tabMode(tabName) });
   // Swap the framework logo to match the active pattern's framework (Temporal stays).
   const brand = document.getElementById('framework-brand');
-  if (brand && tabName === 'agent') {
+  if (!brand) return;
+  if (tabName === 'agent') {
     brand.href = 'https://langchain-ai.github.io/langgraph/';
     brand.innerHTML = '<img src="/static/img/langgraph-logo.svg" alt="LangGraph" title="LangGraph" style="height:30px;" />';
-  } else if (brand) {
+  } else if (tabName === 'cross') {
+    // Cross-harness: both frameworks, side by side (Temporal stays in the header).
+    brand.href = '#';
+    brand.innerHTML =
+      '<img src="/static/img/google_adk.png" alt="Google ADK" title="Google ADK — Fleet + Customer" style="height:30px;" />'
+      + '<span style="color:#9fb4c7;margin:0 6px;">+</span>'
+      + '<img src="/static/img/langgraph-logo.svg" alt="LangGraph" title="LangGraph — Dispatch" style="height:26px;" />';
+  } else {
     brand.href = 'https://adk.dev';
     brand.innerHTML = '<img src="/static/img/google_adk.png" alt="Google ADK" title="Google Agent Development Kit" style="height:40px;" /><span class="brand-name">Google ADK</span>';
   }
+}
+
+// Active UI tab → dispatch framework mode sent to the backend.
+function tabMode(tabName) {
+  return tabName === 'agent' ? 'langgraph' : tabName === 'cross' ? 'crossharness' : 'adk';
 }
 
 // --- Map setup (downtown San Francisco) ---
@@ -1660,20 +1796,31 @@ async function loadLocations() {
   // Populate the reroute dropdown with curated downtown-SF destinations
   if (data.reroute_options) {
     _rerouteOptions = data.reroute_options;
-    const sel = document.getElementById('reroute-select');
-    if (sel) {
-      sel.innerHTML = _rerouteOptions
-        .map((o, i) => `<option value="${i}">${o.hotel}</option>`)
-        .join('');
-    }
+    const opts = _rerouteOptions
+      .map((o, i) => `<option value="${i}">${o.hotel}</option>`)
+      .join('');
+    // Populate every tab's copy (Human + Cross-Harness).
+    document.querySelectorAll('[data-role="reroute-select"]').forEach(sel => {
+      sel.innerHTML = opts;
+    });
   }
 }
 loadLocations();
 
+// The customer-change controls are duplicated across the Human and Cross-Harness tabs.
+// Resolve a control by data-role within the currently-active tab panel so each tab's
+// copy works independently (only one panel is visible at a time).
+function ccEl(role) {
+  const p = document.querySelector('.tab-panel.active');
+  return p ? p.querySelector(`[data-role="${role}"]`) : null;
+}
+
 function onChangeType() {
   // The new-location dropdown only applies to an address change.
-  const isAddr = document.getElementById('change-type').value === 'address_change';
-  document.getElementById('reroute-select').style.display = isAddr ? '' : 'none';
+  const typeEl = ccEl('change-type');
+  const rerouteEl = ccEl('reroute-select');
+  if (!typeEl || !rerouteEl) return;
+  rerouteEl.style.display = typeEl.value === 'address_change' ? '' : 'none';
 }
 
 function showRerouteMarker(dest) {
@@ -1795,10 +1942,8 @@ function updateOrders(orders) {
   }).join('');
 }
 
-// --- Update customer change order dropdown ---
+// --- Update customer change order dropdown (every tab's copy: Human + Cross-Harness) ---
 function updateChangeOrderDropdown(orders) {
-  const select = document.getElementById('change-order');
-  const currentVal = select.value;
   // Only include orders that are not yet delivered
   const active = Object.values(orders).filter(o => o.status !== 'delivered' && o.status !== 'cancelled');
   // Build a signature of the desired options so we only rebuild when it changes.
@@ -1807,19 +1952,21 @@ function updateChangeOrderDropdown(orders) {
   const signature = active.length === 0
     ? '__empty__'
     : active.map(o => `${o.order_id}|${o.hotel}|${o.assigned_driver_id || ''}`).join(',');
-  if (select.dataset.optionsSignature === signature) return;
-  select.dataset.optionsSignature = signature;
-  if (active.length === 0) {
-    select.innerHTML = '<option value="">— no active orders —</option>';
-    return;
-  }
-  select.innerHTML = active.map(o =>
-    `<option value="${o.order_id}">${o.order_id} — ${o.hotel} (${o.assigned_driver_id || 'unassigned'})</option>`
-  ).join('');
-  // Preserve selection if still valid
-  if (active.some(o => o.order_id === currentVal)) {
-    select.value = currentVal;
-  }
+  const html = active.length === 0
+    ? '<option value="">— no active orders —</option>'
+    : active.map(o =>
+        `<option value="${o.order_id}">${o.order_id} — ${o.hotel} (${o.assigned_driver_id || 'unassigned'})</option>`
+      ).join('');
+  document.querySelectorAll('[data-role="change-order"]').forEach(select => {
+    if (select.dataset.optionsSignature === signature) return;
+    const currentVal = select.value;
+    select.dataset.optionsSignature = signature;
+    select.innerHTML = html;
+    // Preserve selection if still valid
+    if (active.some(o => o.order_id === currentVal)) {
+      select.value = currentVal;
+    }
+  });
 }
 
 // --- Update agent events ---
@@ -1987,19 +2134,19 @@ async function api(endpoint, method = 'POST', body = null) {
 async function startDemo() {
   // Send the active tab's framework AT start so the first orders can't race a later
   // dispatch-mode signal ("the tab chooses the framework for all orders").
-  const mode = document.querySelector('.tab-bar .tab.active')?.dataset.tab === 'agent' ? 'langgraph' : 'adk';
+  const mode = tabMode(document.querySelector('.tab-bar .tab.active')?.dataset.tab);
   const result = await api('start', 'POST', { mode });
   console.log('Started:', result);
 }
 
 async function submitCustomerChange() {
-  const orderId = document.getElementById('change-order').value;
-  const changeType = document.getElementById('change-type').value;
+  const orderId = ccEl('change-order')?.value;
+  const changeType = ccEl('change-type')?.value;
 
   let body = { order_id: orderId, change_type: changeType };
   if (changeType === 'address_change') {
     // Reroute to the chosen downtown-SF destination from the dropdown
-    const idx = document.getElementById('reroute-select').value;
+    const idx = ccEl('reroute-select')?.value;
     const dest = (_rerouteOptions && _rerouteOptions[idx]) || _rerouteDestination;
     if (!dest) { alert('Pick a new location'); return; }
     body.new_details = `${orderId} rerouted to ${dest.hotel}`;
@@ -2016,28 +2163,38 @@ async function submitCustomerChange() {
   const result = await api('customer-change', 'POST', body);
   console.log('Customer change submitted:', result);
 
-  // Show approval UI
-  document.getElementById('change-status').style.display = 'inline';
-  document.getElementById('change-status').textContent =
-    `${changeType === 'cancel' ? 'Cancel' : 'Address change'} for ${orderId} — awaiting approval...`;
-  document.getElementById('btn-approve').style.display = 'inline-block';
-  document.getElementById('btn-reject').style.display = 'inline-block';
+  // Show approval UI (in the active tab's control set)
+  const statusEl = ccEl('change-status');
+  if (statusEl) {
+    statusEl.style.display = 'inline';
+    statusEl.textContent =
+      `${changeType === 'cancel' ? 'Cancel' : 'Address change'} for ${orderId} — awaiting approval...`;
+  }
+  const approveBtn = ccEl('btn-approve');
+  const rejectBtn = ccEl('btn-reject');
+  if (approveBtn) approveBtn.style.display = 'inline-block';
+  if (rejectBtn) rejectBtn.style.display = 'inline-block';
 }
 
 async function approveChange(approved) {
   const result = await api('approve-change', 'POST', { approved });
   console.log('Change decision:', result);
 
-  // Update status
-  const statusEl = document.getElementById('change-status');
+  // Update status (in the active tab's control set)
+  const statusEl = ccEl('change-status');
   const approveLabel = _pendingChangeDetails ? `Change approved — ${_pendingChangeDetails}` : 'Change approved';
-  statusEl.textContent = approved ? approveLabel : 'Change rejected';
-  statusEl.style.color = approved ? '#22c55e' : '#ef4444';
-  document.getElementById('btn-approve').style.display = 'none';
-  document.getElementById('btn-reject').style.display = 'none';
+  if (statusEl) {
+    statusEl.textContent = approved ? approveLabel : 'Change rejected';
+    statusEl.style.color = approved ? '#22c55e' : '#ef4444';
+  }
+  const approveBtn = ccEl('btn-approve');
+  const rejectBtn = ccEl('btn-reject');
+  if (approveBtn) approveBtn.style.display = 'none';
+  if (rejectBtn) rejectBtn.style.display = 'none';
 
   // Clear after 3s
   setTimeout(() => {
+    if (!statusEl) return;
     statusEl.style.display = 'none';
     statusEl.style.color = '#fbbf24';
   }, 3000);
@@ -2045,15 +2202,21 @@ async function approveChange(approved) {
 
 // --- Pattern B: agent called ask_human mid-loop; poll the question it parked on ---
 let _gateCurrentOrder = null;
+let _gateCurrentChildId = null;
 async function pollPendingDispatch() {
   const card = document.getElementById('dispatch-gate-card');
   try {
     const res = await api('pending-dispatch', 'GET');
     const pending = (res && res.pending_dispatch) || {};
     const ids = Object.keys(pending);
-    if (ids.length === 0) { _gateCurrentOrder = null; card.style.display = 'none'; return; }
+    if (ids.length === 0) {
+      _gateCurrentOrder = null; _gateCurrentChildId = null; card.style.display = 'none'; return;
+    }
     const oid = ids[0], b = pending[oid];
     _gateCurrentOrder = oid;
+    // Cross-harness: the dispatch agent is its own child workflow — remember it so the
+    // approval signal goes straight to that workflow (null for the inline langgraph tab).
+    _gateCurrentChildId = b.child_id || null;
     const onum = (b.order_id || oid).replace(/^order-/, '#');
     document.getElementById('dgc-body').innerHTML =
       `<div class="dgc-order"><b>Order ${escapeHtml(onum)}</b> · $${(b.order_value || 0).toLocaleString()} · ${escapeHtml(b.venue || '')}</div>`
@@ -2067,11 +2230,13 @@ setInterval(pollPendingDispatch, 1500);
 async function decideDispatch(approved) {
   if (!_gateCurrentOrder) return;
   const oid = _gateCurrentOrder;
+  const childId = _gateCurrentChildId;
   _gateCurrentOrder = null;
+  _gateCurrentChildId = null;
   // Clear the card immediately so the buttons always dismiss it — even if the gate
   // workflow has already gone away (e.g. a high-value order dropped as the demo ends).
   document.getElementById('dispatch-gate-card').style.display = 'none';
-  await api('approve-dispatch', 'POST', { order_id: oid, approved });
+  await api('approve-dispatch', 'POST', { order_id: oid, approved, child_id: childId });
 }
 
 // --- Agent-in-the-loop: drop a high-value order on demand ---
@@ -2085,7 +2250,9 @@ function openGraph() { document.getElementById('graph-modal').style.display = 'f
 function closeGraph() { document.getElementById('graph-modal').style.display = 'none'; }
 function openAdk() { document.getElementById('adk-modal').style.display = 'flex'; }
 function closeAdk() { document.getElementById('adk-modal').style.display = 'none'; }
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeGraph(); closeAdk(); } });
+function openCross() { document.getElementById('cross-modal').style.display = 'flex'; }
+function closeCross() { document.getElementById('cross-modal').style.display = 'none'; }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeGraph(); closeAdk(); closeCross(); } });
 
 async function resetDemo() {
   try {

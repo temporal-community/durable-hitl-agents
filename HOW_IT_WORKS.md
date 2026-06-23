@@ -9,7 +9,10 @@ The demo is Ziggy's Ice Cream catering fleet running on **downtown San
 Francisco** (the Ferry Building is the shop; orders come from Moscone Center,
 Fisherman's Wharf, and Chinatown). It shows **two durable human-in-the-loop
 patterns** on Temporal, each built on a **different agent framework**, to make
-the point that the durable-HITL pattern is framework-agnostic.
+the point that the durable-HITL pattern is framework-agnostic. A **third
+("Cross-Harness") tab** then runs both frameworks in one system — Fleet + Customer
+on ADK, Dispatch on LangGraph — to show that when agents span harnesses,
+**Temporal** is the layer that orchestrates *across* them (no agent framework can).
 
 ---
 
@@ -26,8 +29,8 @@ the point that the durable-HITL pattern is framework-agnostic.
 | Durable primitive | signal → `wait_condition` hold → resolve | `interrupt()` in the loop → `wait_condition` on the `answer_dispatch` signal → `Command(resume=answer)` |
 
 **The key routing fact:** the **active UI tab** picks the dispatch framework for
-*all* orders — `set_dispatch_mode("adk" | "langgraph")` sets `_dispatch_mode`, and
-`_assign_order` routes on it.
+*all* orders — `set_dispatch_mode("adk" | "langgraph" | "crossharness")` sets
+`_dispatch_mode`, and `_assign_order` routes on it.
 
 - **ADK tab → ADK.** Every order runs `_run_adk_assignment()` inline in the parent
   workflow; the ADK multi-agent pipeline reasons about it and assigns it to the
@@ -38,10 +41,55 @@ the point that the durable-HITL pattern is framework-agnostic.
   child**: when an agent decides it needs a human, it calls the `ask_human` tool
   mid-loop, whose execution is a durable LangGraph `interrupt()`; the parent surfaces
   the question and resolves it with the `answer_dispatch` signal.
+- **Cross-Harness tab → child workflows.** Every order runs
+  `_run_crossharness_assignment(...)`, which spawns **two Temporal child workflows** —
+  `AdkAssessmentWorkflow` (`assess-<order_id>`, the ADK Fleet ∥ Customer team) and
+  `LgDispatchWorkflow` (`dispatch-<order_id>`, the LangGraph Dispatch agent) — and joins
+  them. The agents run *inside the children*; the parent only spawns, joins, and applies.
 
 This split is deliberate: each framework dispatches all orders while its tab is
 active, on the same Temporal runtime, with the same durable-signal HITL primitive
 underneath both.
+
+### The third tab — cross-harness (ADK + LangGraph in one system)
+
+The first two tabs each run *one* framework inline in the parent. The **Cross-Harness
+tab** (`_dispatch_mode == "crossharness"`) shows the case the other two can't: a single
+order handled by **two different harnesses at once** — Fleet + Customer on ADK, Dispatch
+on LangGraph. No agent framework can orchestrate *across* harnesses, so **Temporal** does:
+the parent `MeltdownDemoWorkflow` spawns one child workflow per harness and joins them.
+
+- **`AdkAssessmentWorkflow`** (`assess-<order_id>`) runs the ADK `ParallelAgent`
+  (`create_assessment_team_agent()`) and returns the two assessment strings.
+- **`LgDispatchWorkflow`** (`dispatch-<order_id>`) runs the dispatch-only LangGraph graph
+  (`build_dispatch_only_graph()`), seeded with those assessments, and decides — calling
+  `ask_human` mid-loop when warranted.
+
+Ownership is layered: the **agent children decide**, the **parent applies** (it owns
+driver state and signals `DriverRouteWorkflow` via `_commit_assignment` / `_reject_order`),
+and the **driver workflows execute**. The children never signal drivers directly. Because
+each child is its own execution, the ADK `invoke_model`/tool activities live in the
+`assess-*` history and the LangGraph `dispatch_reason` activity lives in the `dispatch-*`
+history — the cross-harness boundary is literally visible in the Temporal UI.
+
+**Why per-order (request/response), not one long-lived agent workflow:** each assignment is
+a *bounded* computation — the agent's reason→act→eval loop terminates when it concludes, the
+workflow completes, and its history is sealed. The agents here are **stateless between
+orders** (fresh ADK session + LangGraph thread each time), so there's no state to keep alive
+between decisions; a customer change is simply a new decision over the order's new state
+(`_rereason_crossharness`, with `-rev<n>` child ids). The durable, *stateful* per-entity
+workflows are the **drivers** (`DriverRouteWorkflow`), which genuinely carry evolving state
+(position, route, cargo) across orders. Rule of thumb: **long-lived workflow for a stateful
+entity; per-job workflow for a stateless request/response reasoner.** (In cross-harness mode
+the demo generates fewer, slower orders — `CROSSHARNESS_MAX_ORDERS` / interval — so the ~2
+child workflows per order stay legible in the Temporal UI.)
+
+**Both HITL directions run on this tab.** Agent→human: the dispatch child owns its own
+`answer_dispatch` signal + `pending_question` query, so the human signals the *agent's own
+workflow* (the durable wait is the Temporal signal + `wait_condition` + `Command(resume)`;
+`interrupt()` only suspends the graph). Human→agent: a customer change re-runs the whole
+cross-harness flow via `_rereason_crossharness` (ADK reassesses, LangGraph re-decides) and
+the held driver reroutes.
 
 The disconnect/recovery scenarios (agent disconnect, driver disconnect, tool
 degradation) are **dormant code**, not demo features — the UI no longer surfaces
@@ -583,7 +631,7 @@ opinionated one here — its `SequentialAgent`/`ParallelAgent` + shared session 
 nodes already run as separate activities. Neither is impossible; both hand the team layer
 to Temporal.
 
-### Follow-up: multi-framework (cross-harness) orchestration
+### Multi-framework (cross-harness) orchestration — built (the Cross-Harness tab)
 
 The compelling reason to split is **heterogeneous agents**: one agent built on ADK, another
 on LangGraph, in one system. No agent *framework* (harness) can orchestrate *across*
@@ -591,10 +639,15 @@ harnesses — ADK orchestrates ADK agents, LangGraph orchestrates LangGraph node
 you mix them, **Temporal is the orchestration layer** (each agent is a workflow; Temporal
 does fan-out / join / HITL between them, regardless of what harness runs inside each).
 
-Planned as a separate follow-up (after the current cleanup lands): start with
-**Dispatch-as-its-own-workflow** (the HITL agent), then a 2-agent proof with an **ADK agent
-∥ a LangGraph agent** orchestrated by Temporal — the `defer` barrier above becomes a plain
-`asyncio.gather(fleet_child, customer_child)` child-workflow join.
+**This is now built — it's the Cross-Harness tab** (see "The third tab" above). Per order,
+the parent spawns an `AdkAssessmentWorkflow` (Fleet ∥ Customer on ADK) and an
+`LgDispatchWorkflow` (Dispatch on LangGraph) as child workflows and joins them; the dispatch
+child owns its own `ask_human` HITL. Each framework keeps only the *intra-agent* loop inside
+its child, and **Temporal owns everything between the agents** — exactly the split this
+section argues for. ADK's `ParallelAgent` still runs Fleet ∥ Customer inside the one ADK
+child (its parallelism stays the framework's job); Temporal owns the single ADK→LangGraph
+boundary. The full-team graph's `defer` fan-in barrier isn't needed here — the parent's
+`await child` sequence is the join.
 
 ---
 

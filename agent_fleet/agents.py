@@ -306,6 +306,24 @@ def create_assignment_dispatch_agent() -> Agent:
     )
 
 
+def create_assessment_team_agent() -> ParallelAgent:
+    """Fleet ∥ Customer assessment team WITHOUT the Dispatch phase.
+
+    The ADK half of the cross-harness tab (3rd tab): this runs as its own Temporal
+    child workflow (AdkAssessmentWorkflow) and produces just the two assessment
+    strings (fleet_assessment / customer_assessment via output_key). The Dispatch
+    decision is made by a separate LangGraph child — Temporal orchestrates across
+    the two harnesses. Reuses the same Fleet/Customer agents as the full pipeline.
+    """
+    return ParallelAgent(
+        name="assessment_parallel",
+        sub_agents=[
+            create_assignment_fleet_agent(),
+            create_assignment_customer_agent(),
+        ],
+    )
+
+
 def create_order_assignment_agent() -> SequentialAgent:
     """
     Compose the full order assignment pipeline (workflow context).
