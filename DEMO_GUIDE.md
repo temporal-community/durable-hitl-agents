@@ -146,6 +146,32 @@ On the Agent-in-the-loop tab, **every order** runs a **looping multi-agent LangG
 
 ---
 
+## Cross-Harness — Temporal WITH ADK and LangGraph: "One Runtime Across Two Frameworks"
+**Time: 3–4 min | Tab: 🔀 Cross-Harness · ADK + LangGraph | Best for: the cross-framework point — Temporal joining work no single agent framework can orchestrate**
+
+This tab runs both frameworks **at once, on the same delivery**. Fleet and Customer assessment runs on **Google ADK**; Dispatch runs on **LangGraph** — each its own Temporal **child workflow**, joined by the Temporal parent. The header shows **both the Google ADK and LangGraph logos** to make the point visible: no agent framework can orchestrate across harnesses; **only Temporal can**. Both in-the-loop patterns you just saw appear together here — the agent-initiated `ask_human` gate (LangGraph) *and* the human-initiated re-reason (ADK + LangGraph) — across the harness boundary.
+
+**Setup:** On the **🔀 Cross-Harness** tab, click **Start Deliveries** so the fleet is moving.
+
+**Steps:**
+1. Click the **🔀 Cross-Harness** tab, then **Start Deliveries**. Orders flow as before, but each one fans out into two child workflows — ADK for assessment, LangGraph for dispatch.
+2. **(Agent → human direction.)** Click **Drop high-value order**. The **LangGraph Dispatch agent calls `ask_human` mid-reasoning** and an **approval card appears over the map**. The answer signals the **dispatch agent's OWN child workflow**: **Approve** → dispatched; **Reject** → held (not dispatched).
+3. **(Human → agent direction.)** Use the customer-change controls: pick an order, select **Address Change** → a new location, click **Submit Change**, then **Approve**. The driver holds, the **cross-harness team re-reasons** — **ADK reassesses, LangGraph re-decides** — and the driver reroutes.
+4. Click **View the cross-harness graph** to show the combined diagram: Temporal parent → ADK child [Fleet ∥ Customer] + LangGraph child [Dispatch + `ask_human`] → driver loop.
+5. Open the **Temporal UI** (localhost:8233). Per cross-harness order there are **separate child workflow histories** — `assess-<order>` (ADK) and `dispatch-<order>` (LangGraph) — under `meltdown-demo`. That split is the **visible cross-harness boundary**.
+
+**What to say:**
+> "So far each tab used one framework. This one uses both — on the same order. Fleet and Customer assess on Google ADK; Dispatch decides on LangGraph; each is its own Temporal child workflow, and Temporal joins them. Here's the point: no agent framework can reach across another framework's harness and orchestrate it — only the durable runtime can. Watch both patterns we just saw, now spanning the boundary. The LangGraph dispatch agent calls `ask_human` and escalates — I approve, and it signals dispatch's own child workflow. And when a customer changes an address, the whole cross-harness team re-reasons — ADK reassesses the new location, LangGraph re-decides — then the driver reroutes. Temporal WITH ADK and LangGraph: one runtime, two frameworks, joined durably."
+
+**What you'll see in the Temporal UI:**
+- Under `meltdown-demo`, per cross-harness order: a child workflow `assess-<order>` (the ADK Fleet + Customer assessment) and a child workflow `dispatch-<order>` (the LangGraph Dispatch decision, including the `ask_human` gate). The two separate histories are the cross-harness boundary made visible.
+
+**Temporal concept to highlight:** Cross-framework orchestration via separate Temporal child workflows (`assess-<order>` ADK + `dispatch-<order>` LangGraph) joined by the parent — orchestration across agent harnesses that no single agent framework can do; both HITL directions (agent→human `ask_human`, human→agent re-reason) spanning the harness boundary.
+
+**Operational note:** After any code change, **terminate the `meltdown-demo` workflow (Reset) and restart the worker** — otherwise stale child histories fail to replay.
+
+---
+
 ## Handling Questions
 
 **"How is this different from just using a queue?"**

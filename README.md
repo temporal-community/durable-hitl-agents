@@ -2,7 +2,7 @@
 
 > **A durable human-in-the-loop (HITL) example for AI agents** — framework-agnostic, built on Temporal (Google ADK + LangGraph). Adapted from the original **Meltdown** ice cream delivery fleet demo.
 
-Companion demo for the AI Engineer World's Fair talk **"The Human Is an Async API: Designing Durable Human-in-the-Loop Agents."** Ziggy's Ice Cream runs its downtown San Francisco catering fleet on Temporal. Orders flow in from Moscone Center, Fisherman's Wharf, and Chinatown; AI agents reason about which driver to send; and Temporal guarantees every decision and delivery runs to completion. The demo shows **two durable human-in-the-loop patterns** side by side — one where a human interrupts the agents, one where an agent calls a human — both built on Temporal's durable signals and `wait_condition`.
+Companion demo for the AI Engineer World's Fair talk **"The Human Is an Async API: Designing Durable Human-in-the-Loop Agents."** Ziggy's Ice Cream runs its downtown San Francisco catering fleet on Temporal. Orders flow in from Moscone Center, Fisherman's Wharf, and Chinatown; AI agents reason about which driver to send; and Temporal guarantees every decision and delivery runs to completion. The demo shows **two durable human-in-the-loop patterns** side by side — one where a human interrupts the agents, one where an agent calls a human — both built on Temporal's durable signals and `wait_condition`. A third tab then puts **both directions in one flow** that spans Google ADK and LangGraph in a single system, with Temporal as the orchestration layer across the two harnesses.
 
 <p align="center">
   <img src=".github/assets/meltdown-screenshot-3.png" alt="Meltdown demo dashboard" width="900">
@@ -93,6 +93,7 @@ Built with **Google ADK** (multi-agent reasoning for Pattern A), **LangGraph** v
 |---------|----------------|----------|--------------|-------------------|
 | **A — Human-in-the-loop** | ...calls the agent | **Google ADK** (multi-agent) | A customer submits an order change mid-delivery — an address change (pick a new SF location from a dropdown) or cancel. The change is **customer-initiated** — the gate lives in the workflow, not in any LLM tool. The driver navigates to the venue but holds before delivering (`awaiting_update`). One human approval feeds **both** loops: approve cancel → delivery skipped; approve address change → the ADK assignment team **re-reasons** the order for the new location (Fleet recomputes ETAs, Customer re-reads priority, Dispatch reassesses), then the held driver reroutes to it; reject → deliver to the original destination. | Signal → `wait_condition` hold → resolve, then re-reason via ADK (two `wait_condition`s: parent waits for human, child waits for parent) |
 | **B — Agent-in-the-loop** | ...gets called by the agent | **LangGraph** (`temporalio.contrib.langgraph`) | On the LangGraph tab, **every** order runs a looping **multi-agent** LangGraph team inline in the parent workflow (Fleet ∥ Customer are real reason→act→eval ReAct loops → Dispatch decides) — each Gemini reason call and **each tool call** run as its own Temporal **activity** recorded in the parent's history. **Mid-loop**, the Dispatch or Fleet agent can call the `ask_human` tool; that tool's execution is a durable LangGraph `interrupt()` that suspends the graph. The parent workflow (`_run_langgraph_assignment`) surfaces the question, parks on the `answer_dispatch` Temporal **signal** + `wait_condition`, and resumes the agent via `Command(resume=answer)` — the answer flows back as the agent's next observation. No per-order gate child; the HITL is inside the reasoning loop. Survives worker death. | The human is literally a tool the agent calls (`ask_human`) — but a durable, async one. On Temporal, that tool call's pause is a signal. |
+| **C — Cross-harness** | ...both directions, across frameworks | **Google ADK + LangGraph**, with **Temporal** as the orchestration layer | On the **🔀 Cross-Harness · ADK + LangGraph** tab, one order spans **both** harnesses in a single system. No agent framework can orchestrate across harnesses — ADK orchestrates ADK agents, LangGraph orchestrates LangGraph nodes — so Temporal is the layer that orchestrates across them. Per order the parent `MeltdownDemoWorkflow` spawns **two child workflows**: `AdkAssessmentWorkflow` (id `assess-<order_id>`) runs the **Fleet + Customer ADK** agents and returns their two assessment strings; then `LgDispatchWorkflow` (id `dispatch-<order_id>`), seeded with those assessments, runs the **LangGraph Dispatch** agent, which decides and may call `ask_human` in-loop. Each child is its own Temporal history in the UI — the visible cross-harness boundary. Both HITL directions appear: **agent→human** (the LangGraph Dispatch agent's `ask_human` → human signals the dispatch child's own `answer_dispatch` signal + `pending_question` query; `interrupt()` suspends the graph, the durable wait is a Temporal signal + `wait_condition` + `Command(resume)`, surviving a worker kill via history) and **human→agent** (a customer change re-runs the whole cross-harness flow — ADK reassesses the new location, LangGraph re-decides — and the driver reroutes). The agent children **decide**; the parent **applies** (it owns driver state and signals the driver workflows); driver workflows **execute** — agent children never signal drivers directly. | The same durable signal + `wait_condition`, now spanning two harnesses: each agent child is its own Temporal workflow, and Temporal orchestrates ADK → LangGraph → driver across them. |
 
 The active framework is chosen by the UI tab and applies to all orders. On the LangGraph tab, routine auto-generated orders top out around $1,950 (servings ≤150 × ≤$13), so the Dispatch agent commits them directly; only a genuinely high-value order escalates. The **Drop high-value order** button injects a premium Moscone order the agent escalates — so the agent-in-the-loop demo fires when you choose, not at random.
 
@@ -144,11 +145,12 @@ uv run --env-file .env python -m agent_fleet.worker
 
 ## Demo Flow
 
-The dashboard has two tabs — one per pattern. Both start the same way.
+The dashboard has three tabs — one per pattern. All start the same way.
 
 1. **Start Deliveries** — Ziggy's (the Ferry Building) opens for business. Orders flow in from Moscone Center, Fisherman's Wharf, and Chinatown. The ADK agents reason per-order and assign to the least-loaded driver. Drivers batch-pickup and deliver sequentially.
 2. **Pattern A — Human-in-the-loop tab:** pick an active order, choose **Address Change** (pick a new SF location from the dropdown) or **Cancel Order**, click **Submit Change**. The driver arrives at the venue but holds (`awaiting_update`) while a human decides. Click **Approve** / **Reject** — cancel skips delivery; address change has the ADK team **re-reason** the new location (Fleet/Customer/Dispatch reassess) before the held driver reroutes to it; reject delivers normally.
 3. **Pattern B — Agent-in-the-loop tab:** click **Drop high-value order** to inject a premium Moscone catering order. The looping LangGraph team (Fleet ∥ Customer → Dispatch) assesses it inline in the parent workflow; **mid-reasoning** the Dispatch agent calls the `ask_human` tool, which suspends the graph on a durable `interrupt()` while the parent parks on the `answer_dispatch` signal; an approval card appears over the map. Approve or reject — the answer flows back into the agent's reasoning. To show durability, **kill the worker while the card is up** — the paused workflow survives; restart the worker and the pending question is still there.
+4. **Cross-Harness — ADK + LangGraph tab:** an order spans both harnesses. The parent spawns two child workflows: `AdkAssessmentWorkflow` (id `assess-<order_id>`) runs the **Fleet + Customer ADK** agents, then `LgDispatchWorkflow` (id `dispatch-<order_id>`), seeded with those assessments, runs the **LangGraph Dispatch** agent — each shows as its own history in the Temporal UI, the visible cross-harness boundary. **Agent→human:** mid-loop the Dispatch agent calls `ask_human`; signal its own child (`answer_dispatch`) to resume — kill the worker while parked and the wait survives via Temporal history. **Human→agent:** submit a customer change and the whole cross-harness flow re-runs (ADK reassesses the new location, LangGraph re-decides), then the driver reroutes. The agent children decide; the parent applies the decision and signals the driver workflows.
 
 
 ## Architecture
@@ -180,11 +182,17 @@ The dashboard has two tabs — one per pattern. Both start the same way.
 │  │   batch pickup → deliver                         + tool calls here  │
 │  │   sequentially → return                          (max 5 concurrent) │
 │  │   (max 20 concurrent)                                               │
-│  └─ LangGraph tab inline (Pattern B):                                 │
-│      looping multi-agent team (Fleet∥Customer→Dispatch) in the parent │
-│      (each reason call + each tool call a Temporal activity)          │
-│      agents call ask_human mid-loop → durable interrupt(); the parent │
-│      parks on the answer_dispatch signal — no per-order gate child    │
+│  ├─ LangGraph tab inline (Pattern B):                                 │
+│  │   looping multi-agent team (Fleet∥Customer→Dispatch) in the parent │
+│  │   (each reason call + each tool call a Temporal activity)          │
+│  │   agents call ask_human mid-loop → durable interrupt(); the parent │
+│  │   parks on the answer_dispatch signal — no per-order gate child    │
+│  └─ Cross-Harness tab children (Pattern C):                           │
+│      AdkAssessmentWorkflow (assess-<id>) → Fleet + Customer on ADK    │
+│      → LgDispatchWorkflow (dispatch-<id>) → Dispatch on LangGraph,    │
+│      seeded w/ the assessments; ask_human in-loop, answer_dispatch on │
+│      the dispatch child. Each is its own history (cross-harness edge);│
+│      children decide → parent applies + signals drivers → drivers run │
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────┐      ┌───────────────────────────────────────┐
@@ -199,7 +207,9 @@ The dashboard has two tabs — one per pattern. Both start the same way.
 │  customer-change +       │
 │  approve-change (A),     │
 │  inject-order +          │
-│  approve-dispatch (B)    │
+│  approve-dispatch (B),   │
+│  cross-harness flow +    │
+│  answer_dispatch (C)     │
 └──────────┬───────────────┘
            │ queries + signals
            ▼
@@ -209,6 +219,8 @@ The dashboard has two tabs — one per pattern. Both start the same way.
 **Order lifecycle (routine):** Order generates on timer → ADK agents reason (Fleet + Customer in parallel → Dispatch) → capacity check + least-loaded assignment → driver batch-picks up at Ziggy's → delivers sequentially to venues → signals parent on each completion → returns to base
 
 **Order lifecycle (high-value, LangGraph tab):** High-value order injected → looping multi-agent team assesses inline in the parent (Fleet ∥ Customer → Dispatch) → mid-reasoning the Dispatch agent calls `ask_human` → durable LangGraph `interrupt()` suspends the graph while the parent parks on the `answer_dispatch` signal → human answers → `Command(resume=answer)` feeds it back into the agent's reasoning → on approve, commits to the least-loaded driver and delivers; on reject, the order is held/cancelled
+
+**Order lifecycle (Cross-Harness tab):** Order on the cross-harness tab → parent spawns `AdkAssessmentWorkflow` (`assess-<order_id>`) → Fleet + Customer ADK agents return their two assessment strings → parent spawns `LgDispatchWorkflow` (`dispatch-<order_id>`) seeded with those assessments → LangGraph Dispatch agent decides, and mid-loop may call `ask_human` → durable `interrupt()` suspends the graph while the dispatch child parks on its own `answer_dispatch` signal (`pending_question` query surfaces it) → human answers → `Command(resume=answer)` resumes the agent → the decision returns to the parent, which **applies** it (owns driver state, signals the driver workflows) → driver workflows execute. A customer change re-runs the whole flow (ADK reassesses the new location, LangGraph re-decides) and the driver reroutes.
 
 **How ADK and Temporal map to each other:**
 
@@ -334,6 +346,32 @@ Why `interrupt()` specifically? For an in-loop pattern, the human's answer has t
 
 The two framework files diverge on purpose. **In LangGraph, you own the loop**, so `langgraph_agents.py` carries the helpers that hand-build it: the reason↔act loop and its routing, per-tool-call activities (`_run_tools`), message parsing (`_coerce_text` / `_last_text`), the `interrupt()` human node (`_human_node`), and model + tool binding (`_chat_model`). **ADK doesn't need any of that** — its `Runner` bakes the loop in. `TemporalModel` + `activity_tool` run the reason→act→observe cycle and tool-calls-as-activities for you, and structured output comes back through ADK session state. So: **LangGraph = assemble the loop from primitives; ADK = the loop is batteries-included** — same durable contract underneath, different amount of plumbing on top.
 
+### Core mechanism — how the cross-harness path spans ADK + LangGraph
+
+On the **🔀 Cross-Harness · ADK + LangGraph** tab, one order runs across **both** harnesses in a single system. No agent framework orchestrates across harnesses — ADK orchestrates ADK agents, LangGraph orchestrates LangGraph nodes — so **Temporal is the orchestration layer** between them. The boundary is made visible by giving each harness its **own Temporal child workflow**, so each appears as its own history in the Temporal UI.
+
+**1. The parent spawns one child per harness** (`workflows.py` → `MeltdownDemoWorkflow`):
+
+```python
+# AdkAssessmentWorkflow runs the Fleet + Customer ADK agents → two assessment strings
+fleet_note, customer_note = await workflow.execute_child_workflow(
+    AdkAssessmentWorkflow.run, order, id=f"assess-{order.order_id}",
+)
+# LgDispatchWorkflow runs the LangGraph Dispatch agent, seeded with those assessments
+decision = await workflow.execute_child_workflow(
+    LgDispatchWorkflow.run, args=[order, fleet_note, customer_note],
+    id=f"dispatch-{order.order_id}",
+)
+```
+
+The ADK assessment child (`assess-<order_id>`) returns the Fleet and Customer assessment strings; the LangGraph dispatch child (`dispatch-<order_id>`), seeded with those assessments, runs the Dispatch agent and may call `ask_human` mid-loop.
+
+**2. Both HITL directions, on one tab.** *Agent→human:* the LangGraph Dispatch agent calls `ask_human`; the human signals the **dispatch child's own** `answer_dispatch` signal (the child owns its `pending_question` query too). `interrupt()` suspends the graph; the durable wait is a Temporal signal + `wait_condition` + `Command(resume=answer)`, and it survives a worker kill via Temporal history. *Human→agent:* a customer change re-runs the whole cross-harness flow — ADK reassesses the new location, LangGraph re-decides — and the driver reroutes.
+
+**3. Ownership stays clean across the boundary:** the agent children **decide**, the parent **applies** the decision (it owns driver state and signals the driver workflows), and the driver workflows **execute**. Agent children never signal drivers directly — the parent is the single point that turns a cross-harness decision into driver action.
+
+> **In short:** two harnesses, two child workflows, one parent. ADK assesses → LangGraph dispatches → the parent applies to the driver — and Temporal is the orchestration layer that spans the harness boundary, with the same durable `ask_human` → signal + `wait_condition` contract as the single-harness tabs.
+
 ### What each agent reasons about
 
 | Agent | Reasoning | Tools |
@@ -367,7 +405,7 @@ The worker is live-only and requires `GOOGLE_API_KEY` (ADK + all API activities)
 | `agent_fleet/models.py` | Dataclass models for all Temporal payloads (incl. `DriverSnapshot`) |
 | `agent_fleet/simulation.py` | FleetState — SQLite WAL-backed write-only UI projection (`fleet_state.db`, cross-process) |
 | `agent_fleet/activities.py` | Temporal activities — navigation, delivery, Maps API, agent tools |
-| `agent_fleet/workflows.py` | Temporal workflows — owns driver state, signals, queries, Temporal-native retry for disconnect. Drives both in-loop HITL flows: `_run_langgraph_assignment` (Pattern B — surfaces `ask_human`, waits on `answer_dispatch`, resumes via `Command`) and `_process_customer_change`/`_rereason_order` (Pattern A — one approval gate that holds the driver and, on an address change, re-reasons via the ADK team). Includes `OrderGenerationWorkflow` |
+| `agent_fleet/workflows.py` | Temporal workflows — owns driver state, signals, queries, Temporal-native retry for disconnect. Drives both in-loop HITL flows: `_run_langgraph_assignment` (Pattern B — surfaces `ask_human`, waits on `answer_dispatch`, resumes via `Command`) and `_process_customer_change`/`_rereason_order` (Pattern A — one approval gate that holds the driver and, on an address change, re-reasons via the ADK team). Pattern C spans both harnesses via child workflows: `AdkAssessmentWorkflow` (`assess-<order_id>` — Fleet + Customer on ADK) → `LgDispatchWorkflow` (`dispatch-<order_id>` — Dispatch on LangGraph, owns its `answer_dispatch` signal + `pending_question` query); the parent applies the decision and signals the drivers. Includes `OrderGenerationWorkflow` |
 | `agent_fleet/agents.py` | ADK agent composition — Fleet, Customer, Dispatch Agent (an approved address change re-runs this team via `_rereason_order` → `_run_adk_assignment`) |
 | `agent_fleet/langgraph_agents.py` | Pattern B — the looping LangGraph multi-agent team (mirror of `agents.py`): Fleet ∥ Customer reason→act→eval ReAct loops → Dispatch loop, each tool call its own Temporal activity. Agents call the in-loop `ask_human` tool, whose execution is a durable `interrupt()` |
 | `agent_fleet/config.py` | Centralized env config — `GOOGLE_API_KEY`, `GOOGLE_MAPS_API_KEY`, `DEFAULT_MODEL`, `TEMPORAL_ADDRESS` |

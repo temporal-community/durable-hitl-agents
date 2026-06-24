@@ -165,6 +165,54 @@ class ReasonAboutAssignmentOutput:
     agent_events: list[dict] = field(default_factory=list)
 
 
+# --- Cross-harness child workflow payloads (3rd tab) ---
+#
+# The cross-harness tab splits the assignment team across agent harnesses, each
+# run as its own Temporal child workflow: an ADK child produces the Fleet+Customer
+# assessments, a LangGraph child makes the dispatch decision (and owns its own
+# ask_human HITL). Inputs/outputs are plain dataclasses — never LangChain/ADK
+# objects — so they cross the child boundary cleanly. All fields default so an
+# in-flight workflow started against older code replays without raw-attribute reads.
+
+
+@dataclass
+class AdkAssessmentOutput:
+    """Returned by AdkAssessmentWorkflow — the two ADK assessment strings only."""
+
+    fleet_assessment: str = ""
+    customer_assessment: str = ""
+
+
+@dataclass
+class LgDispatchInput:
+    """Seeds LgDispatchWorkflow's dispatch-only graph with order/fleet context
+    plus the ADK-produced assessments (so the LangGraph Dispatch agent reasons on
+    them without re-running Fleet/Customer)."""
+
+    order_id: str
+    venue: str
+    order_value: int
+    servings: int
+    deadline_minutes: int
+    proposed_driver_id: str
+    drivers_available: int
+    drivers_total: int
+    pending_orders: int
+    fleet_assessment: str = ""
+    customer_assessment: str = ""
+
+
+@dataclass
+class LgDispatchOutput:
+    """Returned by LgDispatchWorkflow — the dispatch decision and reasoning."""
+
+    decision: str = "DISPATCH"  # "DISPATCH" | "HOLD"
+    reasoning: str = ""
+    fleet_assessment: str = ""
+    customer_assessment: str = ""
+    asked_human: bool = False
+
+
 @dataclass
 class NavigateInput:
     driver_id: str
@@ -349,7 +397,8 @@ class AgentDisconnectInput:
 class MeltdownDemoInput:
     escalation_enabled: bool = False
     max_orders: int = 50
-    dispatch_mode: str = "adk"  # "adk" | "langgraph" — set from the active UI tab at start
+    # "adk" | "langgraph" | "crossharness" — set from the active UI tab at start
+    dispatch_mode: str = "adk"
 
 
 @dataclass

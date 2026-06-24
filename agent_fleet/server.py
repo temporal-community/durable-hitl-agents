@@ -49,7 +49,7 @@ from agent_fleet.models import (
 )
 from agent_fleet.queues import WORKFLOWS_QUEUE
 from agent_fleet.simulation import fleet
-from agent_fleet.workflows import MeltdownDemoWorkflow
+from agent_fleet.workflows import LgDispatchWorkflow, MeltdownDemoWorkflow
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -103,8 +103,12 @@ app = FastAPI(title="Meltdown Ice Cream Delivery", lifespan=lifespan)
 # --- Demo control endpoints ---
 
 
+_MODES = ("adk", "langgraph", "crossharness")
+
+
 class StartRequest(BaseModel):
-    mode: str = "adk"  # active UI tab: "adk" (Human→Agent) or "langgraph" (Agent→Human)
+    # active UI tab: "adk" (Human→Agent), "langgraph" (Agent→Human), "crossharness" (3rd tab)
+    mode: str = "adk"
 
 
 @app.post("/api/start")
@@ -113,7 +117,7 @@ async def start_demo(body: StartRequest | None = None):
     if _temporal_client is None:
         return {"error": "Temporal client not connected"}
 
-    mode = body.mode if body and body.mode in ("adk", "langgraph") else "adk"
+    mode = body.mode if body and body.mode in _MODES else "adk"
     # Try to start — if a stale workflow exists, terminate and retry
     for attempt in range(3):
         try:
@@ -369,11 +373,22 @@ async def approve_change(body: ChangeDecisionRequest):
 class DispatchDecisionRequest(BaseModel):
     order_id: str
     approved: bool
+    # Cross-harness tab: the dispatch agent runs in its own child workflow, so the human
+    # signals THAT child directly. Present only for crossharness entries (see pending-dispatch).
+    child_id: str | None = None
 
 
 @app.get("/api/pending-dispatch")
 async def pending_dispatch():
-    """Orders the dispatch agent escalated that are awaiting a human decision."""
+    """Orders the dispatch agent escalated that are awaiting a human decision.
+
+    Two shapes merge into one response:
+    - langgraph tab (inline): the parent's roll-up already holds the full ask_human payload.
+    - crossharness tab: the dispatch agent runs in its OWN child workflow, so the parent's
+      roll-up only carries the child id + order context. We do the second hop here — query
+      each child's `pending_question` and merge it in (workflows can't query each other).
+      Entries whose child isn't currently parked are omitted, so the card stays hidden.
+    """
     if _temporal_client is None:
         return {"error": "Temporal client not connected"}
     try:
@@ -382,7 +397,26 @@ async def pending_dispatch():
     except RPCError:
         logger.exception("Failed to query workflow for pending-dispatch")
         return {"error": "Failed to query pending dispatch"}
-    return {"pending_dispatch": status.get("pending_dispatch", {})}
+
+    pending = status.get("pending_dispatch", {}) or {}
+    merged: dict = {}
+    for oid, entry in pending.items():
+        if not entry.get("via_child"):
+            merged[oid] = entry  # langgraph-tab entry already has the question
+            continue
+        child_id = entry.get("child_id")
+        if not child_id:
+            continue
+        try:
+            question = await _temporal_client.get_workflow_handle(child_id).query(
+                LgDispatchWorkflow.pending_question
+            )
+        except RPCError:
+            question = None
+        if not question:
+            continue  # child not parked on ask_human yet — keep the card hidden
+        merged[oid] = {**entry, **question}
+    return {"pending_dispatch": merged}
 
 
 @app.post("/api/approve-dispatch")
@@ -397,10 +431,16 @@ async def approve_dispatch(body: DispatchDecisionRequest):
         return {"error": "Temporal client not connected"}
     decision = "approve" if body.approved else "reject"
     try:
-        handle = _temporal_client.get_workflow_handle("meltdown-demo")
-        await handle.signal(
-            MeltdownDemoWorkflow.answer_dispatch, args=[body.order_id, decision]
-        )
+        if body.child_id:
+            # Cross-harness: the dispatch agent IS its own workflow — signal it directly.
+            child = _temporal_client.get_workflow_handle(body.child_id)
+            await child.signal(LgDispatchWorkflow.answer_dispatch, decision)
+        else:
+            # langgraph tab (inline): the parent owns the answer signal.
+            handle = _temporal_client.get_workflow_handle("meltdown-demo")
+            await handle.signal(
+                MeltdownDemoWorkflow.answer_dispatch, args=[body.order_id, decision]
+            )
     except RPCError:
         logger.exception("Failed to signal dispatch answer")
         return {"error": "Failed to signal dispatch answer"}
@@ -466,7 +506,8 @@ async def inject_high_value_order():
 
 
 class DispatchModeRequest(BaseModel):
-    mode: str = "adk"  # "adk" (Human → Agent tab) or "langgraph" (Agent → Human tab)
+    # "adk" (Human → Agent), "langgraph" (Agent → Human), "crossharness" (ADK + LangGraph)
+    mode: str = "adk"
 
 
 @app.post("/api/dispatch-mode")
