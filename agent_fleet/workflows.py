@@ -1759,9 +1759,11 @@ class MeltdownDemoWorkflow:
                 if rejected
                 else ("Approved by human — dispatching" if asked else "Within policy — dispatching")
             )
-        await self._publish_langgraph_reasoning(result, raw)
-
         hold = rejected or "HOLD" in raw.upper()
+        await self._publish_langgraph_reasoning(
+            result, raw, order=order, driver_id=driver_id, hold=hold
+        )
+
         if hold:
             workflow.logger.info(f"[#{onum}] LangGraph dispatch held {order.order_id} (human)")
             await self._reject_order(order, onum)
@@ -1783,11 +1785,32 @@ class MeltdownDemoWorkflow:
                 return self._dispatch_answers.pop(order_id)
         return None
 
-    async def _publish_langgraph_reasoning(self, result: dict, dispatch_note: str) -> None:
-        """Surface the inline LangGraph team's reasoning in the Fleet/Customer/Dispatch panels."""
+    async def _publish_langgraph_reasoning(
+        self,
+        result: dict,
+        dispatch_note: str,
+        order: OrderAssignmentResult | None = None,
+        driver_id: str = "",
+        hold: bool = False,
+    ) -> None:
+        """Surface the LangGraph/cross-harness team's reasoning in the Fleet/Customer/Dispatch
+        panels. When `order` is given, the Dispatch (resolver) card shows the concrete
+        assignment — `Order #N → driver-X — venue` — mirroring the ADK path, instead of just
+        the terse decision text."""
         fleet = (result.get("fleet_assessment") or "").strip()
         cust = (result.get("customer_assessment") or "").strip()
         dispatch_note = dispatch_note or "Dispatching."
+        if order is not None:
+            onum = order.order_id.split("-", 1)[-1] if "-" in order.order_id else order.order_id
+            if hold:
+                resolver_content = f"Order #{onum} — {order.hotel} — HELD: {dispatch_note}"
+                resolver_summary = f"Order #{onum} — {order.hotel} — held"
+            else:
+                resolver_content = f"Order #{onum} → {driver_id} — {order.hotel} — {dispatch_note}"
+                resolver_summary = f"Order #{onum} → {driver_id} — {order.hotel}"
+        else:
+            resolver_content = dispatch_note
+            resolver_summary = dispatch_note[:90]
         await workflow.execute_local_activity(
             publish_agent_events_batch,
             [
@@ -1806,8 +1829,8 @@ class MeltdownDemoWorkflow:
                 PublishAgentEventInput(
                     agent_name="resolver",
                     event_type="plan",
-                    content=dispatch_note,
-                    summary=dispatch_note[:90],
+                    content=resolver_content,
+                    summary=resolver_summary,
                 ),
             ],
             start_to_close_timeout=timedelta(seconds=10),
@@ -1936,12 +1959,16 @@ class MeltdownDemoWorkflow:
             self._pending_dispatch.pop(order.order_id, None)
 
         # 3. Surface reasoning in the agent panels, then APPLY (parent owns driver state).
+        # Pass order + driver so the Dispatch card shows "Order #N → driver-X — venue".
         await self._publish_langgraph_reasoning(
             {
                 "fleet_assessment": result.fleet_assessment,
                 "customer_assessment": result.customer_assessment,
             },
             result.reasoning,
+            order=order,
+            driver_id=driver_id,
+            hold=(result.decision == "HOLD"),
         )
         if not apply:
             return
