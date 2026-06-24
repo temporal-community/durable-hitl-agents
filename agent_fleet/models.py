@@ -405,6 +405,7 @@ class MeltdownDemoInput:
 class OrderGenerationInput:
     max_orders: int = 50
     order_interval_seconds: int = 15
+    warmup_burst_orders: int = 5  # initial fast orders; set 0 to disable the burst
 
 
 @dataclass

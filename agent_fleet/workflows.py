@@ -101,11 +101,14 @@ WARMUP_BURST_SECONDS = 2
 # Cross-harness tab: each order spawns TWO child workflows (an ADK assess child + a
 # LangGraph dispatch child), so the full 50-order auto-flow floods the Temporal UI with
 # ~100 short-lived executions. The per-order model is intentional (each agent unit is its
-# own durable workflow) — we just generate fewer, slower orders in this mode so the demo
-# stays legible and you can point at a single assess-/dispatch- pair. Drop a high-value
-# order to drive the ask_human gate on demand. Tunable; ADK/LangGraph tabs are unaffected.
-CROSSHARNESS_MAX_ORDERS = 8
-CROSSHARNESS_ORDER_INTERVAL_SECONDS = 20
+# own durable workflow) — we just generate fewer, SLOWER orders and skip the warmup burst
+# so the demo stays legible AND stays alive long enough to interactively drop a high-value
+# order and watch the ask_human gate (the demo tears down once order-gen completes, so the
+# cap also bounds runtime — keep it high enough for a few minutes). ~20 @ 22s ≈ 6 min,
+# calm load so the gate child runs promptly. Tunable; ADK/LangGraph tabs are unaffected.
+CROSSHARNESS_MAX_ORDERS = 20
+CROSSHARNESS_ORDER_INTERVAL_SECONDS = 22
+CROSSHARNESS_WARMUP_BURST_ORDERS = 3  # mild quick-start; no 5-order flood
 
 DRIVER_CAPACITY = 3
 DRIVER_IDS = ["driver-a", "driver-b", "driver-c", "driver-d", "driver-e"]
@@ -826,8 +829,11 @@ class OrderGenerationWorkflow:
 
             # Wait before next order — gentle initial burst to fill driver batches,
             # then normal cadence (tuned for the heavier langgraph agent-team mode).
+            # Burst size is per-input (crossharness passes a smaller one); getattr keeps
+            # replay clean for workflows started before the field existed.
+            burst = getattr(inp, "warmup_burst_orders", WARMUP_BURST_ORDERS)
             if order_num < inp.max_orders:
-                if order_num <= WARMUP_BURST_ORDERS:
+                if order_num <= burst:
                     await workflow.sleep(timedelta(seconds=WARMUP_BURST_SECONDS))
                 else:
                     base = inp.order_interval_seconds
@@ -1242,14 +1248,17 @@ class MeltdownDemoWorkflow:
         if self._dispatch_mode == "crossharness":
             gen_max = min(inp.max_orders, CROSSHARNESS_MAX_ORDERS)
             gen_interval = CROSSHARNESS_ORDER_INTERVAL_SECONDS
+            gen_burst = CROSSHARNESS_WARMUP_BURST_ORDERS
         else:
             gen_max = inp.max_orders
             gen_interval = ORDER_INTERVAL_SECONDS
+            gen_burst = WARMUP_BURST_ORDERS
         self._order_gen_handle = await workflow.start_child_workflow(
             OrderGenerationWorkflow.run,
             OrderGenerationInput(
                 max_orders=gen_max,
                 order_interval_seconds=gen_interval,
+                warmup_burst_orders=gen_burst,
             ),
             id="order-generation",
             static_summary="Order generation + agent assignment",
