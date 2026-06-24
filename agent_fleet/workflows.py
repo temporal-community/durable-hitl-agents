@@ -104,9 +104,10 @@ WARMUP_BURST_SECONDS = 2
 # own durable workflow) — we just generate fewer, SLOWER orders and skip the warmup burst
 # so the demo stays legible AND stays alive long enough to interactively drop a high-value
 # order and watch the ask_human gate (the demo tears down once order-gen completes, so the
-# cap also bounds runtime — keep it high enough for a few minutes). ~20 @ 22s ≈ 6 min,
-# calm load so the gate child runs promptly. Tunable; ADK/LangGraph tabs are unaffected.
-CROSSHARNESS_MAX_ORDERS = 20
+# cap also bounds runtime — keep it high enough to outlast the talk). 50 @ 22s ≈ 18 min.
+# The slow interval (not the total) bounds concurrent Gemini load, so raising the total just
+# lengthens the run, it doesn't add peak load. Tunable; ADK/LangGraph tabs are unaffected.
+CROSSHARNESS_MAX_ORDERS = 50
 CROSSHARNESS_ORDER_INTERVAL_SECONDS = 22
 CROSSHARNESS_WARMUP_BURST_ORDERS = 3  # mild quick-start; no 5-order flood
 
