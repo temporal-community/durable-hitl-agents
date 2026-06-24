@@ -326,6 +326,26 @@
     gap: 0;
   }
 
+  /* Collapse toggle: hide the controls so the agent panel can use the full height. */
+  .controls-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    padding: 6px 40px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #9fb4c7;
+    background: black;
+    border-bottom: 1px solid #2a2d3a;
+    user-select: none;
+    flex-shrink: 0;
+  }
+  .controls-toggle:hover { color: #d6e2f0; }
+  .controls-toggle .ct-icon { font-size: 10px; width: 10px; display: inline-block; }
+  .left-panel.controls-collapsed .tab-panels { display: none; }
+
   /* --- Fleet & Orders row (above map) --- */
   .fleet-orders-row {
     grid-area: fleet;
@@ -1141,6 +1161,9 @@
   </div>
 </div>
 <div class="left-panel">
+  <div class="controls-toggle" onclick="toggleControls()" title="Show/hide the demo controls">
+    <span class="ct-icon" id="controls-toggle-icon">▾</span><span>Controls</span>
+  </div>
   <!-- Controls -->
   <div class="tab-panels">
     <div class="tab-panel active" id="panel-human">
@@ -1563,6 +1586,16 @@ function switchTab(tabName) {
 // Active UI tab → dispatch framework mode sent to the backend.
 function tabMode(tabName) {
   return tabName === 'agent' ? 'langgraph' : tabName === 'cross' ? 'crossharness' : 'adk';
+}
+
+// Collapse/expand the controls block so the agent panel can use the full height.
+// (The ask_human approval card is a map overlay, not in the controls, so HITL still
+// works while collapsed; expand to use the customer-change / approve buttons.)
+function toggleControls() {
+  const lp = document.querySelector('.left-panel');
+  const collapsed = lp.classList.toggle('controls-collapsed');
+  const icon = document.getElementById('controls-toggle-icon');
+  if (icon) icon.textContent = collapsed ? '▸' : '▾';
 }
 
 // --- Map setup (downtown San Francisco) ---
