@@ -83,7 +83,7 @@ def create_workflow_worker(client: Client) -> Worker:
             MeltdownDemoWorkflow,
             DriverRouteWorkflow,
             OrderGenerationWorkflow,
-            # Cross-harness tab: per-order agent child workflows (ADK assessment ∥
+            # Cross-framework tab: per-order agent child workflows (ADK assessment ∥
             # LangGraph dispatch), joined by MeltdownDemoWorkflow.
             AdkAssessmentWorkflow,
             LgDispatchWorkflow,
@@ -99,7 +99,7 @@ def create_workflow_worker(client: Client) -> Worker:
             LangGraphPlugin(
                 graphs={
                     GRAPH_NAME: build_dispatch_team_graph(),
-                    # Dispatch-only graph for the cross-harness tab's LangGraph child.
+                    # Dispatch-only graph for the cross-framework tab's LangGraph child.
                     DISPATCH_ONLY_GRAPH_NAME: build_dispatch_only_graph(),
                 }
             ),

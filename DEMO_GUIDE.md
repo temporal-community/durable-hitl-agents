@@ -26,7 +26,7 @@ See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" informati
 ## Pre-flight check
 - Map shows **downtown San Francisco** with three delivery venues — **Moscone Center**, **Fisherman's Wharf**, **Chinatown** — and Ziggy's Ice Cream at the **Ferry Building**
 - All 4 drivers (A–D) are parked at Ziggy's, status idle (capacity 2 each — a deliberately tight fleet so capacity pressure shows; driver-d stays hidden during the warm-up burst)
-- Three tabs at the top: **🧑 Human → Agent** (Human-initiated), **🤖 Agent → Human** (Agent-initiated), and **🔀 Cross-Harness · ADK + LangGraph**
+- Three tabs at the top: **🧑 Human → Agent** (Human-initiated), **🤖 Agent → Human** (Agent-initiated), and **🔀 Cross-Framework · ADK + LangGraph**
 - "Start Deliveries" button is active on all tabs
 - If you see a stale state from a prior run, click **Reset** first
 
@@ -40,9 +40,9 @@ See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" informati
 
 ---
 
-## Two technologies, one runtime
+## Two frameworks, one durable-execution runtime
 
-The demo deliberately uses **two different agent frameworks** on the **same** Temporal runtime, to make the point that the durable-HITL pattern is framework-agnostic.
+The demo deliberately uses **two different agent frameworks** on the **same** durable-execution runtime (Temporal), to make the point that the durable-HITL pattern is framework-agnostic. **Frameworks own the loop — ADK, LangGraph. Temporal is the durable-execution runtime (the substrate) beneath them, and the only thing that coordinates across them.** The agent loop lives in each framework; durable execution is the layer they both run on. Temporal never runs the loop — the framework does, and each framework stops at its own edge.
 
 - **Pattern A (Human-in-the-loop)** is built on **Google ADK** — a multi-agent assignment pipeline (Fleet + Customer Agents in parallel → Dispatch Agent). One human gate feeds *both* loops: a customer change makes the driver hold at the venue (the *delivery* loop), and on an approved address change the ADK assignment team **re-reasons** the new location (the *agent's reasoning* loop) before the held driver reroutes.
 - **Pattern B (Agent-in-the-loop)** is built on **LangGraph** via Temporal's `temporalio.contrib.langgraph` integration — a looping multi-agent team (Fleet + Customer → Dispatch) where, mid-reasoning, the Dispatch agent calls an `ask_human` tool to escalate.
@@ -55,6 +55,9 @@ The demo deliberately uses **two different agent frameworks** on the **same** Te
 ### What is the LangGraph integration? (30 seconds)
 
 > "Pattern B uses LangGraph — a graph of nodes — running *inside* the parent Temporal workflow via `temporalio.contrib.langgraph`. It's a looping multi-agent team that mirrors the ADK side: a Fleet node and a Customer node assess in parallel, then a Dispatch node decides — each node a real Gemini call run as its own Temporal activity, recorded in the parent's history. Here's the headline: the HITL is **inside the reasoning loop**. Mid-reasoning, the Dispatch agent calls an `ask_human` tool. That tool's execution is a durable LangGraph `interrupt()` that suspends the graph; the parent workflow surfaces the question, parks on the `answer_dispatch` Temporal **signal** + `wait_condition` until a human answers, then resumes the agent via `Command(resume=answer)` — so the human's answer flows back as the agent's *next observation*. There's no per-order gate child; the pause lives inside the agent's loop. Same durable primitive as Pattern A, completely different framework."
+
+**"How does this demo use LangGraph?"**
+> "We use LangGraph as a *framework* here — its graph/loop abstraction for the Dispatch agent's reasoning loop — and let **Temporal** provide durability and persistence, so the LangGraph checkpointer here is just `InMemorySaver`."
 
 ---
 
@@ -146,27 +149,27 @@ On the Agent-in-the-loop tab, **every order** runs a **looping multi-agent LangG
 
 ---
 
-## Cross-Harness — Temporal WITH ADK and LangGraph: "One Runtime Across Two Frameworks"
-**Time: 3–4 min | Tab: 🔀 Cross-Harness · ADK + LangGraph | Best for: the cross-framework point — Temporal joining work no single agent framework can orchestrate**
+## Cross-Framework — Temporal WITH ADK and LangGraph: "One Runtime Across Two Frameworks"
+**Time: 3–4 min | Tab: 🔀 Cross-Framework · ADK + LangGraph | Best for: the cross-framework point — Temporal joining work no single agent framework can coordinate**
 
-This tab runs both frameworks **at once, on the same delivery**. Fleet and Customer assessment runs on **Google ADK**; Dispatch runs on **LangGraph** — each its own Temporal **child workflow**, joined by the Temporal parent. The header shows **both the Google ADK and LangGraph logos** to make the point visible: no agent framework can orchestrate across harnesses; **only Temporal can**. Both in-the-loop patterns you just saw appear together here — the agent-initiated `ask_human` gate (LangGraph) *and* the human-initiated re-reason (ADK + LangGraph) — across the harness boundary.
+This tab runs both frameworks **at once, on the same delivery**. Fleet and Customer assessment runs on **Google ADK**; Dispatch runs on **LangGraph** — each its own Temporal **child workflow**, joined by the Temporal parent. The header shows **both the Google ADK and LangGraph logos** to make the point visible: no agent framework can coordinate across another framework; **only Temporal can**. Both in-the-loop patterns you just saw appear together here — the agent-initiated `ask_human` gate (LangGraph) *and* the human-initiated re-reason (ADK + LangGraph) — across the cross-framework boundary.
 
-**Setup:** On the **🔀 Cross-Harness** tab, click **Start Deliveries** so the fleet is moving.
+**Setup:** On the **🔀 Cross-Framework** tab, click **Start Deliveries** so the fleet is moving.
 
 **Steps:**
-1. Click the **🔀 Cross-Harness** tab, then **Start Deliveries**. Orders flow as before, but each one fans out into two child workflows — ADK for assessment, LangGraph for dispatch.
+1. Click the **🔀 Cross-Framework** tab, then **Start Deliveries**. Orders flow as before, but each one fans out into two child workflows — ADK for assessment, LangGraph for dispatch.
 2. **(Agent → human direction.)** Click **Drop high-value order**. The **LangGraph Dispatch agent calls `ask_human` mid-reasoning** and an **approval card appears over the map**. The answer signals the **dispatch agent's OWN child workflow**: **Approve** → dispatched; **Reject** → held (not dispatched).
-3. **(Human → agent direction.)** Use the customer-change controls: pick an order, select **Address Change** → a new location, click **Submit Change**, then **Approve**. The driver holds, the **cross-harness team re-reasons** — **ADK reassesses, LangGraph re-decides** — and the driver reroutes.
-4. Click **View the cross-harness graph** to show the combined diagram: Temporal parent → ADK child [Fleet ∥ Customer] + LangGraph child [Dispatch + `ask_human`] → driver loop.
-5. Open the **Temporal UI** (localhost:8233). Per cross-harness order there are **separate child workflow histories** — `assess-<order>` (ADK) and `dispatch-<order>` (LangGraph) — under `meltdown-demo`. That split is the **visible cross-harness boundary**.
+3. **(Human → agent direction.)** Use the customer-change controls: pick an order, select **Address Change** → a new location, click **Submit Change**, then **Approve**. The driver holds, the **cross-framework team re-reasons** — **ADK reassesses, LangGraph re-decides** — and the driver reroutes.
+4. Click **View the cross-framework graph** to show the combined diagram: Temporal parent → ADK child [Fleet ∥ Customer] + LangGraph child [Dispatch + `ask_human`] → driver loop.
+5. Open the **Temporal UI** (localhost:8233). Per cross-framework order there are **separate child workflow histories** — `assess-<order>` (ADK) and `dispatch-<order>` (LangGraph) — under `meltdown-demo`. That split is the **visible cross-framework boundary**.
 
 **What to say:**
-> "So far each tab used one framework. This one uses both — on the same order. Fleet and Customer assess on Google ADK; Dispatch decides on LangGraph; each is its own Temporal child workflow, and Temporal joins them. Here's the point: no agent framework can reach across another framework's harness and orchestrate it — only the durable runtime can. Watch both patterns we just saw, now spanning the boundary. The LangGraph dispatch agent calls `ask_human` and escalates — I approve, and it signals dispatch's own child workflow. And when a customer changes an address, the whole cross-harness team re-reasons — ADK reassesses the new location, LangGraph re-decides — then the driver reroutes. Temporal WITH ADK and LangGraph: one runtime, two frameworks, joined durably."
+> "So far each tab used one framework. This one uses both — on the same order. Fleet and Customer assess on Google ADK; Dispatch decides on LangGraph; each is its own Temporal child workflow, and Temporal joins them. Here's the point: no agent framework can reach across another framework and coordinate it — only the durable-execution runtime can. Watch both patterns we just saw, now spanning the boundary. The LangGraph dispatch agent calls `ask_human` and escalates — I approve, and it signals dispatch's own child workflow. And when a customer changes an address, the whole cross-framework team re-reasons — ADK reassesses the new location, LangGraph re-decides — then the driver reroutes. Temporal WITH ADK and LangGraph: one durable-execution runtime, two frameworks, joined durably."
 
 **What you'll see in the Temporal UI:**
-- Under `meltdown-demo`, per cross-harness order: a child workflow `assess-<order>` (the ADK Fleet + Customer assessment) and a child workflow `dispatch-<order>` (the LangGraph Dispatch decision, including the `ask_human` gate). The two separate histories are the cross-harness boundary made visible.
+- Under `meltdown-demo`, per cross-framework order: a child workflow `assess-<order>` (the ADK Fleet + Customer assessment) and a child workflow `dispatch-<order>` (the LangGraph Dispatch decision, including the `ask_human` gate). The two separate histories are the cross-framework boundary made visible.
 
-**Temporal concept to highlight:** Cross-framework orchestration via separate Temporal child workflows (`assess-<order>` ADK + `dispatch-<order>` LangGraph) joined by the parent — orchestration across agent harnesses that no single agent framework can do; both HITL directions (agent→human `ask_human`, human→agent re-reason) spanning the harness boundary.
+**Temporal concept to highlight:** Cross-framework coordination via separate Temporal child workflows (`assess-<order>` ADK + `dispatch-<order>` LangGraph) joined by the parent — coordination across agent frameworks that no single agent framework can do; both HITL directions (agent→human `ask_human`, human→agent re-reason) spanning the cross-framework boundary.
 
 **Operational note:** After any code change, **terminate the `meltdown-demo` workflow (Reset) and restart the worker** — otherwise stale child histories fail to replay.
 
@@ -175,13 +178,13 @@ This tab runs both frameworks **at once, on the same delivery**. Fleet and Custo
 ## Handling Questions
 
 **"How is this different from just using a queue?"**
-> "A queue gives you one retry per message. Temporal gives you a full execution model — retries, timeouts, backoff, heartbeating, child workflows, signals, queries — all in code, not config. The human pause in both patterns is just a `wait_condition` on a signal; the runtime holds it durably for as long as it takes."
+> "A queue gives you one retry per message. Temporal gives you a full execution model — retries, timeouts, backoff, heartbeating, child workflows, signals, queries — all in code, not config. The human pause in both patterns is just a `wait_condition` on a signal; the durable-execution runtime holds it durably for as long as it takes."
 
 **"Why two frameworks?"**
 > "To show the pattern isn't tied to one. Pattern A is Google ADK, Pattern B is LangGraph. Different agent frameworks, same Temporal primitive: a human decision arrives as a durable async signal. In both, the human is a tool the agent's loop reasons over — the pattern is model- and framework-agnostic."
 
 **"Why does the LangGraph code look so much heavier than the ADK code?"**
-> "Because in LangGraph **you own the loop**. `langgraph_agents.py` hand-builds it from primitives — the reason↔act loop and routing, per-tool-call activities (`_run_tools`), message parsing (`_coerce_text` / `_last_text`), the `interrupt()` human node (`_human_node`), and model + tool binding (`_chat_model`). **ADK doesn't need any of that**: its `Runner` bakes the loop in. `TemporalModel` + `activity_tool` run the reason→act→observe cycle and tool-calls-as-activities for you, and structured output comes back through session state. So it's the same durable contract underneath — LangGraph just exposes more of the plumbing. **LangGraph = assemble the loop from primitives; ADK = batteries-included.**"
+> "Because in LangGraph **you own the loop**. `langgraph_agents.py` hand-builds it from primitives — the reason↔act loop and routing, per-tool-call activities (`_run_tools`), message parsing (`_coerce_text` / `_last_text`), the `interrupt()` human node (`_human_node`), and model + tool binding (`_chat_model`). **ADK doesn't need any of that**: its `Runner` runs the loop. (Temporal never runs the loop — the framework does, in both cases.) `TemporalModel` + `activity_tool` make each model call and each tool call a durable Temporal activity, and structured output comes back through session state. So it's the same durable-execution runtime underneath — LangGraph just exposes more of the plumbing. **LangGraph = assemble the loop from primitives; ADK = batteries-included.**"
 
 **"What if Gemini returns something unexpected?"**
 > "The ADK agents submit output via structured tool calls — `tool_submit_assignment` writes a typed object the workflow reads. The LangGraph agent's escalation is a tool call too (`ask_human`). If a step produces garbage or fails, it's a Temporal activity, so it retries with backoff. There's a clear contract."

@@ -1152,7 +1152,7 @@
 <div class="tab-bar">
   <button class="tab active" data-tab="human" onclick="switchTab('human')">🧑 Human → Agent <span class="tab-scenario">Human-initiated</span></button>
   <button class="tab" data-tab="agent" onclick="switchTab('agent')">🤖 Agent → Human <span class="tab-scenario">Agent-initiated</span></button>
-  <button class="tab" data-tab="cross" onclick="switchTab('cross')">🔀 Cross-Harness <span class="tab-scenario">ADK + LangGraph</span></button>
+  <button class="tab" data-tab="cross" onclick="switchTab('cross')">🔀 Cross-Framework <span class="tab-scenario">ADK + LangGraph</span></button>
   <div class="status-area">
     <div id="worker-status" class="worker-indicator online">
       <div class="worker-dot"></div>
@@ -1204,7 +1204,7 @@
     <div class="tab-panel" id="panel-cross">
       <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
       <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
-      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">One system, <b>two harnesses</b>: Fleet + Customer assess on <b>Google ADK</b>, the Dispatch agent runs on <b>LangGraph</b> — each its own Temporal <b>child workflow</b>, joined by Temporal (no agent framework can orchestrate across harnesses). Both HITL directions work: drop a high-value order → the LangGraph dispatch agent calls <code>ask_human</code>; or change an order → the ADK team re-reasons and the driver reroutes.</div>
+      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">One system, <b>two frameworks</b>: Fleet + Customer assess on <b>Google ADK</b>, the Dispatch agent runs on <b>LangGraph</b> — each its own Temporal <b>child workflow</b>, joined by Temporal (no agent framework can orchestrate across frameworks). Both HITL directions work: drop a high-value order → the LangGraph dispatch agent calls <code>ask_human</code>; or change an order → the ADK team re-reasons and the driver reroutes.</div>
       <div style="font-size:11px;color:#7dd3fc;margin-bottom:6px;">🤖 Agent → Human</div>
       <div class="btn-row">
         <button class="btn btn-change" onclick="injectHighValueOrder()">Drop high-value order</button>
@@ -1229,7 +1229,7 @@
         <button class="btn btn-approve" data-role="btn-approve" onclick="approveChange(true)" style="display:none;">Approve</button>
         <button class="btn btn-reject" data-role="btn-reject" onclick="approveChange(false)" style="display:none;">Reject</button>
       </div>
-      <button class="btn" style="margin-top:8px;font-size:12px;background:#15182e;color:#c4b5fd;border:1px solid #465a78;" onclick="openCross()">🔀 View the cross-harness graph</button>
+      <button class="btn" style="margin-top:8px;font-size:12px;background:#15182e;color:#c4b5fd;border:1px solid #465a78;" onclick="openCross()">🔀 View the cross-framework graph</button>
     </div>
   </div>
 
@@ -1312,11 +1312,11 @@
 <!-- ADK agent-team visualizer -->
 <div id="adk-modal" class="graph-modal" style="display:none;">
   <div class="graph-modal-backdrop" onclick="closeAdk()"></div>
-  <div class="graph-modal-card">
+  <div class="graph-modal-card" style="max-width:1480px;">
     <div class="graph-modal-header"><span>🧩 Google ADK · Dispatch Team</span><button onclick="closeAdk()" title="Close">✕</button></div>
     <div class="graph-modal-sub">Human → agent. Each agent is a reason → act → observe LOOP (the ADK Runner); every LLM call and tool call runs as a Temporal activity. One customer change feeds <b>both</b> loops: the driver holds, you approve, the agents re-reason the new location, and the driver reroutes.</div>
     <div class="graph-flow">
-      <svg viewBox="0 0 560 358" width="100%" style="max-width:560px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK dispatch team: a new order fans to the Fleet and Customer agents (each a reason-act loop), they converge on the Dispatch agent which assigns a driver to the delivery loop ending in delivered; a customer-change HITL box off to the left feeds both loops — the agents re-reason and the driver reroutes">
+      <svg viewBox="0 0 560 358" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK dispatch team: a new order fans to the Fleet and Customer agents (each a reason-act loop), they converge on the Dispatch agent which assigns a driver to the delivery loop ending in delivered; a customer-change HITL box off to the left feeds both loops — the agents re-reason and the driver reroutes">
         <defs>
           <marker id="adkah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
           <marker id="adkaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
@@ -1390,11 +1390,11 @@
 <!-- LangGraph graph visualizer -->
 <div id="graph-modal" class="graph-modal" style="display:none;">
   <div class="graph-modal-backdrop" onclick="closeGraph()"></div>
-  <div class="graph-modal-card">
+  <div class="graph-modal-card" style="max-width:1480px;">
     <div class="graph-modal-header"><span>🔗 LangGraph · Dispatch Team</span><button onclick="closeGraph()" title="Close">✕</button></div>
     <div class="graph-modal-sub">The looping agent team. Each reason call and each tool call runs as its own durable Temporal activity; the human is a tool the agent calls mid-loop.</div>
     <div class="graph-flow">
-      <svg viewBox="0 0 540 352" width="100%" style="max-width:540px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="LangGraph dispatch team: Fleet and Customer reason-act loops converge on a Dispatch loop that calls the human as a tool via interrupt()">
+      <svg viewBox="0 0 540 352" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="LangGraph dispatch team: Fleet and Customer reason-act loops converge on a Dispatch loop that calls the human as a tool via interrupt()">
         <defs>
           <marker id="lgah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
           <marker id="lgaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
@@ -1458,11 +1458,11 @@
 
 <div id="cross-modal" class="graph-modal" style="display:none;">
   <div class="graph-modal-backdrop" onclick="closeCross()"></div>
-  <div class="graph-modal-card">
-    <div class="graph-modal-header"><span>🔀 Cross-Harness · ADK + LangGraph</span><button onclick="closeCross()" title="Close">✕</button></div>
-    <div class="graph-modal-sub">One system, <b>two harnesses</b>. Temporal's parent workflow spawns a <b>Google ADK</b> child (Fleet ∥ Customer assess) and a <b>LangGraph</b> child (Dispatch + ask_human), then joins them — no agent framework can orchestrate <i>across</i> harnesses, only Temporal can. The dispatch agent calls the human as an in-loop tool; a customer change re-runs both children.</div>
+  <div class="graph-modal-card" style="max-width:1480px;">
+    <div class="graph-modal-header"><span>🔀 Cross-Framework · ADK + LangGraph</span><button onclick="closeCross()" title="Close">✕</button></div>
+    <div class="graph-modal-sub">One system, <b>two frameworks</b>. Temporal's parent workflow spawns a <b>Google ADK</b> child (Fleet ∥ Customer assess) and a <b>LangGraph</b> child (Dispatch + ask_human), then joins them — no agent framework can orchestrate <i>across</i> frameworks, only Temporal can. The dispatch agent calls the human as an in-loop tool; a customer change re-runs both children.</div>
     <div class="graph-flow">
-      <svg viewBox="0 0 580 372" width="100%" style="max-width:560px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="Cross-harness flow: a Temporal parent workflow spawns a Google ADK child (Fleet parallel Customer assessment) and a LangGraph child (Dispatch agent with an in-loop ask_human human gate), joins their results, commits to the driver delivery loop, and ends in delivered">
+      <svg viewBox="0 0 580 372" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="Cross-framework flow: a Temporal parent workflow spawns a Google ADK child (Fleet parallel Customer assessment) and a LangGraph child (Dispatch agent with an in-loop ask_human human gate), joins their results, commits to the driver delivery loop, and ends in delivered">
         <defs>
           <marker id="cxah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
           <marker id="cxaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
@@ -1484,7 +1484,7 @@
           <path d="M410,176 L428,176" marker-end="url(#cxaha)"/>
           <path d="M428,196 L412,196" marker-end="url(#cxaha)"/>
         </g>
-        <!-- Temporal parent spawns the two harness children (gray, dashed) -->
+        <!-- Temporal parent spawns the two framework children (gray, dashed) -->
         <g fill="none" stroke="#8595ab" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#cxg)" opacity="0.9">
           <path d="M134,92 L148,92"/>
           <path d="M134,184 L168,184"/>
@@ -1501,7 +1501,7 @@
         <text x="72" y="150" text-anchor="middle" fill="#9fb4c7" font-size="8.5">start_child × 2</text>
         <text x="72" y="162" text-anchor="middle" fill="#9fb4c7" font-size="8.5">gather · apply</text>
         <text x="72" y="180" text-anchor="middle" fill="#7c93ab" font-size="8">orchestrates</text>
-        <text x="72" y="191" text-anchor="middle" fill="#7c93ab" font-size="8">across harnesses</text>
+        <text x="72" y="191" text-anchor="middle" fill="#7c93ab" font-size="8">across frameworks</text>
 
         <!-- ADK child workflow (Fleet ∥ Customer) -->
         <rect x="150" y="54" width="280" height="74" rx="10" fill="rgba(142,162,255,0.07)" stroke="rgba(142,162,255,0.5)"/>
@@ -1542,7 +1542,7 @@
     </div>
     <div class="graph-legend">
       <span class="lg-activity">each child = its own Temporal workflow (its own history) · ↻ = a loop</span>
-      <span class="lg-hitl">Temporal joins the two harnesses · human = the agent's in-loop ask_human</span>
+      <span class="lg-hitl">Temporal joins the two frameworks · human = the agent's in-loop ask_human</span>
     </div>
   </div>
 </div>
@@ -1571,10 +1571,11 @@ function switchTab(tabName) {
     brand.href = 'https://langchain-ai.github.io/langgraph/';
     brand.innerHTML = '<img src="/static/img/langgraph-logo.svg" alt="LangGraph" title="LangGraph" style="height:30px;" />';
   } else if (tabName === 'cross') {
-    // Cross-harness: both frameworks, side by side (Temporal stays in the header).
+    // Cross-framework: both frameworks, side by side (Temporal stays in the header).
     brand.href = '#';
     brand.innerHTML =
       '<img src="/static/img/google_adk.png" alt="Google ADK" title="Google ADK — Fleet + Customer" style="height:30px;" />'
+      + '<span class="brand-name" style="margin:0 4px;">Google ADK</span>'
       + '<span style="color:#9fb4c7;margin:0 6px;">+</span>'
       + '<img src="/static/img/langgraph-logo.svg" alt="LangGraph" title="LangGraph — Dispatch" style="height:26px;" />';
   } else {
@@ -1585,7 +1586,7 @@ function switchTab(tabName) {
 
 // Active UI tab → dispatch framework mode sent to the backend.
 function tabMode(tabName) {
-  return tabName === 'agent' ? 'langgraph' : tabName === 'cross' ? 'crossharness' : 'adk';
+  return tabName === 'agent' ? 'langgraph' : tabName === 'cross' ? 'crossframework' : 'adk';
 }
 
 // Collapse/expand the controls block so the agent panel can use the full height.
@@ -1837,7 +1838,7 @@ async function loadLocations() {
     const opts = _rerouteOptions
       .map((o, i) => `<option value="${i}">${o.hotel}</option>`)
       .join('');
-    // Populate every tab's copy (Human + Cross-Harness).
+    // Populate every tab's copy (Human + Cross-Framework).
     document.querySelectorAll('[data-role="reroute-select"]').forEach(sel => {
       sel.innerHTML = opts;
     });
@@ -1845,7 +1846,7 @@ async function loadLocations() {
 }
 loadLocations();
 
-// The customer-change controls are duplicated across the Human and Cross-Harness tabs.
+// The customer-change controls are duplicated across the Human and Cross-Framework tabs.
 // Resolve a control by data-role within the currently-active tab panel so each tab's
 // copy works independently (only one panel is visible at a time).
 function ccEl(role) {
@@ -1980,7 +1981,7 @@ function updateOrders(orders) {
   }).join('');
 }
 
-// --- Update customer change order dropdown (every tab's copy: Human + Cross-Harness) ---
+// --- Update customer change order dropdown (every tab's copy: Human + Cross-Framework) ---
 function updateChangeOrderDropdown(orders) {
   // Only include orders that are not yet delivered
   const active = Object.values(orders).filter(o => o.status !== 'delivered' && o.status !== 'cancelled');
@@ -2252,7 +2253,7 @@ async function pollPendingDispatch() {
     }
     const oid = ids[0], b = pending[oid];
     _gateCurrentOrder = oid;
-    // Cross-harness: the dispatch agent is its own child workflow — remember it so the
+    // Cross-framework: the dispatch agent is its own child workflow — remember it so the
     // approval signal goes straight to that workflow (null for the inline langgraph tab).
     _gateCurrentChildId = b.child_id || null;
     const onum = (b.order_id || oid).replace(/^order-/, '#');

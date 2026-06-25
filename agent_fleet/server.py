@@ -103,11 +103,11 @@ app = FastAPI(title="Meltdown Ice Cream Delivery", lifespan=lifespan)
 # --- Demo control endpoints ---
 
 
-_MODES = ("adk", "langgraph", "crossharness")
+_MODES = ("adk", "langgraph", "crossframework")
 
 
 class StartRequest(BaseModel):
-    # active UI tab: "adk" (Human→Agent), "langgraph" (Agent→Human), "crossharness" (3rd tab)
+    # active UI tab: "adk" (Human→Agent), "langgraph" (Agent→Human), "crossframework" (3rd tab)
     mode: str = "adk"
 
 
@@ -373,8 +373,8 @@ async def approve_change(body: ChangeDecisionRequest):
 class DispatchDecisionRequest(BaseModel):
     order_id: str
     approved: bool
-    # Cross-harness tab: the dispatch agent runs in its own child workflow, so the human
-    # signals THAT child directly. Present only for crossharness entries (see pending-dispatch).
+    # Cross-framework tab: the dispatch agent runs in its own child workflow, so the human
+    # signals THAT child directly. Present only for crossframework entries (see pending-dispatch).
     child_id: str | None = None
 
 
@@ -384,7 +384,7 @@ async def pending_dispatch():
 
     Two shapes merge into one response:
     - langgraph tab (inline): the parent's roll-up already holds the full ask_human payload.
-    - crossharness tab: the dispatch agent runs in its OWN child workflow, so the parent's
+    - crossframework tab: the dispatch agent runs in its OWN child workflow, so the parent's
       roll-up only carries the child id + order context. We do the second hop here — query
       each child's `pending_question` and merge it in (workflows can't query each other).
       Entries whose child isn't currently parked are omitted, so the card stays hidden.
@@ -432,7 +432,7 @@ async def approve_dispatch(body: DispatchDecisionRequest):
     decision = "approve" if body.approved else "reject"
     try:
         if body.child_id:
-            # Cross-harness: the dispatch agent IS its own workflow — signal it directly.
+            # Cross-framework: the dispatch agent IS its own workflow — signal it directly.
             child = _temporal_client.get_workflow_handle(body.child_id)
             await child.signal(LgDispatchWorkflow.answer_dispatch, decision)
         else:
@@ -506,7 +506,7 @@ async def inject_high_value_order():
 
 
 class DispatchModeRequest(BaseModel):
-    # "adk" (Human → Agent), "langgraph" (Agent → Human), "crossharness" (ADK + LangGraph)
+    # "adk" (Human → Agent), "langgraph" (Agent → Human), "crossframework" (ADK + LangGraph)
     mode: str = "adk"
 
 

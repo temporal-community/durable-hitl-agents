@@ -98,7 +98,7 @@ ORDER_INTERVAL_SECONDS = 12
 WARMUP_BURST_ORDERS = 5
 WARMUP_BURST_SECONDS = 2
 
-# Cross-harness tab: each order spawns TWO child workflows (an ADK assess child + a
+# Cross-framework tab: each order spawns TWO child workflows (an ADK assess child + a
 # LangGraph dispatch child), so the full 50-order auto-flow floods the Temporal UI with
 # ~100 short-lived executions. The per-order model is intentional (each agent unit is its
 # own durable workflow) — we just generate fewer, SLOWER orders and skip the warmup burst
@@ -107,9 +107,9 @@ WARMUP_BURST_SECONDS = 2
 # cap also bounds runtime — keep it high enough to outlast the talk). 50 @ 22s ≈ 18 min.
 # The slow interval (not the total) bounds concurrent Gemini load, so raising the total just
 # lengthens the run, it doesn't add peak load. Tunable; ADK/LangGraph tabs are unaffected.
-CROSSHARNESS_MAX_ORDERS = 50
-CROSSHARNESS_ORDER_INTERVAL_SECONDS = 22
-CROSSHARNESS_WARMUP_BURST_ORDERS = 3  # mild quick-start; no 5-order flood
+CROSSFRAMEWORK_MAX_ORDERS = 50
+CROSSFRAMEWORK_ORDER_INTERVAL_SECONDS = 22
+CROSSFRAMEWORK_WARMUP_BURST_ORDERS = 3  # mild quick-start; no 5-order flood
 
 # 4 drivers × 2 orders = 8 slots — a deliberate squeeze so the fleet occasionally runs
 # tight, making the agents' capacity reasoning (and the "commit scarce capacity" escalation)
@@ -126,6 +126,23 @@ WARMUP_HIDDEN = ["driver-d"]
 # that stays the agent's prompt-driven call.
 GATE_REVIEW_VALUE = 2000
 GATE_ESCALATION_SECONDS = 3600  # primary approver window before escalating to backup
+
+# Long-lived entity workflows keep their history bounded by periodically continuing-as-new.
+# A driver runs deliveries indefinitely, so its event history would otherwise grow until it
+# hit Temporal's hard cap (~50K events / 50MB). When history crosses this threshold AND the
+# driver is at a clean quiescent point (idle at base, nothing pending), DriverRouteWorkflow
+# continue-as-news, carrying forward ONLY its live state (identity, position, lifetime
+# delivery count) — history resets to ~0 while the workflow ID stays "route-driver-x", so the
+# parent keeps signaling it transparently. 10K leaves headroom under the 50K cap. Tests
+# override this low (via DriverRouteInput.history_threshold) to force a continue-as-new fast.
+DRIVER_HISTORY_CONTINUE_AS_NEW = 10_000
+
+# Same discipline for the ORCHESTRATOR (MeltdownDemoWorkflow). DORMANT in this demo: the run is
+# bounded by order generation (~50 orders ≈ <2K events), so it completes long before this fires.
+# It's wired so that a parent which DID run indefinitely would keep its own history bounded by
+# continuing-as-new at a quiescent point, re-acquiring its long-lived children by id. Tests set
+# it low (via MeltdownDemoInput.history_threshold) to exercise the decision helpers.
+PARENT_HISTORY_CONTINUE_AS_NEW = 10_000
 
 
 @dataclass
@@ -187,6 +204,9 @@ class DriverRouteWorkflow:
         self._pending_holds: dict[str, PendingHold] = {}
         self._cancel_pending: bool = False
         self._batch_orders: list[DriverRouteOrder] = []
+        # Lifetime delivery count — survives continue-as-new (carried via DriverRouteInput).
+        self._delivered_total: int = 0
+        self._history_threshold: int = DRIVER_HISTORY_CONTINUE_AS_NEW
 
     # --- Signals ---
 
@@ -319,6 +339,7 @@ class DriverRouteWorkflow:
             "path_history": list(self._path_history),
             "pending_orders": len(self._pending_orders),
             "pending_hold_order_ids": list(self._pending_holds.keys()),
+            "lifetime_deliveries": self._delivered_total,
         }
 
     # --- Helpers ---
@@ -350,10 +371,47 @@ class DriverRouteWorkflow:
     async def run(self, inp: DriverRouteInput) -> str:
         driver_id = inp.driver_id
         self._driver_id = driver_id
-        delivered: list[str] = []
-        self._current_lat, self._current_lng = WAREHOUSE.lat, WAREHOUSE.lng
+        delivered: list[str] = []  # order ids delivered in THIS run (resets each generation)
+        # Lifetime delivery count + history threshold survive continue-as-new. getattr keeps
+        # this replay-safe for runs started before these input fields existed.
+        self._delivered_total = getattr(inp, "delivered_total", 0)
+        self._history_threshold = (
+            getattr(inp, "history_threshold", 0) or DRIVER_HISTORY_CONTINUE_AS_NEW
+        )
+        # Resume at the carried-over position on continue-as-new; a fresh driver (0.0/0.0)
+        # starts at the warehouse.
+        seed_lat = getattr(inp, "current_lat", 0.0)
+        seed_lng = getattr(inp, "current_lng", 0.0)
+        if seed_lat and seed_lng:
+            self._current_lat, self._current_lng = seed_lat, seed_lng
+        else:
+            self._current_lat, self._current_lng = WAREHOUSE.lat, WAREHOUSE.lng
 
         while not self._stop:
+            # Long-lived entity pattern: continue-as-new to keep history bounded. We do it
+            # ONLY at a clean quiescent point — top of the loop, idle, nothing pending — so the
+            # carried state fully captures the driver. History resets; the workflow ID is
+            # unchanged, so the parent's signals keep flowing to the new generation. See
+            # DRIVER_HISTORY_CONTINUE_AS_NEW. (continue_as_new raises, so nothing runs after.)
+            if (
+                not self._pending_orders
+                and not self._pending_holds
+                and not self._is_disconnected
+                and workflow.info().get_current_history_length() >= self._history_threshold
+            ):
+                workflow.logger.info(
+                    f"{driver_id} continue-as-new at {self._delivered_total} lifetime "
+                    f"deliveries (history={workflow.info().get_current_history_length()})"
+                )
+                workflow.continue_as_new(
+                    DriverRouteInput(
+                        driver_id=driver_id,
+                        current_lat=self._current_lat,
+                        current_lng=self._current_lng,
+                        delivered_total=self._delivered_total,
+                        history_threshold=self._history_threshold,
+                    )
+                )
             # Wait for an order to arrive or stop signal
             try:
                 await workflow.wait_condition(
@@ -659,6 +717,7 @@ class DriverRouteWorkflow:
 
                     if deliver_result.success:
                         delivered.append(order.order_id)
+                        self._delivered_total += 1  # lifetime count survives continue-as-new
 
                         # Signal parent — guarded so a terminated parent (e.g.
                         # during demo reset) doesn't raise and fail this child
@@ -761,7 +820,10 @@ class DriverRouteWorkflow:
                 retry_policy=FAST_RETRY,
             )
 
-        return f"Driver {driver_id} completed {len(delivered)} deliveries: {delivered}"
+        return (
+            f"Driver {driver_id} completed {self._delivered_total} deliveries "
+            f"(this run: {delivered})"
+        )
 
 
 # --- Order generation child workflow ---
@@ -836,7 +898,7 @@ class OrderGenerationWorkflow:
 
             # Wait before next order — gentle initial burst to fill driver batches,
             # then normal cadence (tuned for the heavier langgraph agent-team mode).
-            # Burst size is per-input (crossharness passes a smaller one); getattr keeps
+            # Burst size is per-input (crossframework passes a smaller one); getattr keeps
             # replay clean for workflows started before the field existed.
             burst = getattr(inp, "warmup_burst_orders", WARMUP_BURST_ORDERS)
             if order_num < inp.max_orders:
@@ -851,19 +913,19 @@ class OrderGenerationWorkflow:
         return f"Order generation complete — {inp.max_orders} orders generated"
 
 
-# --- Cross-harness agent child workflows (3rd tab) ---
+# --- Cross-framework agent child workflows (3rd tab) ---
 #
-# The cross-harness tab proves that only Temporal can orchestrate ACROSS agent
-# harnesses: Fleet+Customer run on ADK (AdkAssessmentWorkflow), the Dispatch agent
+# The cross-framework tab proves that only Temporal can orchestrate ACROSS agent
+# frameworks: Fleet+Customer run on ADK (AdkAssessmentWorkflow), the Dispatch agent
 # runs on LangGraph (LgDispatchWorkflow), and the parent (MeltdownDemoWorkflow) joins
 # them as child workflows. Each child is its own Temporal history in the UI — the
-# visible cross-harness boundary. Children DECIDE; the parent APPLIES (owns driver
+# visible cross-framework boundary. Children DECIDE; the parent APPLIES (owns driver
 # state, signals drivers); driver workflows EXECUTE.
 
 
 @workflow.defn
 class AdkAssessmentWorkflow:
-    """ADK harness child: Fleet ∥ Customer assessment ONLY (no dispatch).
+    """ADK framework child: Fleet ∥ Customer assessment ONLY (no dispatch).
 
     Mirrors the front half of MeltdownDemoWorkflow._run_adk_assignment, but runs the
     assessment-only ParallelAgent and returns just the two assessment strings. Runs on
@@ -931,7 +993,7 @@ class AdkAssessmentWorkflow:
 
 @workflow.defn
 class LgDispatchWorkflow:
-    """LangGraph harness child: the Dispatch agent, with its OWN in-loop HITL.
+    """LangGraph framework child: the Dispatch agent, with its OWN in-loop HITL.
 
     Seeded with the ADK-produced assessments, it runs the dispatch-only graph and may
     call ask_human mid-loop. The human signals THIS workflow directly (`answer_dispatch`);
@@ -994,8 +1056,6 @@ class LgDispatchWorkflow:
                 return LgDispatchOutput(
                     decision="HOLD",
                     reasoning="Held — demo shut down before approval",
-                    fleet_assessment=inp.fleet_assessment,
-                    customer_assessment=inp.customer_assessment,
                     asked_human=True,
                 )
             answer = self._answer
@@ -1023,10 +1083,6 @@ class LgDispatchWorkflow:
             decision="HOLD" if hold else "DISPATCH",
             driver_id=(result.get("chosen_driver") or "").strip(),  # the agent's pick
             reasoning=raw,
-            fleet_assessment=(result.get("fleet_assessment") or inp.fleet_assessment or "").strip(),
-            customer_assessment=(
-                result.get("customer_assessment") or inp.customer_assessment or ""
-            ).strip(),
             asked_human=asked,
         )
 
@@ -1073,15 +1129,17 @@ class MeltdownDemoWorkflow:
         self._pending_dispatch: dict[str, dict] = {}  # order_id -> question (awaiting human)
         # Agent→human in-loop HITL: human answers to an agent's ask_human, keyed by order.
         self._dispatch_answers: dict[str, str] = {}
-        # which framework dispatches orders: "adk" | "langgraph" | "crossharness"
+        # which framework dispatches orders: "adk" | "langgraph" | "crossframework"
         self._dispatch_mode: str = "adk"
-        # Cross-harness mode: live LgDispatchWorkflow child handles, keyed by order_id, so
+        # Cross-framework mode: live LgDispatchWorkflow child handles, keyed by order_id, so
         # shutdown can signal them to stop. The dispatch CHILD owns its own answer_dispatch
         # signal + pending_question query (the human signals the agent's own workflow).
         self._dispatch_children: dict[str, workflow.ChildWorkflowHandle] = {}
-        # Per-order re-reason counter so cross-harness re-reason spawns fresh child ids
+        # Per-order re-reason counter so cross-framework re-reason spawns fresh child ids
         # (Temporal rejects a duplicate id for an already-closed workflow).
         self._rereason_count: dict[str, int] = {}
+        # Continue-as-new threshold for THIS orchestrator (see PARENT_HISTORY_CONTINUE_AS_NEW).
+        self._history_threshold: int = PARENT_HISTORY_CONTINUE_AS_NEW
 
     # --- Signals ---
 
@@ -1224,61 +1282,82 @@ class MeltdownDemoWorkflow:
         # getattr-with-default so a workflow STARTED before this field existed still replays
         # cleanly (Temporal replays old inputs against new code — don't read new fields raw).
         self._dispatch_mode = getattr(inp, "dispatch_mode", "adk")
-
-        # Initialize driver state
-        for driver_id in DRIVER_IDS:
-            self._driver_orders[driver_id] = []
-            self._driver_last_position[driver_id] = (WAREHOUSE.lat, WAREHOUSE.lng)
-
-        # Hide drivers D-E in FleetState during warmup so
-        # tool_get_fleet_status only shows A-C to the LLM
-        await workflow.execute_activity(
-            set_warmup_hidden,
-            args=[WARMUP_HIDDEN, True],
-            task_queue=DELIVERY_QUEUE,
-            start_to_close_timeout=timedelta(seconds=10),
-            retry_policy=FAST_RETRY,
+        self._history_threshold = (
+            getattr(inp, "history_threshold", 0) or PARENT_HISTORY_CONTINUE_AS_NEW
         )
+        # Long-lived ORCHESTRATOR: a continued generation reseeds its live state and RE-ACQUIRES
+        # its still-running children by id instead of restarting them (they survived this
+        # parent's continue-as-new because they were started ParentClosePolicy.ABANDON). DORMANT
+        # in the demo — the bounded run never reaches the threshold; this path is exercised by
+        # unit tests of the pure helpers. See _build_continue_as_new_input / _apply_continuation.
+        continued = workflow.info().continued_run_id is not None
 
-        # Start 5 driver child workflows
-        self._route_handles = {}
-        for driver_id in DRIVER_IDS:
-            handle = await workflow.start_child_workflow(
-                DriverRouteWorkflow.run,
-                DriverRouteInput(driver_id=driver_id),
-                id=f"route-{driver_id}",
-                static_summary=f"{driver_id} — delivery loop",
-            )
-            self._route_handles[driver_id] = handle
-
-        # Start order generation as a child workflow. Cross-harness mode generates fewer,
-        # slower orders (each order = 2 child workflows) so the Temporal UI stays legible;
-        # the ADK/LangGraph tabs keep the full fleet flow. Seeded from the start-time mode.
-        if self._dispatch_mode == "crossharness":
-            gen_max = min(inp.max_orders, CROSSHARNESS_MAX_ORDERS)
-            gen_interval = CROSSHARNESS_ORDER_INTERVAL_SECONDS
-            gen_burst = CROSSHARNESS_WARMUP_BURST_ORDERS
+        if continued:
+            self._apply_continuation(inp)
+            self._route_handles = {
+                d: workflow.get_external_workflow_handle(f"route-{d}") for d in DRIVER_IDS
+            }
+            self._order_gen_handle = workflow.get_external_workflow_handle("order-generation")
         else:
-            gen_max = inp.max_orders
-            gen_interval = ORDER_INTERVAL_SECONDS
-            gen_burst = WARMUP_BURST_ORDERS
-        self._order_gen_handle = await workflow.start_child_workflow(
-            OrderGenerationWorkflow.run,
-            OrderGenerationInput(
-                max_orders=gen_max,
-                order_interval_seconds=gen_interval,
-                warmup_burst_orders=gen_burst,
-            ),
-            id="order-generation",
-            static_summary="Order generation + agent assignment",
-        )
+            # Fresh start (the demo path) — initialize driver state and start the children.
+            for driver_id in DRIVER_IDS:
+                self._driver_orders[driver_id] = []
+                self._driver_last_position[driver_id] = (WAREHOUSE.lat, WAREHOUSE.lng)
+
+            # Hide drivers D-E in FleetState during warmup so
+            # tool_get_fleet_status only shows A-C to the LLM
+            await workflow.execute_activity(
+                set_warmup_hidden,
+                args=[WARMUP_HIDDEN, True],
+                task_queue=DELIVERY_QUEUE,
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=FAST_RETRY,
+            )
+
+            # Start driver child workflows. ParentClosePolicy.ABANDON so a parent
+            # continue-as-new does NOT terminate these long-lived drivers; the demo stops them
+            # explicitly at shutdown, so normal teardown is unchanged.
+            self._route_handles = {}
+            for driver_id in DRIVER_IDS:
+                handle = await workflow.start_child_workflow(
+                    DriverRouteWorkflow.run,
+                    DriverRouteInput(driver_id=driver_id),
+                    id=f"route-{driver_id}",
+                    static_summary=f"{driver_id} — delivery loop",
+                    parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+                )
+                self._route_handles[driver_id] = handle
+
+            # Start order generation as a child workflow. Cross-framework mode generates fewer,
+            # slower orders (each order = 2 child workflows) so the Temporal UI stays legible;
+            # the ADK/LangGraph tabs keep the full fleet flow. Seeded from the start-time mode.
+            if self._dispatch_mode == "crossframework":
+                gen_max = min(inp.max_orders, CROSSFRAMEWORK_MAX_ORDERS)
+                gen_interval = CROSSFRAMEWORK_ORDER_INTERVAL_SECONDS
+                gen_burst = CROSSFRAMEWORK_WARMUP_BURST_ORDERS
+            else:
+                gen_max = inp.max_orders
+                gen_interval = ORDER_INTERVAL_SECONDS
+                gen_burst = WARMUP_BURST_ORDERS
+            self._order_gen_handle = await workflow.start_child_workflow(
+                OrderGenerationWorkflow.run,
+                OrderGenerationInput(
+                    max_orders=gen_max,
+                    order_interval_seconds=gen_interval,
+                    warmup_burst_orders=gen_burst,
+                ),
+                id="order-generation",
+                static_summary="Order generation + agent assignment",
+                parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+            )
 
         # Process new orders and customer changes concurrently
         order_task = asyncio.create_task(self._process_new_orders())
         change_task = asyncio.create_task(self._process_customer_changes())
 
-        # Wait for order generation to complete
-        await self._order_gen_handle
+        # Wait for order generation to complete — but continue-as-new if THIS parent's own
+        # history grows past the threshold at a quiescent point (dormant in the demo).
+        await self._await_order_gen_or_continue(continued)
 
         # Drain any remaining orders that arrived via signal before stopping
         while self._pending_new_orders:
@@ -1299,7 +1378,7 @@ class MeltdownDemoWorkflow:
         # commit. Only stragglers past the window are cancelled. (Exceptions are surfaced by
         # the per-task done callback in _assign_order, not swallowed.)
         if self._langgraph_tasks:
-            # Cross-harness mode parks its durable wait INSIDE the dispatch child, so
+            # Cross-framework mode parks its durable wait INSIDE the dispatch child, so
             # _routes_done can't unblock it — signal each parked child to stop so it returns
             # a HOLD-default and the parent task's `await lg_handle` unblocks cleanly.
             for handle in list(self._dispatch_children.values()):
@@ -1332,6 +1411,84 @@ class MeltdownDemoWorkflow:
                 results.append(f"{driver_id}: {e}")
 
         return f"Meltdown demo complete. Results: {results}"
+
+    # --- Continue-as-new (long-lived orchestrator; dormant in the demo) ---
+
+    def _parent_quiescent(self) -> bool:
+        """True when the parent holds no in-flight assignment work — the only point at which it
+        is safe to continue-as-new without losing an in-progress decision: nothing waiting to be
+        assigned, no dispatch parked on a human, and every fire-and-forget assignment task done.
+        Pure/synchronous so it can be unit-tested without a worker."""
+        return (
+            not self._pending_new_orders
+            and not self._pending_dispatch
+            and all(t.done() for t in self._langgraph_tasks)
+        )
+
+    def _parent_should_continue_as_new(self, history_length: int) -> bool:
+        """Continue-as-new only at a quiescent point, once this parent's own history crosses the
+        threshold. DORMANT in the demo (threshold high; the bounded run finishes first). Pure so
+        it can be unit-tested by passing a history length."""
+        return self._parent_quiescent() and history_length >= self._history_threshold
+
+    def _build_continue_as_new_input(self) -> MeltdownDemoInput:
+        """Snapshot the parent's LIVE state for the next generation: the capacity ledger,
+        counters, and mode. NOT carried: child handles (re-acquired by id) and per-order UI
+        metadata (rebuilt as orders flow). max_orders=0 because order generation is a surviving
+        child — the new generation re-acquires it, it does not restart it. Pure → unit-testable."""
+        return MeltdownDemoInput(
+            escalation_enabled=False,
+            max_orders=0,
+            dispatch_mode=self._dispatch_mode,
+            history_threshold=self._history_threshold,
+            driver_orders={d: list(v) for d, v in self._driver_orders.items()},
+            orders_generated=self._orders_generated,
+            rereason_counts=dict(self._rereason_count),
+        )
+
+    def _apply_continuation(self, inp: MeltdownDemoInput) -> None:
+        """Reseed the parent's live state from a carried input on a continued run. Pure →
+        unit-testable. (getattr-read so a pre-field run still replays.)"""
+        carried_orders = getattr(inp, "driver_orders", {}) or {}
+        self._driver_orders = {d: list(carried_orders.get(d, [])) for d in DRIVER_IDS}
+        self._driver_last_position = {d: (WAREHOUSE.lat, WAREHOUSE.lng) for d in DRIVER_IDS}
+        self._orders_generated = getattr(inp, "orders_generated", 0)
+        self._rereason_count = dict(getattr(inp, "rereason_counts", {}) or {})
+
+    async def _drain_order_gen(self) -> str:
+        """Await the order-generation child to completion (fresh runs only — the handle is an
+        awaitable child there)."""
+        return await self._order_gen_handle
+
+    async def _await_order_gen_or_continue(self, continued: bool) -> None:
+        """Wait for order generation to finish, but continue-as-new if this parent's own history
+        grows past PARENT_HISTORY_CONTINUE_AS_NEW at a quiescent point — the long-lived-
+        orchestrator analog of the driver's continue-as-new. DORMANT in the demo: the run
+        completes long before the threshold, so this behaves exactly like the previous bare
+        `await self._order_gen_handle`.
+
+        Fresh runs hold an awaitable child handle; drain it in a task so we can also poll for a
+        continue-as-new opportunity. On a continued run the handle is external (no awaitable
+        result), so completion is driven by the continue-as-new / stop path (dormant)."""
+        gen = None
+        if not continued and self._order_gen_handle is not None:
+            gen = asyncio.create_task(self._drain_order_gen())
+        while True:
+            try:
+                await workflow.wait_condition(
+                    lambda: gen is not None and gen.done(),
+                    timeout=timedelta(seconds=30),
+                )
+            except TimeoutError:
+                pass
+            if gen is not None and gen.done():
+                gen.result()  # propagate any error from the order-gen child
+                return
+            if self._parent_should_continue_as_new(workflow.info().get_current_history_length()):
+                if gen is not None and not gen.done():
+                    gen.cancel()
+                workflow.logger.info("Parent continue-as-new (history bound) — handing off")
+                workflow.continue_as_new(self._build_continue_as_new_input())
 
     # --- ADK inline assignment (live mode) ---
 
@@ -1530,14 +1687,14 @@ class MeltdownDemoWorkflow:
             self._langgraph_tasks.append(task)
             return
 
-        # Cross-harness mode: Temporal orchestrates across harnesses — an ADK child
+        # Cross-framework mode: Temporal orchestrates across frameworks — an ADK child
         # produces the assessments, a LangGraph child makes the dispatch decision. Run
         # concurrently (reusing _langgraph_tasks so the existing shutdown drain covers it)
         # so the order loop and fleet keep moving while the agents (and maybe a human)
         # deliberate in their child workflows.
-        if self._dispatch_mode == "crossharness":
+        if self._dispatch_mode == "crossframework":
             task = asyncio.create_task(
-                self._run_crossharness_assignment(order, self._least_loaded_driver(), onum)
+                self._run_crossframework_assignment(order, self._least_loaded_driver(), onum)
             )
             task.add_done_callback(self._on_langgraph_task_done)
             self._langgraph_tasks.append(task)
@@ -1811,7 +1968,7 @@ class MeltdownDemoWorkflow:
         driver_id: str = "",
         hold: bool = False,
     ) -> None:
-        """Surface the LangGraph/cross-harness team's reasoning in the Fleet/Customer/Dispatch
+        """Surface the LangGraph/cross-framework team's reasoning in the Fleet/Customer/Dispatch
         panels. When `order` is given, the Dispatch (resolver) card shows the concrete
         assignment — `Order #N → driver-X — venue` — mirroring the ADK path, instead of just
         the terse decision text."""
@@ -1882,18 +2039,18 @@ class MeltdownDemoWorkflow:
         )
         workflow.logger.info(f"[#{onum}] {order.order_id} rejected at dispatch gate")
 
-    # --- Cross-harness assignment (3rd tab): ADK assess child ∥ LangGraph dispatch child ---
+    # --- Cross-framework assignment (3rd tab): ADK assess child ∥ LangGraph dispatch child ---
 
-    async def _run_crossharness_assignment(
+    async def _run_crossframework_assignment(
         self, order: OrderAssignmentResult, driver_id: str, onum: str
     ) -> None:
-        """Temporal orchestrates ACROSS harnesses: an ADK child produces the Fleet+Customer
+        """Temporal orchestrates ACROSS frameworks: an ADK child produces the Fleet+Customer
         assessments, then a LangGraph child (which owns its own ask_human HITL) makes the
         dispatch decision. The children DECIDE; this parent APPLIES the result via the same
         _commit_assignment / _reject_order used by the other tabs (the parent owns driver
         state and signals the DriverRouteWorkflow). Sequential: the dispatch child needs the
-        assessments as input. Child ids `assess-`/`dispatch-<order_id>` give each harness its
-        own visible Temporal history — the cross-harness boundary.
+        assessments as input. Child ids `assess-`/`dispatch-<order_id>` give each framework its
+        own visible Temporal history — the cross-framework boundary.
         """
         await self._dispatch_via_children(order, driver_id, onum, suffix="")
 
@@ -1905,7 +2062,7 @@ class MeltdownDemoWorkflow:
         suffix: str,
         apply: bool = True,
     ) -> None:
-        """Shared core for cross-harness dispatch — used for the initial assignment and for
+        """Shared core for cross-framework dispatch — used for the initial assignment and for
         human→agent re-reason (which passes a revision `suffix` to get fresh child ids).
 
         apply=True commits/rejects via the parent (initial assignment). apply=False only
@@ -1918,7 +2075,7 @@ class MeltdownDemoWorkflow:
             and len(self._driver_orders.get(d, [])) < DRIVER_CAPACITY
         )
 
-        # 1. ADK harness child — Fleet ∥ Customer assessment only.
+        # 1. ADK framework child — Fleet ∥ Customer assessment only.
         adk_handle = await workflow.start_child_workflow(
             AdkAssessmentWorkflow.run,
             ReasonAboutAssignmentInput(
@@ -1934,11 +2091,11 @@ class MeltdownDemoWorkflow:
                 disconnected_agents=list(self._disconnected_agents),
             ),
             id=f"assess-{order.order_id}{suffix}",
-            static_summary=f"[#{onum}] ADK harness — Fleet ∥ Customer assessment",
+            static_summary=f"[#{onum}] ADK framework — Fleet ∥ Customer assessment",
         )
         assessment = await adk_handle
 
-        # 2. LangGraph harness child — dispatch decision + its own ask_human HITL.
+        # 2. LangGraph framework child — dispatch decision + its own ask_human HITL.
         child_id = f"dispatch-{order.order_id}{suffix}"
         lg_handle = await workflow.start_child_workflow(
             LgDispatchWorkflow.run,
@@ -1957,7 +2114,7 @@ class MeltdownDemoWorkflow:
                 eligible_drivers=self._eligible_drivers(),  # the LG dispatch agent picks from these
             ),
             id=child_id,
-            static_summary=f"[#{onum}] LangGraph harness — dispatch decision",
+            static_summary=f"[#{onum}] LangGraph framework — dispatch decision",
         )
         self._dispatch_children[order.order_id] = lg_handle
         # Roll-up for the server: child_id + order context. The actual ask_human question
@@ -1983,9 +2140,11 @@ class MeltdownDemoWorkflow:
         chosen = (result.driver_id or "").strip()
         final_driver = chosen if chosen in self._eligible_drivers() else driver_id
         await self._publish_langgraph_reasoning(
+            # Reuse the assessments the parent already holds (from the ADK child) instead of
+            # re-reading them off the dispatch result — keeps LgDispatchOutput thin.
             {
-                "fleet_assessment": result.fleet_assessment,
-                "customer_assessment": result.customer_assessment,
+                "fleet_assessment": assessment.fleet_assessment,
+                "customer_assessment": assessment.customer_assessment,
             },
             result.reasoning,
             order=order,
@@ -1995,18 +2154,18 @@ class MeltdownDemoWorkflow:
         if not apply:
             return
         if result.decision == "HOLD":
-            workflow.logger.info(f"[#{onum}] cross-harness held {order.order_id} (human)")
+            workflow.logger.info(f"[#{onum}] cross-framework held {order.order_id} (human)")
             await self._reject_order(order, onum)
         else:
             workflow.logger.info(
-                f"[#{onum}] cross-harness dispatch → {final_driver}"
+                f"[#{onum}] cross-framework dispatch → {final_driver}"
                 + (f" (agent chose {chosen})" if chosen else " (fallback)")
             )
             await self._commit_assignment(order, final_driver, False, onum)
 
-    async def _rereason_crossharness(self, order_id: str, note: str) -> None:
-        """Human→agent HITL across harnesses: the human approved a new location, so re-run
-        the CROSS-HARNESS flow — ADK Fleet+Customer reassess the new spot, then the LangGraph
+    async def _rereason_crossframework(self, order_id: str, note: str) -> None:
+        """Human→agent HITL across frameworks: the human approved a new location, so re-run
+        the CROSS-FRAMEWORK flow — ADK Fleet+Customer reassess the new spot, then the LangGraph
         Dispatch agent re-decides — and publish that reassessment to the agent panels. Like
         _rereason_order (the ADK-tab version), this is reasoning-only: the held driver reroutes
         via the caller's update_order/resolve_update signals, so we pass apply=False. Reads the
@@ -2021,7 +2180,9 @@ class MeltdownDemoWorkflow:
             PublishAgentEventInput(
                 agent_name="customer_agent",
                 event_type="customer_request",
-                content=f"Human revised {order_id}: {note} — agents re-reasoning across harnesses.",
+                content=(
+                    f"Human revised {order_id}: {note} — agents re-reasoning across frameworks."
+                ),
                 summary=f"Human revised {order_id} — re-reasoning",
             ),
             start_to_close_timeout=timedelta(seconds=10),
@@ -2214,8 +2375,8 @@ class MeltdownDemoWorkflow:
                     o["delivery_lng"] = change.new_lng
                     if change.new_hotel is not None:
                         o["hotel"] = change.new_hotel
-                if self._dispatch_mode == "crossharness":
-                    await self._rereason_crossharness(change.order_id, change.new_details)
+                if self._dispatch_mode == "crossframework":
+                    await self._rereason_crossframework(change.order_id, change.new_details)
                 else:
                     await self._rereason_order(change.order_id, change.new_details)
 

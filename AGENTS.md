@@ -29,20 +29,42 @@ fleet in **downtown San Francisco**:
   — the answer flows back as the agent's next observation. **No per-order gate child.**
   The thesis: the human is just another tool the agent calls — but a durable, async
   one; on Temporal that tool call is a signal.
-- **Cross-Harness — Temporal WITH ADK and LangGraph (the 3rd tab)** — the same
-  order assignment, but split across **two harnesses orchestrated as child
+- **Cross-Framework — Temporal WITH ADK and LangGraph (the 3rd tab)** — the same
+  order assignment, but split across **two frameworks orchestrated as child
   workflows** under one Temporal parent: an **ADK** team does the assessment, then a
   **LangGraph** graph does the dispatch (with its in-loop `ask_human`). Selected by
-  the UI **tab** (`set_dispatch_mode` → `"crossharness"`), applying to all orders.
-  The point is collaborative, not competitive: Temporal is the durable backbone that
-  lets an ADK agent team and a LangGraph dispatch graph hand off to each other across
-  process boundaries while staying replay-safe. **Division of labour:** the agent
+  the UI **tab** (`set_dispatch_mode` → `"crossframework"`), applying to all orders.
+  The point is collaborative, not competitive: Temporal is the durable-execution
+  runtime (the substrate) that lets an ADK agent team and a LangGraph dispatch graph
+  hand off to each other across process boundaries while staying replay-safe. **Division of labour:** the agent
   children **DECIDE**; the parent **APPLIES**. The ADK child assesses (Fleet ∥
   Customer), the LangGraph child dispatches (and may park on `ask_human`), and only
   the parent ever owns driver state or signals `DriverRouteWorkflow` — the agent
   children never signal drivers directly. Human→agent re-reason works here too: an
   approved address change re-runs both children in reasoning-only mode while the held
   driver reroutes via the existing update/resolve signals.
+
+**Terminology (keep these terms straight in code + docs).** The spine is two parts:
+**framework** and **durable-execution runtime / substrate**. *Frameworks own the loop*
+(observe → reason → act) and the agent abstractions — **ADK and LangGraph** — and each
+framework stops at its own edge; Temporal never runs the loop. *Temporal is the
+**durable-execution runtime** (the substrate)* beneath the frameworks: persistence,
+retries, replay, HITL waits (`wait_condition`/`signal`), versioning. It is the layer
+everything runs on — woven throughout, not a component beside the others — and the **only
+thing that coordinates ACROSS frameworks**. Canonical sentence: *"Frameworks own the loop
+— ADK, LangGraph. Temporal is the durable-execution runtime (the substrate) beneath them,
+and the only thing that coordinates across them."* Naming rules: do **not** call Temporal
+a "control plane" / "agent control plane" (durable execution is the substrate that control
+planes run *on* — the only allowed control-plane phrase is the architect line, *"the same
+durable execution Temporal uses to build its own cloud control plane"*); always **qualify
+"runtime"** as "durable-execution runtime" (or say "substrate") — never leave it bare or
+ambiguous; do **not** add an "execution" bucket/section; prefer **"framework"** over
+"harness" (do not build the docs on "harness" — it's a contested term; if it must appear,
+use it only in the wide sense, "everything around the model, including the loop"); use
+**"framework"** not "scaffolding". **LangGraph note:** in **this repo we use LangGraph as a
+*framework*** — its graph/loop abstraction for the dispatch agent's reasoning loop — and let
+**Temporal** provide durability and persistence, so the LangGraph checkpointer is just
+`InMemorySaver`.
 
 The disconnect/recovery scenarios (agent disconnect, driver disconnect, tool
 degradation) are **not** part of the talk's two demos. The underlying signals,
@@ -91,6 +113,14 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   reconnected. Driver completes delivery, stays at venue, can't report back until reconnected.
   On reconnect, `sync_driver_position` activity reads actual position from FleetState — no
   teleporting. Completed deliveries are not repeated; batch continues from next pending order.
+  As a long-lived workflow it bounds its own history with **continue-as-new**: at an idle,
+  drained loop-top once history crosses `DRIVER_HISTORY_CONTINUE_AS_NEW` (10K) it hands off to a
+  fresh run (same id) carrying only identity, position, and lifetime delivery count. The
+  orchestrator `MeltdownDemoWorkflow` is wired the same way (`PARENT_HISTORY_CONTINUE_AS_NEW`;
+  children started `ParentClosePolicy.ABANDON`, re-acquired by id on a continued run via the
+  `_build_continue_as_new_input` / `_apply_continuation` / `_parent_should_continue_as_new`
+  helpers) but is **dormant** — the demo run is bounded by order generation. Driver c-a-n is
+  integration-tested; the parent's helpers are unit-tested (see `tests/test_workflows.py`).
   HITL hold pattern: this is **operator-in-the-loop**, not agent-in-the-loop —
   the change is initiated externally (operator submits a customer change via REST)
   and a human supervisor approves it. The ADK agents never see the change; the
@@ -124,7 +154,7 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   decide. That assessment is a **looping multi-agent** LangGraph team (`build_dispatch_team_graph`,
   registered as `GRAPH_NAME = "dispatch_team"`) compiled via `temporalio.contrib.langgraph`, the
   mirror of the ADK team: Fleet and Customer are real reason→act→eval **ReAct loops** that fan out
-  from `START`, then converge on a Dispatch loop. (The crossharness tab uses a
+  from `START`, then converge on a Dispatch loop. (The crossframework tab uses a
   dispatch-only sibling graph — `DISPATCH_ONLY_GRAPH_NAME = "dispatch_only"`,
   `build_dispatch_only_graph()`: `START → dispatch_reason → {dispatch_human →
   dispatch_reason | END}`, reusing the existing `dispatch_reason` / `dispatch_human` /
@@ -140,7 +170,7 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   and Customer uses `get_order_priorities` + `search_venue_events` in BOTH frameworks across all
   three tabs — `search_venue_events` (Gemini `GoogleSearch` grounding behind a Temporal activity)
   is the LangGraph analog of ADK's built-in `google_search`, so the agents reason over the same
-  inputs regardless of harness.
+  inputs regardless of framework.
   **The Dispatch agent decides the driver:** it binds a `submit_dispatch(driver_id, decision)`
   tool (ADK: `tool_submit_assignment`) and picks a driver from the eligible set seeded into
   state (`eligible_drivers`); `_run_langgraph_assignment` / `LgDispatchWorkflow` commit the
@@ -161,13 +191,13 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   unblocks on `_routes_done` (returns `None`) so demo shutdown can't hang a parked workflow.
   LangGraph callables that run inline in the workflow are `async` because LangGraph offloads sync
   callables to a thread executor, which Temporal's deterministic event loop forbids.
-- **Cross-Harness — ADK child → LangGraph child** (`workflows.py`,
-  `agents.py`, `langgraph_agents.py`): the crossharness path, selected by the
-  crossharness tab for **all** orders. `_assign_order` branches on
-  `dispatch_mode == "crossharness"` to `asyncio.create_task(_run_crossharness_assignment(...))`,
+- **Cross-Framework — ADK child → LangGraph child** (`workflows.py`,
+  `agents.py`, `langgraph_agents.py`): the crossframework path, selected by the
+  crossframework tab for **all** orders. `_assign_order` branches on
+  `dispatch_mode == "crossframework"` to `asyncio.create_task(_run_crossframework_assignment(...))`,
   reusing the same `_langgraph_tasks` list, `_on_langgraph_task_done` callback, and
   shutdown drain as Pattern B — the fleet keeps moving while the children decide.
-  `_run_crossharness_assignment` calls `_dispatch_via_children(order, driver_id, onum,
+  `_run_crossframework_assignment` calls `_dispatch_via_children(order, driver_id, onum,
   suffix, apply=True)`, which orchestrates two child workflows on the parent's task
   queue (`WORKFLOWS_QUEUE`):
   (1) starts **`AdkAssessmentWorkflow`** (id `assess-<order_id>`) and awaits its
@@ -180,12 +210,12 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   `_commit_assignment`. **Ownership stays with the parent**: the children DECIDE; the
   parent APPLIES (owns driver state, signals `DriverRouteWorkflow` via
   `_commit_assignment` / `_reject_order`); the children never signal drivers.
-  Human→agent re-reason: `_rereason_crossharness(order_id, note)` re-runs
+  Human→agent re-reason: `_rereason_crossframework(order_id, note)` re-runs
   `_dispatch_via_children` with a `-rev<n>` id suffix (`self._rereason_count`) and
   `apply=False` (reasoning-only — the held driver reroutes via the existing
   `update_order` / `resolve_update` signals). The address-change branch in
-  `_process_customer_change` dispatches to `_rereason_crossharness` when
-  `dispatch_mode == "crossharness"` (else `_rereason_order` for the adk tab).
+  `_process_customer_change` dispatches to `_rereason_crossframework` when
+  `dispatch_mode == "crossframework"` (else `_rereason_order` for the adk tab).
   On shutdown the parent signals `LgDispatchWorkflow.stop` to each pending child so a
   parked child returns cleanly. New `__init__` state: `self._dispatch_children`
   (`dict[str, ChildWorkflowHandle]`) and `self._rereason_count` (`dict[str, int]`).
@@ -214,14 +244,14 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   `GoogleAdkPlugin` is on both workflow and agents workers (sandbox + determinism on
   workflow side, `invoke_model` activity on agents side) — and already covers the ADK
   child (`AdkAssessmentWorkflow`). The workflow worker (`WORKFLOWS_QUEUE` /
-  `create_workflow_worker`) also registers the two cross-harness child workflows,
+  `create_workflow_worker`) also registers the two cross-framework child workflows,
   `AdkAssessmentWorkflow` and `LgDispatchWorkflow`. `LangGraphPlugin(graphs={...})` is
   on the **workflow** worker; it stays **one** plugin but now registers **two** graphs:
   `GRAPH_NAME = "dispatch_team"` (the looping multi-agent team — Fleet ∥ Customer
   reason→act→eval loops → Dispatch, run inline in the parent for every langgraph-tab
   order, with the in-loop `ask_human` tool) and
   `DISPATCH_ONLY_GRAPH_NAME: build_dispatch_only_graph()` (the dispatch-only graph the
-  `LgDispatchWorkflow` child compiles for the crossharness tab).
+  `LgDispatchWorkflow` child compiles for the crossframework tab).
   Its node activities (the fleet/customer/dispatch agent Gemini reason calls and each tool call)
   execute on that worker. Agents use the upstream
   `TemporalModel` with `summary_fn=_build_summary` — `_build_summary`
@@ -232,14 +262,14 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   workflow worker for local activity execution (UI projection with minimal history).
 - **ADK agents** (`agents.py`): all three kept — Fleet Agent + Customer Agent (parallel) →
   Dispatch Agent (sequential) — this is the multi-agent reasoning used for order assignment when
-  the **adk tab** is selected (Pattern A's substrate). The langgraph tab routes every order to the
+  the **adk tab** is selected (Pattern A's agent framework). The langgraph tab routes every order to the
   Pattern B LangGraph team instead; the framework is chosen by the tab, not per-order. The ADK path
   runs inline in the workflow via `_run_adk_assignment()`, committing the driver the **Dispatch
   agent picked** (`tool_submit_assignment`; least-loaded fallback) with no dispatch gate involved.
   The same team is re-run on an approved customer **address change**:
   `_process_customer_change` calls `_rereason_order` → `_run_adk_assignment` again so the agents
   re-reason the order for the new location, then the held driver reroutes. The
-  crossharness tab reuses a slimmed variant: `create_assessment_team_agent()` builds a
+  crossframework tab reuses a slimmed variant: `create_assessment_team_agent()` builds a
   `ParallelAgent` of just Fleet ∥ Customer (reusing
   `create_assignment_fleet_agent` / `create_assignment_customer_agent`, dropping the
   Dispatch/`SequentialAgent` phase), which the `AdkAssessmentWorkflow` child runs while
@@ -261,9 +291,9 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   calls `ask_human` mid-loop and the parent surfaces the question), `POST /api/approve-dispatch`
   (signals the parent `MeltdownDemoWorkflow.answer_dispatch` — the durable async endpoint the
   agent's in-loop `ask_human` interrupt is parked on; no gate child involved).
-  Cross-Harness wiring: `_MODES` adds `"crossharness"` (guarded in `StartRequest` /
+  Cross-Framework wiring: `_MODES` adds `"crossframework"` (guarded in `StartRequest` /
   `DispatchModeRequest` / `start_demo`). `GET /api/pending-dispatch` now handles the
-  roll-up entries the crossharness path puts in `pending_dispatch`: when an entry has
+  roll-up entries the crossframework path puts in `pending_dispatch`: when an entry has
   `via_child` / `child_id`, the server does a **second** query — to that child's
   `LgDispatchWorkflow.pending_question` — and merges the agent/question in (workflows
   can't query each other, so the server bridges). `POST /api/approve-dispatch`
@@ -273,12 +303,12 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   endpoints (`/api/disconnect-crew`, `/api/disconnect-agent`, and reconnect variants) still write
   FleetState and signal workflows but are not wired to UI controls.
 - **Frontend** (`frontend/index.html`): single-file SPA with Leaflet map, WebSocket state feed,
-  agent reasoning panels. A third **"🔀 Cross-Harness"** tab (`data-tab="cross"`) maps
-  to `dispatch_mode "crossharness"`; `tabMode()` is now a 3-way map (adk / langgraph /
-  crossharness). The customer-change controls are de-duplicated across the Human +
+  agent reasoning panels. A third **"🔀 Cross-Framework"** tab (`data-tab="cross"`) maps
+  to `dispatch_mode "crossframework"`; `tabMode()` is now a 3-way map (adk / langgraph /
+  crossframework). The customer-change controls are de-duplicated across the Human +
   Cross tabs via `data-role` attributes plus an active-panel `ccEl()` scope helper. On
   the cross tab the header shows **both** the ADK and LangGraph logos, and a single
-  "View the cross-harness graph" combined SVG modal (`#cross-modal` / `openCross` /
+  "View the cross-framework graph" combined SVG modal (`#cross-modal` / `openCross` /
   `closeCross`) renders the ADK→LangGraph handoff.
 - **PydanticPayloadConverter** on `Client.connect` in both server and worker for `LlmResponse`
   serialization.
@@ -286,8 +316,8 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
 ## Key conventions
 
 - Dataclass models for all Temporal payloads (`models.py`). `dispatch_mode` is a
-  3-value field (`"adk"` / `"langgraph"` / `"crossharness"`, set by the active UI tab;
-  documented on `MeltdownDemoInput.dispatch_mode`). The cross-harness child contracts
+  3-value field (`"adk"` / `"langgraph"` / `"crossframework"`, set by the active UI tab;
+  documented on `MeltdownDemoInput.dispatch_mode`). The cross-framework child contracts
   are dataclasses with **all fields defaulted for replay-safety**:
   `AdkAssessmentOutput(fleet_assessment, customer_assessment)`;
   `LgDispatchInput(order_id, venue, order_value, servings, deadline_minutes,
@@ -327,7 +357,7 @@ make test              # pytest (via uv)
 make run               # start the demo
 ```
 
-Cross-harness verification: gitignored manual spikes under `spikes/langgraph_hitl/` —
+Cross-framework verification: gitignored manual spikes under `spikes/langgraph_hitl/` —
 `crossharness_smoke.py` (ADK child → LangGraph child, low-value → `DISPATCH`, no gate)
 and `crossharness_hitl_smoke.py` (high-value → child parks on `ask_human` →
 reject = `HOLD` / approve = `DISPATCH`). `uv run pytest` is green (19 pass).
