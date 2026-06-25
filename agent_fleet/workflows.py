@@ -977,6 +977,7 @@ class LgDispatchWorkflow:
             # Seed the ADK assessments — dispatch_reason reads these directly.
             "fleet_assessment": inp.fleet_assessment,
             "customer_assessment": inp.customer_assessment,
+            "eligible_drivers": inp.eligible_drivers,  # the agent picks from these
         }
         compiled = graph(DISPATCH_ONLY_GRAPH_NAME).compile(checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": workflow.info().workflow_id}}
@@ -1020,6 +1021,7 @@ class LgDispatchWorkflow:
         )
         return LgDispatchOutput(
             decision="HOLD" if hold else "DISPATCH",
+            driver_id=(result.get("chosen_driver") or "").strip(),  # the agent's pick
             reasoning=raw,
             fleet_assessment=(result.get("fleet_assessment") or inp.fleet_assessment or "").strip(),
             customer_assessment=(
@@ -1723,6 +1725,7 @@ class MeltdownDemoWorkflow:
             "drivers_available": available,
             "drivers_total": len(DRIVER_IDS),
             "pending_orders": len(self._pending_new_orders),
+            "eligible_drivers": self._eligible_drivers(),  # the agent picks from these
         }
         compiled = graph(GRAPH_NAME).compile(checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": f"{workflow.info().workflow_id}-{order.order_id}"}}
@@ -1767,15 +1770,23 @@ class MeltdownDemoWorkflow:
                 else ("Approved by human — dispatching" if asked else "Within policy — dispatching")
             )
         hold = rejected or "HOLD" in raw.upper()
+        # The Dispatch agent picks the driver (submit_dispatch); honor it if still assignable,
+        # else fall back to the least-loaded driver chosen when the order arrived.
+        chosen = (result.get("chosen_driver") or "").strip()
+        final_driver = chosen if chosen in self._eligible_drivers() else driver_id
         await self._publish_langgraph_reasoning(
-            result, raw, order=order, driver_id=driver_id, hold=hold
+            result, raw, order=order, driver_id=final_driver, hold=hold
         )
 
         if hold:
             workflow.logger.info(f"[#{onum}] LangGraph dispatch held {order.order_id} (human)")
             await self._reject_order(order, onum)
         else:
-            await self._commit_assignment(order, driver_id, False, onum)
+            workflow.logger.info(
+                f"[#{onum}] LangGraph dispatch → {final_driver}"
+                + (f" (agent chose {chosen})" if chosen else " (fallback)")
+            )
+            await self._commit_assignment(order, final_driver, False, onum)
 
     async def _await_dispatch_answer(self, order_id: str) -> str | None:
         """Durable wait for a human's answer to an agent's in-loop ask_human (the
@@ -1943,6 +1954,7 @@ class MeltdownDemoWorkflow:
                 pending_orders=len(self._pending_new_orders),
                 fleet_assessment=assessment.fleet_assessment,
                 customer_assessment=assessment.customer_assessment,
+                eligible_drivers=self._eligible_drivers(),  # the LG dispatch agent picks from these
             ),
             id=child_id,
             static_summary=f"[#{onum}] LangGraph harness — dispatch decision",
@@ -1966,7 +1978,10 @@ class MeltdownDemoWorkflow:
             self._pending_dispatch.pop(order.order_id, None)
 
         # 3. Surface reasoning in the agent panels, then APPLY (parent owns driver state).
-        # Pass order + driver so the Dispatch card shows "Order #N → driver-X — venue".
+        # The LangGraph dispatch agent picks the driver; honor it if still assignable, else
+        # fall back to the least-loaded driver chosen when the order arrived.
+        chosen = (result.driver_id or "").strip()
+        final_driver = chosen if chosen in self._eligible_drivers() else driver_id
         await self._publish_langgraph_reasoning(
             {
                 "fleet_assessment": result.fleet_assessment,
@@ -1974,7 +1989,7 @@ class MeltdownDemoWorkflow:
             },
             result.reasoning,
             order=order,
-            driver_id=driver_id,
+            driver_id=final_driver,
             hold=(result.decision == "HOLD"),
         )
         if not apply:
@@ -1983,7 +1998,11 @@ class MeltdownDemoWorkflow:
             workflow.logger.info(f"[#{onum}] cross-harness held {order.order_id} (human)")
             await self._reject_order(order, onum)
         else:
-            await self._commit_assignment(order, driver_id, False, onum)
+            workflow.logger.info(
+                f"[#{onum}] cross-harness dispatch → {final_driver}"
+                + (f" (agent chose {chosen})" if chosen else " (fallback)")
+            )
+            await self._commit_assignment(order, final_driver, False, onum)
 
     async def _rereason_crossharness(self, order_id: str, note: str) -> None:
         """Human→agent HITL across harnesses: the human approved a new location, so re-run

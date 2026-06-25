@@ -87,9 +87,14 @@ ESCALATION_GUIDANCE = (
     "Tight capacity by itself is normal operations, NOT a reason to involve a human.\n\n"
     "When you genuinely need a human's judgment — an EXCEPTIONAL order (roughly $3,000+ or a "
     "major VIP commitment) where committing scarce fleet capacity warrants a supervisor's "
-    "sign-off — call ask_human with a clear, specific question. Use the human's answer to "
-    "decide: if they approve, reply DISPATCH; if they reject, reply HOLD. Otherwise (routine), "
-    "just reply DISPATCH. Ask the human at most once, and only when it's truly warranted."
+    "sign-off — call ask_human with a clear, specific question, then REASON over their answer "
+    "together with the Fleet and Customer assessments and the order details. Ask the human at "
+    "most once, and only when truly warranted.\n\n"
+    "Decide by calling submit_dispatch(driver_id, decision): pick the best driver from the "
+    "eligible list (weigh the Fleet agent's ETAs/capacity and the Customer agent's priority) "
+    "with decision='dispatch'; or decision='hold' (driver_id='') if a human rejected it or no "
+    "driver should take it. If you asked a human, let their answer steer this — approval means "
+    "commit the best driver; rejection means hold (or pick a safer driver if they suggested one)."
 )
 
 _FLEET_SYS = (
@@ -124,6 +129,7 @@ class TeamState(TypedDict, total=False):
     drivers_available: int
     drivers_total: int
     pending_orders: int
+    eligible_drivers: list  # driver ids the Dispatch agent may choose from
     # --- per-agent ReAct message threads (each branch loops on its own) ---
     fleet_messages: Annotated[list, add_messages]
     customer_messages: Annotated[list, add_messages]
@@ -132,7 +138,8 @@ class TeamState(TypedDict, total=False):
     fleet_assessment: str
     customer_assessment: str
     fleet_impact: str
-    dispatch_decision: str  # the Dispatch agent's concluding text
+    dispatch_decision: str  # "DISPATCH" | "HOLD" — the Dispatch agent's call
+    chosen_driver: str  # the driver the Dispatch agent picked (via submit_dispatch)
     asked_human: bool  # did any agent call ask_human this run?
     dispatch_human_answer: str  # the human's answer to Dispatch's ask_human (if any)
 
@@ -354,8 +361,27 @@ def _customer_tools() -> list:
     return [get_order_priorities]
 
 
+SUBMIT_DISPATCH = "submit_dispatch"  # the Dispatch agent's final decision (driver + dispatch/hold)
+
+
+def _submit_dispatch_tool():
+    from langchain_core.tools import tool
+
+    @tool
+    def submit_dispatch(driver_id: str, decision: str) -> str:
+        """Commit your dispatch decision. Call this once you've decided.
+
+        Args:
+            driver_id: the driver to assign (one of the eligible driver ids), or "" if holding.
+            decision: "dispatch" to assign the driver, or "hold" to not commit the order.
+        """
+        raise NotImplementedError  # the decision is read from the tool call args, not executed
+
+    return submit_dispatch
+
+
 def _dispatch_tools() -> list:
-    return [_ask_human_tool()]
+    return [_ask_human_tool(), _submit_dispatch_tool()]
 
 
 # --------------------------------------------------------------------------- #
@@ -452,12 +478,14 @@ async def dispatch_reason(state: TeamState) -> dict:
         customer_assessment = state.get("customer_assessment") or _last_text(
             state.get("customer_messages")
         )
+        eligible = ", ".join(state.get("eligible_drivers") or []) or "(none free)"
         prompt = (
             f"Order: {state['venue']} — ${state['order_value']:,} — {state['servings']} servings, "
             f"due in {state['deadline_minutes']} min.\n"
             f"Fleet agent: {fleet_assessment}\n"
             f"Customer agent: {customer_assessment}\n"
-            f"Fleet: {_fleet_impact(state)}"
+            f"Fleet: {_fleet_impact(state)}\n"
+            f"Eligible drivers: {eligible}"
         )
         seed = [SystemMessage(content=ESCALATION_GUIDANCE), HumanMessage(content=prompt)]
         msgs = seed
@@ -467,14 +495,23 @@ async def dispatch_reason(state: TeamState) -> dict:
         out["fleet_impact"] = _fleet_impact(state)
     resp = await _chat_model(tools=_dispatch_tools()).ainvoke(msgs)
     out["dispatch_messages"] = seed + [resp]
-    if not getattr(resp, "tool_calls", None):
+    calls = getattr(resp, "tool_calls", None) or []
+    sub = next((c for c in calls if c["name"] == SUBMIT_DISPATCH), None)
+    if sub:
+        # The agent made its call — record the chosen driver + decision (it reasoned over the
+        # Fleet/Customer assessments and, if asked, the human's answer to get here).
+        args = sub.get("args") or {}
+        decision = str(args.get("decision") or "dispatch").strip().lower()
+        out["chosen_driver"] = str(args.get("driver_id") or "").strip()
+        out["dispatch_decision"] = "HOLD" if decision == "hold" else "DISPATCH"
+    elif not calls:
+        # Plain-text conclusion (no tool) — fall back; driver left to the parent.
         text = _coerce_text(resp.content).strip()
         if not text:
-            # Gemini sometimes returns an empty final turn after the tool result —
-            # derive the decision from the human's answer (reject → HOLD, else DISPATCH).
             ans = (state.get("dispatch_human_answer") or "").strip().lower()
             text = "HOLD" if ans == "reject" else "DISPATCH"
-        out["dispatch_decision"] = text
+        out["dispatch_decision"] = "HOLD" if "HOLD" in text.upper() else "DISPATCH"
+    # else: ask_human is in the tool calls → dispatch_route sends to dispatch_human
     return out
 
 
