@@ -486,3 +486,11 @@ If you something like this instead, double check that you've copied your key cor
     ]
   }
   ```
+
+## Acknowledgements
+
+This demo was a team effort. With thanks to:
+
+- **[Alfred Chan](https://www.linkedin.com/in/alfredschan/)** — Design. Created the visual design and all of the UI elements and assets used throughout the demo (map signage, truck icons, neon branding).
+- **[Cecil Phillip](https://www.linkedin.com/in/cecil-phillip/)** — Ideation and review.
+- **[Angie Byron](https://www.linkedin.com/in/webchick/)** — Drove the documentation and helped review.
