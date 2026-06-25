@@ -138,6 +138,41 @@ async def tool_get_order_priorities() -> str:
 
 
 @activity.defn
+async def tool_search_venue_events(venue: str) -> str:
+    """Search for current events at a delivery venue (Gemini + Google Search grounding) that
+    might raise an order's urgency — the LangGraph Customer agent's analog of the ADK
+    GoogleSearchTool, so both frameworks' Customer agents have the same tools.
+
+    Args:
+        venue: the venue / hotel name (e.g. "Moscone Center").
+    """
+    from google import genai
+    from google.genai import types
+
+    from agent_fleet.config import DEFAULT_MODEL, GOOGLE_API_KEY
+
+    if not GOOGLE_API_KEY:
+        return f"Event search unavailable for {venue}."
+    try:
+        client = genai.Client(api_key=GOOGLE_API_KEY)
+        resp = await asyncio.to_thread(
+            client.models.generate_content,
+            model=DEFAULT_MODEL,
+            contents=(
+                f"In one short sentence: any notable events today/tonight at or near {venue} in "
+                f"San Francisco that would increase catering urgency? If none, say 'no notable events'."
+            ),
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            ),
+        )
+        return (resp.text or "").strip() or f"No notable events found for {venue}."
+    except Exception as e:
+        activity.logger.warning(f"venue-events search failed for {venue}: {e}")
+        return f"Event search unavailable for {venue}."
+
+
+@activity.defn
 async def tool_get_route_info(
     origin_lat: float,
     origin_lng: float,

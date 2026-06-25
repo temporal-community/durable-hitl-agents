@@ -127,7 +127,9 @@ class FleetState:
 
     async def _seed_initial_state(self) -> None:
         conn = self._conn
-        for letter in ["a", "b", "c", "d", "e"]:
+        # Keep in sync with DRIVER_IDS in workflows.py (kept literal here to avoid importing
+        # the heavy workflows module into FleetState). 4 drivers — the deliberate squeeze.
+        for letter in ["a", "b", "c", "d"]:
             did = f"driver-{letter}"
             await conn.execute(
                 "INSERT OR IGNORE INTO drivers (driver_id, lat, lng) VALUES (?, ?, ?)",

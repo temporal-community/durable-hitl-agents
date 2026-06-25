@@ -83,7 +83,7 @@ async def answer_dispatch(self, oid, decision):            # human → flips the
   <em>▶ <a href="https://youtube.com/shorts/Wq7hiN2KYnk">Watch the demo on YouTube</a></em>
 </p>
 
-Built with **Google ADK** (multi-agent reasoning for Pattern A), **LangGraph** via `temporalio.contrib.langgraph` (the looping multi-agent team with the in-loop `ask_human` tool for Pattern B), and **Temporal** for durable execution. Orders auto-generate on a timer. AI agents (Fleet, Customer, Dispatch) evaluate positions, capacity, ETAs, and priority — then assign each order to the best driver, spreading load across the fleet so all five stay active. Drivers batch-pickup at Ziggy's (the Ferry Building) and deliver sequentially. Both human-in-the-loop pauses are durable Temporal signals — survive worker death, resume exactly where they left off.
+Built with **Google ADK** (multi-agent reasoning for Pattern A), **LangGraph** via `temporalio.contrib.langgraph` (the looping multi-agent team with the in-loop `ask_human` tool for Pattern B), and **Temporal** for durable execution. Orders auto-generate on a timer. AI agents (Fleet, Customer, Dispatch) evaluate positions, capacity, ETAs, and priority — then the **Dispatch agent picks the driver** (it calls `submit_assignment`/`submit_dispatch` with a driver from the eligible set; least-loaded is the default proposal and the fallback if its pick isn't eligible). The fleet runs **4 drivers (A–D) at capacity 2** so capacity pressure — and the scarce-capacity escalation — actually fire. Drivers batch-pickup at Ziggy's (the Ferry Building) and deliver sequentially. Both human-in-the-loop pauses are durable Temporal signals — survive worker death, resume exactly where they left off.
 
 > **Terminology:** AI agents **reason** (LLM + tools, run inline via ADK). Delivery actors **execute** (child workflows that carry out routes). They are not Temporal workers.
 
@@ -147,7 +147,7 @@ uv run --env-file .env python -m agent_fleet.worker
 
 The dashboard has three tabs — one per pattern. All start the same way.
 
-1. **Start Deliveries** — Ziggy's (the Ferry Building) opens for business. Orders flow in from Moscone Center, Fisherman's Wharf, and Chinatown. The ADK agents reason per-order and assign to the least-loaded driver. Drivers batch-pickup and deliver sequentially.
+1. **Start Deliveries** — Ziggy's (the Ferry Building) opens for business. Orders flow in from Moscone Center, Fisherman's Wharf, and Chinatown. The ADK agents reason per-order and the Dispatch agent picks the driver (from the eligible, under-capacity set). Drivers batch-pickup and deliver sequentially.
 2. **Pattern A — Human-in-the-loop tab:** pick an active order, choose **Address Change** (pick a new SF location from the dropdown) or **Cancel Order**, click **Submit Change**. The driver arrives at the venue but holds (`awaiting_update`) while a human decides. Click **Approve** / **Reject** — cancel skips delivery; address change has the ADK team **re-reason** the new location (Fleet/Customer/Dispatch reassess) before the held driver reroutes to it; reject delivers normally.
 3. **Pattern B — Agent-in-the-loop tab:** click **Drop high-value order** to inject a premium Moscone catering order. The looping LangGraph team (Fleet ∥ Customer → Dispatch) assesses it inline in the parent workflow; **mid-reasoning** the Dispatch agent calls the `ask_human` tool, which suspends the graph on a durable `interrupt()` while the parent parks on the `answer_dispatch` signal; an approval card appears over the map. Approve or reject — the answer flows back into the agent's reasoning. To show durability, **kill the worker while the card is up** — the paused workflow survives; restart the worker and the pending question is still there.
 4. **Cross-Harness — ADK + LangGraph tab:** an order spans both harnesses. The parent spawns two child workflows: `AdkAssessmentWorkflow` (id `assess-<order_id>`) runs the **Fleet + Customer ADK** agents, then `LgDispatchWorkflow` (id `dispatch-<order_id>`), seeded with those assessments, runs the **LangGraph Dispatch** agent — each shows as its own history in the Temporal UI, the visible cross-harness boundary. **Agent→human:** mid-loop the Dispatch agent calls `ask_human`; signal its own child (`answer_dispatch`) to resume — kill the worker while parked and the wait survives via Temporal history. **Human→agent:** submit a customer change and the whole cross-harness flow re-runs (ADK reassesses the new location, LangGraph re-decides), then the driver reroutes. The agent children decide; the parent applies the decision and signals the driver workflows.
@@ -216,9 +216,9 @@ The dashboard has three tabs — one per pattern. All start the same way.
      Temporal Server
 ```
 
-**Order lifecycle (routine):** Order generates on timer → ADK agents reason (Fleet + Customer in parallel → Dispatch) → capacity check + least-loaded assignment → driver batch-picks up at Ziggy's → delivers sequentially to venues → signals parent on each completion → returns to base
+**Order lifecycle (routine):** Order generates on timer → ADK agents reason (Fleet + Customer in parallel → Dispatch) → capacity check + Dispatch agent picks the driver (`submit_assignment`) → driver batch-picks up at Ziggy's → delivers sequentially to venues → signals parent on each completion → returns to base
 
-**Order lifecycle (high-value, LangGraph tab):** High-value order injected → looping multi-agent team assesses inline in the parent (Fleet ∥ Customer → Dispatch) → mid-reasoning the Dispatch agent calls `ask_human` → durable LangGraph `interrupt()` suspends the graph while the parent parks on the `answer_dispatch` signal → human answers → `Command(resume=answer)` feeds it back into the agent's reasoning → on approve, commits to the least-loaded driver and delivers; on reject, the order is held/cancelled
+**Order lifecycle (high-value, LangGraph tab):** High-value order injected → looping multi-agent team assesses inline in the parent (Fleet ∥ Customer → Dispatch) → mid-reasoning the Dispatch agent calls `ask_human` → durable LangGraph `interrupt()` suspends the graph while the parent parks on the `answer_dispatch` signal → human answers → `Command(resume=answer)` feeds it back into the agent's reasoning → the agent **reasons over the approve/reject plus the Fleet/Customer assessments and picks the driver** (`submit_dispatch`) → on dispatch, the parent commits the agent's chosen driver and delivers; on hold/reject, the order is held/cancelled
 
 **Order lifecycle (Cross-Harness tab):** Order on the cross-harness tab → parent spawns `AdkAssessmentWorkflow` (`assess-<order_id>`) → Fleet + Customer ADK agents return their two assessment strings → parent spawns `LgDispatchWorkflow` (`dispatch-<order_id>`) seeded with those assessments → LangGraph Dispatch agent decides, and mid-loop may call `ask_human` → durable `interrupt()` suspends the graph while the dispatch child parks on its own `answer_dispatch` signal (`pending_question` query surfaces it) → human answers → `Command(resume=answer)` resumes the agent → the decision returns to the parent, which **applies** it (owns driver state, signals the driver workflows) → driver workflows execute. A customer change re-runs the whole flow (ADK reassesses the new location, LangGraph re-decides) and the driver reroutes.
 
@@ -384,6 +384,8 @@ Fleet and Customer run **in parallel** (`ParallelAgent`), then the Dispatch Agen
 
 > **Note:** Gemini's built-in `google_search` grounding normally can't be combined with custom function tools in the same request. ADK's `GoogleSearchTool(bypass_multi_tools_limit=True)` enables this — the Customer Agent uses Google Search alongside `tool_get_order_priorities` in a single agent, no sub-agent needed.
 
+> **Tool parity across frameworks:** the Fleet and Customer agents reason over the **same inputs in both ADK and LangGraph**, across all three tabs. Fleet uses `tool_get_fleet_status` + `tool_get_route_info` in both. Customer uses `tool_get_order_priorities` plus a venue-events web search in both — ADK via the built-in `google_search` grounding, LangGraph via `tool_search_venue_events` (a Temporal activity that calls Gemini with `GoogleSearch` grounding, the function-tool analog). So switching tabs changes *which harness orchestrates*, not *what the agents can see*.
+
 > **Note on Maps API errors:** `tool_get_route_info` calls the Google Maps Directions API for driving ETAs. Occasional failures (rate limiting, quota, transient errors) are normal — every tool call is a Temporal activity with its own retry policy. The error is returned to the LLM as context, the Fleet Agent notes the missing ETA, and the Dispatch Agent assigns with available data. This is the system working as designed, not a bug.
 >
 > **Dormant disconnect path:** The codebase retains agent/driver disconnect logic (tool activities raise on disconnect, Temporal retries, orders flag `degraded`). It is **not** part of the talk's two demos and the UI no longer exposes disconnect controls.
@@ -484,3 +486,11 @@ If you something like this instead, double check that you've copied your key cor
     ]
   }
   ```
+
+## Acknowledgements
+
+This demo was a team effort. With thanks to:
+
+- **[Alfred Chan](https://www.linkedin.com/in/alfredschan/)** — Design. Created the visual design and all of the UI elements and assets used throughout the demo (map signage, truck icons, neon branding).
+- **[Cecil Phillip](https://www.linkedin.com/in/cecil-phillip/)** — Ideation and review.
+- **[Angie Byron](https://www.linkedin.com/in/webchick/)** — Drove the documentation and helped review.

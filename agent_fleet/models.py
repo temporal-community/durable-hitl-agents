@@ -200,6 +200,7 @@ class LgDispatchInput:
     pending_orders: int
     fleet_assessment: str = ""
     customer_assessment: str = ""
+    eligible_drivers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -207,6 +208,7 @@ class LgDispatchOutput:
     """Returned by LgDispatchWorkflow — the dispatch decision and reasoning."""
 
     decision: str = "DISPATCH"  # "DISPATCH" | "HOLD"
+    driver_id: str = ""  # the driver the Dispatch agent chose (empty → caller falls back)
     reasoning: str = ""
     fleet_assessment: str = ""
     customer_assessment: str = ""
@@ -405,6 +407,7 @@ class MeltdownDemoInput:
 class OrderGenerationInput:
     max_orders: int = 50
     order_interval_seconds: int = 15
+    warmup_burst_orders: int = 5  # initial fast orders; set 0 to disable the burst
 
 
 @dataclass

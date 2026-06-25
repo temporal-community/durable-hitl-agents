@@ -42,6 +42,7 @@ from agent_fleet.activities import (
     tool_get_fleet_status,
     tool_get_order_priorities,
     tool_get_route_info,
+    tool_search_venue_events,
 )
 from agent_fleet.config import TEMPORAL_ADDRESS
 from agent_fleet.langgraph_agents import (
@@ -143,6 +144,7 @@ def create_agents_worker(client: Client) -> Worker:
             tool_get_fleet_status,
             tool_get_order_priorities,
             tool_get_route_info,
+            tool_search_venue_events,
         ],
         max_concurrent_activities=5,
         plugins=[GoogleAdkPlugin()],

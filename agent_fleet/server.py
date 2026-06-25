@@ -465,7 +465,7 @@ async def inject_high_value_order():
     if _temporal_client is None:
         return {"error": "Temporal client not connected"}
     _injected_order_count += 1
-    oid = f"order-vip-{_injected_order_count}"
+    oid = f"order-special-{_injected_order_count}"
     venue = next((v for v in VENUES if v["vip_tier"] == "platinum"), VENUES[0])
     servings, value, deadline, event = 120, 5400, 30, "conference catering"
     await fleet.register_order(

@@ -25,9 +25,9 @@ See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" informati
 
 ## Pre-flight check
 - Map shows **downtown San Francisco** with three delivery venues — **Moscone Center**, **Fisherman's Wharf**, **Chinatown** — and Ziggy's Ice Cream at the **Ferry Building**
-- All 5 drivers (A–E) are parked at Ziggy's, status idle
-- Two tabs at the top: **🧑 Human → Agent** (Human-initiated) and **🤖 Agent → Human** (Agent-initiated)
-- "Start Deliveries" button is active on both tabs
+- All 4 drivers (A–D) are parked at Ziggy's, status idle (capacity 2 each — a deliberately tight fleet so capacity pressure shows; driver-d stays hidden during the warm-up burst)
+- Three tabs at the top: **🧑 Human → Agent** (Human-initiated), **🤖 Agent → Human** (Agent-initiated), and **🔀 Cross-Harness · ADK + LangGraph**
+- "Start Deliveries" button is active on all tabs
 - If you see a stale state from a prior run, click **Reset** first
 
 **Tip:** Do a dry run of each pattern before presenting to get familiar with the agent reasoning panel timing and the approval-card flow.
@@ -78,10 +78,10 @@ Full breakdown lives in [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
 **What happens automatically:**
 1. Each order triggers multi-agent reasoning — watch the ADK Agent Team panel.
 2. Fleet Agent calls `tool_get_fleet_status` for driver positions and capacity, then `tool_get_route_info` for the closest drivers to get driving ETAs from Google Maps. Each ETA call is a separate Temporal activity.
-3. Customer Agent calls `tool_get_order_priorities` and uses `google_search` (Gemini grounding) — evaluates VIP tier, deadline pressure, venue events, and guest count.
-4. Dispatch Agent synthesizes both assessments and calls `tool_submit_assignment` — picks a driver and explains why.
-5. The workflow **spreads load across the fleet** (least-loaded driver) so all five drivers stay active.
-6. Drivers batch-pickup at Ziggy's (up to 3 orders per trip) and deliver sequentially to the venues.
+3. Customer Agent calls `tool_get_order_priorities` and a venue-events web search (ADK: `google_search` Gemini grounding; LangGraph: `tool_search_venue_events`, the same grounding behind a tool) — evaluates VIP tier, deadline pressure, venue events, and guest count.
+4. Dispatch Agent synthesizes both assessments and calls `tool_submit_assignment` — **picks the driver** (from the eligible, under-capacity set) and explains why.
+5. The parent applies a **capacity guardrail** over the agent's pick (least-loaded eligible driver as the fallback if the pick is full/disconnected). With only 4 drivers at capacity 2, slots are genuinely scarce.
+6. Drivers batch-pickup at Ziggy's (up to capacity, 2 orders per trip) and deliver sequentially to the venues.
 
 **What to say:**
 > "This is Ziggy's delivery system running live. Orders keep flooding in from downtown, and three AI agents reason about every single one. Fleet Agent checks who's closest — those are real Google Maps calls, each its own Temporal activity. Customer Agent evaluates priority. Dispatch Agent weighs both and assigns. Everything you see in the Temporal UI is individually durable and replayable."
@@ -134,8 +134,8 @@ On the Agent-in-the-loop tab, **every order** runs a **looping multi-agent LangG
 4. **The durability moment — kill the worker now.** While the card is up, stop the worker process (Ctrl-C in its terminal, or kill the `python -m agent_fleet.worker` process). The fleet freezes — but the *pending question is in Temporal, not in the worker's memory.*
 5. **Restart the worker.** The fleet resumes and the approval card is still there, waiting. Nothing was lost. (Optionally show the parked `meltdown-demo` parent workflow in the Temporal UI before and after — same `wait_condition` on `answer_dispatch`, resumed from history. No `gate-*` child to look for.)
 6. Click **Approve dispatch** or **Reject** (`POST /api/approve-dispatch` signals `MeltdownDemoWorkflow.answer_dispatch`):
-   - **Approve:** the answer flows back into the agent's reasoning; the order commits to the proposed driver and the fleet delivers it.
-   - **Reject:** the answer flows back as a reject; the order is held — fleet capacity is preserved, the order shows as cancelled.
+   - **Approve:** the answer flows back as the agent's next observation; the agent **reasons over that approval plus the Fleet/Customer assessments and picks the driver** (`submit_dispatch`) — it's not a rubber stamp — then the fleet delivers it.
+   - **Reject:** the answer flows back as a reject; the agent holds the order — fleet capacity is preserved, the order shows as cancelled.
 
 **What to say:**
 > "Routine orders, the agents just dispatch. But this one's a big-ticket Moscone catering order — committing the fleet to it bumps other customers and it's costly to get wrong. So the agent does what agents do when they're unsure, right in the middle of reasoning: it calls a tool. That tool is `ask_human`. Here's the thing — that's not a blocking function call. Its execution is a LangGraph `interrupt()` that suspends the graph, and on Temporal the pause becomes a durable **signal**: the parent workflow parks on a `wait_condition` and waits for a human, for as long as it takes. Watch: I kill the worker. The agent's 'tool call' is still outstanding — but it's parked in Temporal's event log, not in a process that just died. I restart the worker… and the question is still right here, waiting for me. The human is just another tool the agent calls — a durable, async one. Now I approve, the answer flows back as the agent's next observation, and it commits the fleet."

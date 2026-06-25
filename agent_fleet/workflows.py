@@ -101,14 +101,24 @@ WARMUP_BURST_SECONDS = 2
 # Cross-harness tab: each order spawns TWO child workflows (an ADK assess child + a
 # LangGraph dispatch child), so the full 50-order auto-flow floods the Temporal UI with
 # ~100 short-lived executions. The per-order model is intentional (each agent unit is its
-# own durable workflow) — we just generate fewer, slower orders in this mode so the demo
-# stays legible and you can point at a single assess-/dispatch- pair. Drop a high-value
-# order to drive the ask_human gate on demand. Tunable; ADK/LangGraph tabs are unaffected.
-CROSSHARNESS_MAX_ORDERS = 8
-CROSSHARNESS_ORDER_INTERVAL_SECONDS = 20
+# own durable workflow) — we just generate fewer, SLOWER orders and skip the warmup burst
+# so the demo stays legible AND stays alive long enough to interactively drop a high-value
+# order and watch the ask_human gate (the demo tears down once order-gen completes, so the
+# cap also bounds runtime — keep it high enough to outlast the talk). 50 @ 22s ≈ 18 min.
+# The slow interval (not the total) bounds concurrent Gemini load, so raising the total just
+# lengthens the run, it doesn't add peak load. Tunable; ADK/LangGraph tabs are unaffected.
+CROSSHARNESS_MAX_ORDERS = 50
+CROSSHARNESS_ORDER_INTERVAL_SECONDS = 22
+CROSSHARNESS_WARMUP_BURST_ORDERS = 3  # mild quick-start; no 5-order flood
 
-DRIVER_CAPACITY = 3
-DRIVER_IDS = ["driver-a", "driver-b", "driver-c", "driver-d", "driver-e"]
+# 4 drivers × 2 orders = 8 slots — a deliberate squeeze so the fleet occasionally runs
+# tight, making the agents' capacity reasoning (and the "commit scarce capacity" escalation)
+# actually fire. NOTE: capacity is a per-driver ORDER COUNT (batch limit), not servings —
+# a large order takes one slot, same as a small one.
+DRIVER_CAPACITY = 2
+DRIVER_IDS = ["driver-a", "driver-b", "driver-c", "driver-d"]
+# Hidden during warmup so the first orders fill A–C before D comes online.
+WARMUP_HIDDEN = ["driver-d"]
 
 # Pattern B — orders at/above this value are routed to the dispatch agent, which
 # DECIDES whether to escalate to a human. This is a cheap, token-saving routing
@@ -826,8 +836,11 @@ class OrderGenerationWorkflow:
 
             # Wait before next order — gentle initial burst to fill driver batches,
             # then normal cadence (tuned for the heavier langgraph agent-team mode).
+            # Burst size is per-input (crossharness passes a smaller one); getattr keeps
+            # replay clean for workflows started before the field existed.
+            burst = getattr(inp, "warmup_burst_orders", WARMUP_BURST_ORDERS)
             if order_num < inp.max_orders:
-                if order_num <= WARMUP_BURST_ORDERS:
+                if order_num <= burst:
                     await workflow.sleep(timedelta(seconds=WARMUP_BURST_SECONDS))
                 else:
                     base = inp.order_interval_seconds
@@ -964,6 +977,7 @@ class LgDispatchWorkflow:
             # Seed the ADK assessments — dispatch_reason reads these directly.
             "fleet_assessment": inp.fleet_assessment,
             "customer_assessment": inp.customer_assessment,
+            "eligible_drivers": inp.eligible_drivers,  # the agent picks from these
         }
         compiled = graph(DISPATCH_ONLY_GRAPH_NAME).compile(checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": workflow.info().workflow_id}}
@@ -1007,6 +1021,7 @@ class LgDispatchWorkflow:
         )
         return LgDispatchOutput(
             decision="HOLD" if hold else "DISPATCH",
+            driver_id=(result.get("chosen_driver") or "").strip(),  # the agent's pick
             reasoning=raw,
             fleet_assessment=(result.get("fleet_assessment") or inp.fleet_assessment or "").strip(),
             customer_assessment=(
@@ -1163,7 +1178,7 @@ class MeltdownDemoWorkflow:
         warming_up = self._orders_generated <= self._WARMUP_ORDERS
         for driver_id in DRIVER_IDS:
             # During warmup, hide drivers D-E so agents only assign to A-C
-            if warming_up and driver_id in ("driver-d", "driver-e"):
+            if warming_up and driver_id in WARMUP_HIDDEN:
                 continue
             pos = self._driver_last_position.get(driver_id, (WAREHOUSE.lat, WAREHOUSE.lng))
             order_count = len(self._driver_orders.get(driver_id, []))
@@ -1189,7 +1204,7 @@ class MeltdownDemoWorkflow:
             if d in self._route_handles
             and d not in self._disconnected_drivers
             and len(self._driver_orders.get(d, [])) < DRIVER_CAPACITY
-            and not (warming_up and d in ("driver-d", "driver-e"))
+            and not (warming_up and d in WARMUP_HIDDEN)
         ]
 
     def _least_loaded_driver(self) -> str:
@@ -1219,7 +1234,7 @@ class MeltdownDemoWorkflow:
         # tool_get_fleet_status only shows A-C to the LLM
         await workflow.execute_activity(
             set_warmup_hidden,
-            args=[["driver-d", "driver-e"], True],
+            args=[WARMUP_HIDDEN, True],
             task_queue=DELIVERY_QUEUE,
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=FAST_RETRY,
@@ -1242,14 +1257,17 @@ class MeltdownDemoWorkflow:
         if self._dispatch_mode == "crossharness":
             gen_max = min(inp.max_orders, CROSSHARNESS_MAX_ORDERS)
             gen_interval = CROSSHARNESS_ORDER_INTERVAL_SECONDS
+            gen_burst = CROSSHARNESS_WARMUP_BURST_ORDERS
         else:
             gen_max = inp.max_orders
             gen_interval = ORDER_INTERVAL_SECONDS
+            gen_burst = WARMUP_BURST_ORDERS
         self._order_gen_handle = await workflow.start_child_workflow(
             OrderGenerationWorkflow.run,
             OrderGenerationInput(
                 max_orders=gen_max,
                 order_interval_seconds=gen_interval,
+                warmup_burst_orders=gen_burst,
             ),
             id="order-generation",
             static_summary="Order generation + agent assignment",
@@ -1475,7 +1493,7 @@ class MeltdownDemoWorkflow:
         if self._orders_generated == self._WARMUP_ORDERS + 1:
             await workflow.execute_activity(
                 set_warmup_hidden,
-                args=[["driver-d", "driver-e"], False],
+                args=[WARMUP_HIDDEN, False],
                 task_queue=DELIVERY_QUEUE,
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=FAST_RETRY,
@@ -1565,7 +1583,7 @@ class MeltdownDemoWorkflow:
             driver_id not in self._route_handles
             or driver_id in self._disconnected_drivers
             or len(self._driver_orders.get(driver_id, [])) >= DRIVER_CAPACITY
-            or (warming_up and driver_id in ("driver-d", "driver-e"))
+            or (warming_up and driver_id in WARMUP_HIDDEN)
         )
 
         if needs_reassign:
@@ -1574,7 +1592,7 @@ class MeltdownDemoWorkflow:
             for fallback_id in DRIVER_IDS:
                 if fallback_id == original:
                     continue
-                if warming_up and fallback_id in ("driver-d", "driver-e"):
+                if warming_up and fallback_id in WARMUP_HIDDEN:
                     continue
                 if fallback_id in self._disconnected_drivers:
                     continue
@@ -1707,6 +1725,7 @@ class MeltdownDemoWorkflow:
             "drivers_available": available,
             "drivers_total": len(DRIVER_IDS),
             "pending_orders": len(self._pending_new_orders),
+            "eligible_drivers": self._eligible_drivers(),  # the agent picks from these
         }
         compiled = graph(GRAPH_NAME).compile(checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": f"{workflow.info().workflow_id}-{order.order_id}"}}
@@ -1750,14 +1769,24 @@ class MeltdownDemoWorkflow:
                 if rejected
                 else ("Approved by human — dispatching" if asked else "Within policy — dispatching")
             )
-        await self._publish_langgraph_reasoning(result, raw)
-
         hold = rejected or "HOLD" in raw.upper()
+        # The Dispatch agent picks the driver (submit_dispatch); honor it if still assignable,
+        # else fall back to the least-loaded driver chosen when the order arrived.
+        chosen = (result.get("chosen_driver") or "").strip()
+        final_driver = chosen if chosen in self._eligible_drivers() else driver_id
+        await self._publish_langgraph_reasoning(
+            result, raw, order=order, driver_id=final_driver, hold=hold
+        )
+
         if hold:
             workflow.logger.info(f"[#{onum}] LangGraph dispatch held {order.order_id} (human)")
             await self._reject_order(order, onum)
         else:
-            await self._commit_assignment(order, driver_id, False, onum)
+            workflow.logger.info(
+                f"[#{onum}] LangGraph dispatch → {final_driver}"
+                + (f" (agent chose {chosen})" if chosen else " (fallback)")
+            )
+            await self._commit_assignment(order, final_driver, False, onum)
 
     async def _await_dispatch_answer(self, order_id: str) -> str | None:
         """Durable wait for a human's answer to an agent's in-loop ask_human (the
@@ -1774,11 +1803,32 @@ class MeltdownDemoWorkflow:
                 return self._dispatch_answers.pop(order_id)
         return None
 
-    async def _publish_langgraph_reasoning(self, result: dict, dispatch_note: str) -> None:
-        """Surface the inline LangGraph team's reasoning in the Fleet/Customer/Dispatch panels."""
+    async def _publish_langgraph_reasoning(
+        self,
+        result: dict,
+        dispatch_note: str,
+        order: OrderAssignmentResult | None = None,
+        driver_id: str = "",
+        hold: bool = False,
+    ) -> None:
+        """Surface the LangGraph/cross-harness team's reasoning in the Fleet/Customer/Dispatch
+        panels. When `order` is given, the Dispatch (resolver) card shows the concrete
+        assignment — `Order #N → driver-X — venue` — mirroring the ADK path, instead of just
+        the terse decision text."""
         fleet = (result.get("fleet_assessment") or "").strip()
         cust = (result.get("customer_assessment") or "").strip()
         dispatch_note = dispatch_note or "Dispatching."
+        if order is not None:
+            onum = order.order_id.split("-", 1)[-1] if "-" in order.order_id else order.order_id
+            if hold:
+                resolver_content = f"Order #{onum} — {order.hotel} — HELD: {dispatch_note}"
+                resolver_summary = f"Order #{onum} — {order.hotel} — held"
+            else:
+                resolver_content = f"Order #{onum} → {driver_id} — {order.hotel} — {dispatch_note}"
+                resolver_summary = f"Order #{onum} → {driver_id} — {order.hotel}"
+        else:
+            resolver_content = dispatch_note
+            resolver_summary = dispatch_note[:90]
         await workflow.execute_local_activity(
             publish_agent_events_batch,
             [
@@ -1797,8 +1847,8 @@ class MeltdownDemoWorkflow:
                 PublishAgentEventInput(
                     agent_name="resolver",
                     event_type="plan",
-                    content=dispatch_note,
-                    summary=dispatch_note[:90],
+                    content=resolver_content,
+                    summary=resolver_summary,
                 ),
             ],
             start_to_close_timeout=timedelta(seconds=10),
@@ -1904,6 +1954,7 @@ class MeltdownDemoWorkflow:
                 pending_orders=len(self._pending_new_orders),
                 fleet_assessment=assessment.fleet_assessment,
                 customer_assessment=assessment.customer_assessment,
+                eligible_drivers=self._eligible_drivers(),  # the LG dispatch agent picks from these
             ),
             id=child_id,
             static_summary=f"[#{onum}] LangGraph harness — dispatch decision",
@@ -1927,12 +1978,19 @@ class MeltdownDemoWorkflow:
             self._pending_dispatch.pop(order.order_id, None)
 
         # 3. Surface reasoning in the agent panels, then APPLY (parent owns driver state).
+        # The LangGraph dispatch agent picks the driver; honor it if still assignable, else
+        # fall back to the least-loaded driver chosen when the order arrived.
+        chosen = (result.driver_id or "").strip()
+        final_driver = chosen if chosen in self._eligible_drivers() else driver_id
         await self._publish_langgraph_reasoning(
             {
                 "fleet_assessment": result.fleet_assessment,
                 "customer_assessment": result.customer_assessment,
             },
             result.reasoning,
+            order=order,
+            driver_id=final_driver,
+            hold=(result.decision == "HOLD"),
         )
         if not apply:
             return
@@ -1940,7 +1998,11 @@ class MeltdownDemoWorkflow:
             workflow.logger.info(f"[#{onum}] cross-harness held {order.order_id} (human)")
             await self._reject_order(order, onum)
         else:
-            await self._commit_assignment(order, driver_id, False, onum)
+            workflow.logger.info(
+                f"[#{onum}] cross-harness dispatch → {final_driver}"
+                + (f" (agent chose {chosen})" if chosen else " (fallback)")
+            )
+            await self._commit_assignment(order, final_driver, False, onum)
 
     async def _rereason_crossharness(self, order_id: str, note: str) -> None:
         """Human→agent HITL across harnesses: the human approved a new location, so re-run
