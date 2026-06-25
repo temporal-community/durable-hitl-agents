@@ -55,7 +55,7 @@ with workflow.unsafe.imports_passed_through():
 
 # Graph name registered with LangGraphPlugin (see worker.py).
 GRAPH_NAME = "dispatch_team"  # the looping multi-agent team; agents call ask_human in-loop
-# Dispatch-ONLY graph for the cross-harness tab (3rd tab): the LangGraph half of a
+# Dispatch-ONLY graph for the cross-framework tab (3rd tab): the LangGraph half of a
 # split where Fleet+Customer run on ADK (a separate child workflow) and only the
 # Dispatch agent runs on LangGraph. Seeded with the ADK-produced assessments; the
 # Dispatch agent reasons on them and may call ask_human in-loop. No Fleet/Customer
@@ -627,7 +627,7 @@ def build_dispatch_team_graph() -> StateGraph:
 
 
 def build_dispatch_only_graph() -> StateGraph:
-    """Dispatch agent ALONE — the LangGraph half of the cross-harness tab.
+    """Dispatch agent ALONE — the LangGraph half of the cross-framework tab.
 
     START → dispatch_reason → {ask human → reason | done → END}. The graph is SEEDED
     with the ADK-produced ``fleet_assessment`` / ``customer_assessment`` (dispatch_reason

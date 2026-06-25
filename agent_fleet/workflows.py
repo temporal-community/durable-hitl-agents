@@ -98,7 +98,7 @@ ORDER_INTERVAL_SECONDS = 12
 WARMUP_BURST_ORDERS = 5
 WARMUP_BURST_SECONDS = 2
 
-# Cross-harness tab: each order spawns TWO child workflows (an ADK assess child + a
+# Cross-framework tab: each order spawns TWO child workflows (an ADK assess child + a
 # LangGraph dispatch child), so the full 50-order auto-flow floods the Temporal UI with
 # ~100 short-lived executions. The per-order model is intentional (each agent unit is its
 # own durable workflow) — we just generate fewer, SLOWER orders and skip the warmup burst
@@ -107,9 +107,9 @@ WARMUP_BURST_SECONDS = 2
 # cap also bounds runtime — keep it high enough to outlast the talk). 50 @ 22s ≈ 18 min.
 # The slow interval (not the total) bounds concurrent Gemini load, so raising the total just
 # lengthens the run, it doesn't add peak load. Tunable; ADK/LangGraph tabs are unaffected.
-CROSSHARNESS_MAX_ORDERS = 50
-CROSSHARNESS_ORDER_INTERVAL_SECONDS = 22
-CROSSHARNESS_WARMUP_BURST_ORDERS = 3  # mild quick-start; no 5-order flood
+CROSSFRAMEWORK_MAX_ORDERS = 50
+CROSSFRAMEWORK_ORDER_INTERVAL_SECONDS = 22
+CROSSFRAMEWORK_WARMUP_BURST_ORDERS = 3  # mild quick-start; no 5-order flood
 
 # 4 drivers × 2 orders = 8 slots — a deliberate squeeze so the fleet occasionally runs
 # tight, making the agents' capacity reasoning (and the "commit scarce capacity" escalation)
@@ -836,7 +836,7 @@ class OrderGenerationWorkflow:
 
             # Wait before next order — gentle initial burst to fill driver batches,
             # then normal cadence (tuned for the heavier langgraph agent-team mode).
-            # Burst size is per-input (crossharness passes a smaller one); getattr keeps
+            # Burst size is per-input (crossframework passes a smaller one); getattr keeps
             # replay clean for workflows started before the field existed.
             burst = getattr(inp, "warmup_burst_orders", WARMUP_BURST_ORDERS)
             if order_num < inp.max_orders:
@@ -851,19 +851,19 @@ class OrderGenerationWorkflow:
         return f"Order generation complete — {inp.max_orders} orders generated"
 
 
-# --- Cross-harness agent child workflows (3rd tab) ---
+# --- Cross-framework agent child workflows (3rd tab) ---
 #
-# The cross-harness tab proves that only Temporal can orchestrate ACROSS agent
-# harnesses: Fleet+Customer run on ADK (AdkAssessmentWorkflow), the Dispatch agent
+# The cross-framework tab proves that only Temporal can orchestrate ACROSS agent
+# frameworks: Fleet+Customer run on ADK (AdkAssessmentWorkflow), the Dispatch agent
 # runs on LangGraph (LgDispatchWorkflow), and the parent (MeltdownDemoWorkflow) joins
 # them as child workflows. Each child is its own Temporal history in the UI — the
-# visible cross-harness boundary. Children DECIDE; the parent APPLIES (owns driver
+# visible cross-framework boundary. Children DECIDE; the parent APPLIES (owns driver
 # state, signals drivers); driver workflows EXECUTE.
 
 
 @workflow.defn
 class AdkAssessmentWorkflow:
-    """ADK harness child: Fleet ∥ Customer assessment ONLY (no dispatch).
+    """ADK framework child: Fleet ∥ Customer assessment ONLY (no dispatch).
 
     Mirrors the front half of MeltdownDemoWorkflow._run_adk_assignment, but runs the
     assessment-only ParallelAgent and returns just the two assessment strings. Runs on
@@ -931,7 +931,7 @@ class AdkAssessmentWorkflow:
 
 @workflow.defn
 class LgDispatchWorkflow:
-    """LangGraph harness child: the Dispatch agent, with its OWN in-loop HITL.
+    """LangGraph framework child: the Dispatch agent, with its OWN in-loop HITL.
 
     Seeded with the ADK-produced assessments, it runs the dispatch-only graph and may
     call ask_human mid-loop. The human signals THIS workflow directly (`answer_dispatch`);
@@ -1073,13 +1073,13 @@ class MeltdownDemoWorkflow:
         self._pending_dispatch: dict[str, dict] = {}  # order_id -> question (awaiting human)
         # Agent→human in-loop HITL: human answers to an agent's ask_human, keyed by order.
         self._dispatch_answers: dict[str, str] = {}
-        # which framework dispatches orders: "adk" | "langgraph" | "crossharness"
+        # which framework dispatches orders: "adk" | "langgraph" | "crossframework"
         self._dispatch_mode: str = "adk"
-        # Cross-harness mode: live LgDispatchWorkflow child handles, keyed by order_id, so
+        # Cross-framework mode: live LgDispatchWorkflow child handles, keyed by order_id, so
         # shutdown can signal them to stop. The dispatch CHILD owns its own answer_dispatch
         # signal + pending_question query (the human signals the agent's own workflow).
         self._dispatch_children: dict[str, workflow.ChildWorkflowHandle] = {}
-        # Per-order re-reason counter so cross-harness re-reason spawns fresh child ids
+        # Per-order re-reason counter so cross-framework re-reason spawns fresh child ids
         # (Temporal rejects a duplicate id for an already-closed workflow).
         self._rereason_count: dict[str, int] = {}
 
@@ -1251,13 +1251,13 @@ class MeltdownDemoWorkflow:
             )
             self._route_handles[driver_id] = handle
 
-        # Start order generation as a child workflow. Cross-harness mode generates fewer,
+        # Start order generation as a child workflow. Cross-framework mode generates fewer,
         # slower orders (each order = 2 child workflows) so the Temporal UI stays legible;
         # the ADK/LangGraph tabs keep the full fleet flow. Seeded from the start-time mode.
-        if self._dispatch_mode == "crossharness":
-            gen_max = min(inp.max_orders, CROSSHARNESS_MAX_ORDERS)
-            gen_interval = CROSSHARNESS_ORDER_INTERVAL_SECONDS
-            gen_burst = CROSSHARNESS_WARMUP_BURST_ORDERS
+        if self._dispatch_mode == "crossframework":
+            gen_max = min(inp.max_orders, CROSSFRAMEWORK_MAX_ORDERS)
+            gen_interval = CROSSFRAMEWORK_ORDER_INTERVAL_SECONDS
+            gen_burst = CROSSFRAMEWORK_WARMUP_BURST_ORDERS
         else:
             gen_max = inp.max_orders
             gen_interval = ORDER_INTERVAL_SECONDS
@@ -1299,7 +1299,7 @@ class MeltdownDemoWorkflow:
         # commit. Only stragglers past the window are cancelled. (Exceptions are surfaced by
         # the per-task done callback in _assign_order, not swallowed.)
         if self._langgraph_tasks:
-            # Cross-harness mode parks its durable wait INSIDE the dispatch child, so
+            # Cross-framework mode parks its durable wait INSIDE the dispatch child, so
             # _routes_done can't unblock it — signal each parked child to stop so it returns
             # a HOLD-default and the parent task's `await lg_handle` unblocks cleanly.
             for handle in list(self._dispatch_children.values()):
@@ -1530,14 +1530,14 @@ class MeltdownDemoWorkflow:
             self._langgraph_tasks.append(task)
             return
 
-        # Cross-harness mode: Temporal orchestrates across harnesses — an ADK child
+        # Cross-framework mode: Temporal orchestrates across frameworks — an ADK child
         # produces the assessments, a LangGraph child makes the dispatch decision. Run
         # concurrently (reusing _langgraph_tasks so the existing shutdown drain covers it)
         # so the order loop and fleet keep moving while the agents (and maybe a human)
         # deliberate in their child workflows.
-        if self._dispatch_mode == "crossharness":
+        if self._dispatch_mode == "crossframework":
             task = asyncio.create_task(
-                self._run_crossharness_assignment(order, self._least_loaded_driver(), onum)
+                self._run_crossframework_assignment(order, self._least_loaded_driver(), onum)
             )
             task.add_done_callback(self._on_langgraph_task_done)
             self._langgraph_tasks.append(task)
@@ -1811,7 +1811,7 @@ class MeltdownDemoWorkflow:
         driver_id: str = "",
         hold: bool = False,
     ) -> None:
-        """Surface the LangGraph/cross-harness team's reasoning in the Fleet/Customer/Dispatch
+        """Surface the LangGraph/cross-framework team's reasoning in the Fleet/Customer/Dispatch
         panels. When `order` is given, the Dispatch (resolver) card shows the concrete
         assignment — `Order #N → driver-X — venue` — mirroring the ADK path, instead of just
         the terse decision text."""
@@ -1882,18 +1882,18 @@ class MeltdownDemoWorkflow:
         )
         workflow.logger.info(f"[#{onum}] {order.order_id} rejected at dispatch gate")
 
-    # --- Cross-harness assignment (3rd tab): ADK assess child ∥ LangGraph dispatch child ---
+    # --- Cross-framework assignment (3rd tab): ADK assess child ∥ LangGraph dispatch child ---
 
-    async def _run_crossharness_assignment(
+    async def _run_crossframework_assignment(
         self, order: OrderAssignmentResult, driver_id: str, onum: str
     ) -> None:
-        """Temporal orchestrates ACROSS harnesses: an ADK child produces the Fleet+Customer
+        """Temporal orchestrates ACROSS frameworks: an ADK child produces the Fleet+Customer
         assessments, then a LangGraph child (which owns its own ask_human HITL) makes the
         dispatch decision. The children DECIDE; this parent APPLIES the result via the same
         _commit_assignment / _reject_order used by the other tabs (the parent owns driver
         state and signals the DriverRouteWorkflow). Sequential: the dispatch child needs the
-        assessments as input. Child ids `assess-`/`dispatch-<order_id>` give each harness its
-        own visible Temporal history — the cross-harness boundary.
+        assessments as input. Child ids `assess-`/`dispatch-<order_id>` give each framework its
+        own visible Temporal history — the cross-framework boundary.
         """
         await self._dispatch_via_children(order, driver_id, onum, suffix="")
 
@@ -1905,7 +1905,7 @@ class MeltdownDemoWorkflow:
         suffix: str,
         apply: bool = True,
     ) -> None:
-        """Shared core for cross-harness dispatch — used for the initial assignment and for
+        """Shared core for cross-framework dispatch — used for the initial assignment and for
         human→agent re-reason (which passes a revision `suffix` to get fresh child ids).
 
         apply=True commits/rejects via the parent (initial assignment). apply=False only
@@ -1918,7 +1918,7 @@ class MeltdownDemoWorkflow:
             and len(self._driver_orders.get(d, [])) < DRIVER_CAPACITY
         )
 
-        # 1. ADK harness child — Fleet ∥ Customer assessment only.
+        # 1. ADK framework child — Fleet ∥ Customer assessment only.
         adk_handle = await workflow.start_child_workflow(
             AdkAssessmentWorkflow.run,
             ReasonAboutAssignmentInput(
@@ -1934,11 +1934,11 @@ class MeltdownDemoWorkflow:
                 disconnected_agents=list(self._disconnected_agents),
             ),
             id=f"assess-{order.order_id}{suffix}",
-            static_summary=f"[#{onum}] ADK harness — Fleet ∥ Customer assessment",
+            static_summary=f"[#{onum}] ADK framework — Fleet ∥ Customer assessment",
         )
         assessment = await adk_handle
 
-        # 2. LangGraph harness child — dispatch decision + its own ask_human HITL.
+        # 2. LangGraph framework child — dispatch decision + its own ask_human HITL.
         child_id = f"dispatch-{order.order_id}{suffix}"
         lg_handle = await workflow.start_child_workflow(
             LgDispatchWorkflow.run,
@@ -1957,7 +1957,7 @@ class MeltdownDemoWorkflow:
                 eligible_drivers=self._eligible_drivers(),  # the LG dispatch agent picks from these
             ),
             id=child_id,
-            static_summary=f"[#{onum}] LangGraph harness — dispatch decision",
+            static_summary=f"[#{onum}] LangGraph framework — dispatch decision",
         )
         self._dispatch_children[order.order_id] = lg_handle
         # Roll-up for the server: child_id + order context. The actual ask_human question
@@ -1995,18 +1995,18 @@ class MeltdownDemoWorkflow:
         if not apply:
             return
         if result.decision == "HOLD":
-            workflow.logger.info(f"[#{onum}] cross-harness held {order.order_id} (human)")
+            workflow.logger.info(f"[#{onum}] cross-framework held {order.order_id} (human)")
             await self._reject_order(order, onum)
         else:
             workflow.logger.info(
-                f"[#{onum}] cross-harness dispatch → {final_driver}"
+                f"[#{onum}] cross-framework dispatch → {final_driver}"
                 + (f" (agent chose {chosen})" if chosen else " (fallback)")
             )
             await self._commit_assignment(order, final_driver, False, onum)
 
-    async def _rereason_crossharness(self, order_id: str, note: str) -> None:
-        """Human→agent HITL across harnesses: the human approved a new location, so re-run
-        the CROSS-HARNESS flow — ADK Fleet+Customer reassess the new spot, then the LangGraph
+    async def _rereason_crossframework(self, order_id: str, note: str) -> None:
+        """Human→agent HITL across frameworks: the human approved a new location, so re-run
+        the CROSS-FRAMEWORK flow — ADK Fleet+Customer reassess the new spot, then the LangGraph
         Dispatch agent re-decides — and publish that reassessment to the agent panels. Like
         _rereason_order (the ADK-tab version), this is reasoning-only: the held driver reroutes
         via the caller's update_order/resolve_update signals, so we pass apply=False. Reads the
@@ -2021,7 +2021,7 @@ class MeltdownDemoWorkflow:
             PublishAgentEventInput(
                 agent_name="customer_agent",
                 event_type="customer_request",
-                content=f"Human revised {order_id}: {note} — agents re-reasoning across harnesses.",
+                content=f"Human revised {order_id}: {note} — agents re-reasoning across frameworks.",
                 summary=f"Human revised {order_id} — re-reasoning",
             ),
             start_to_close_timeout=timedelta(seconds=10),
@@ -2214,8 +2214,8 @@ class MeltdownDemoWorkflow:
                     o["delivery_lng"] = change.new_lng
                     if change.new_hotel is not None:
                         o["hotel"] = change.new_hotel
-                if self._dispatch_mode == "crossharness":
-                    await self._rereason_crossharness(change.order_id, change.new_details)
+                if self._dispatch_mode == "crossframework":
+                    await self._rereason_crossframework(change.order_id, change.new_details)
                 else:
                     await self._rereason_order(change.order_id, change.new_details)
 

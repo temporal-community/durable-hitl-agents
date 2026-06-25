@@ -165,9 +165,9 @@ class ReasonAboutAssignmentOutput:
     agent_events: list[dict] = field(default_factory=list)
 
 
-# --- Cross-harness child workflow payloads (3rd tab) ---
+# --- Cross-framework child workflow payloads (3rd tab) ---
 #
-# The cross-harness tab splits the assignment team across agent harnesses, each
+# The cross-framework tab splits the assignment team across agent frameworks, each
 # run as its own Temporal child workflow: an ADK child produces the Fleet+Customer
 # assessments, a LangGraph child makes the dispatch decision (and owns its own
 # ask_human HITL). Inputs/outputs are plain dataclasses — never LangChain/ADK
@@ -399,7 +399,7 @@ class AgentDisconnectInput:
 class MeltdownDemoInput:
     escalation_enabled: bool = False
     max_orders: int = 50
-    # "adk" | "langgraph" | "crossharness" — set from the active UI tab at start
+    # "adk" | "langgraph" | "crossframework" — set from the active UI tab at start
     dispatch_mode: str = "adk"
 
 
