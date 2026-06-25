@@ -1312,11 +1312,11 @@
 <!-- ADK agent-team visualizer -->
 <div id="adk-modal" class="graph-modal" style="display:none;">
   <div class="graph-modal-backdrop" onclick="closeAdk()"></div>
-  <div class="graph-modal-card">
+  <div class="graph-modal-card" style="max-width:1480px;">
     <div class="graph-modal-header"><span>🧩 Google ADK · Dispatch Team</span><button onclick="closeAdk()" title="Close">✕</button></div>
     <div class="graph-modal-sub">Human → agent. Each agent is a reason → act → observe LOOP (the ADK Runner); every LLM call and tool call runs as a Temporal activity. One customer change feeds <b>both</b> loops: the driver holds, you approve, the agents re-reason the new location, and the driver reroutes.</div>
     <div class="graph-flow">
-      <svg viewBox="0 0 560 358" width="100%" style="max-width:560px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK dispatch team: a new order fans to the Fleet and Customer agents (each a reason-act loop), they converge on the Dispatch agent which assigns a driver to the delivery loop ending in delivered; a customer-change HITL box off to the left feeds both loops — the agents re-reason and the driver reroutes">
+      <svg viewBox="0 0 560 358" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK dispatch team: a new order fans to the Fleet and Customer agents (each a reason-act loop), they converge on the Dispatch agent which assigns a driver to the delivery loop ending in delivered; a customer-change HITL box off to the left feeds both loops — the agents re-reason and the driver reroutes">
         <defs>
           <marker id="adkah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
           <marker id="adkaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
@@ -1390,11 +1390,11 @@
 <!-- LangGraph graph visualizer -->
 <div id="graph-modal" class="graph-modal" style="display:none;">
   <div class="graph-modal-backdrop" onclick="closeGraph()"></div>
-  <div class="graph-modal-card">
+  <div class="graph-modal-card" style="max-width:1480px;">
     <div class="graph-modal-header"><span>🔗 LangGraph · Dispatch Team</span><button onclick="closeGraph()" title="Close">✕</button></div>
     <div class="graph-modal-sub">The looping agent team. Each reason call and each tool call runs as its own durable Temporal activity; the human is a tool the agent calls mid-loop.</div>
     <div class="graph-flow">
-      <svg viewBox="0 0 540 352" width="100%" style="max-width:540px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="LangGraph dispatch team: Fleet and Customer reason-act loops converge on a Dispatch loop that calls the human as a tool via interrupt()">
+      <svg viewBox="0 0 540 352" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="LangGraph dispatch team: Fleet and Customer reason-act loops converge on a Dispatch loop that calls the human as a tool via interrupt()">
         <defs>
           <marker id="lgah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
           <marker id="lgaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
@@ -1458,11 +1458,11 @@
 
 <div id="cross-modal" class="graph-modal" style="display:none;">
   <div class="graph-modal-backdrop" onclick="closeCross()"></div>
-  <div class="graph-modal-card">
+  <div class="graph-modal-card" style="max-width:1480px;">
     <div class="graph-modal-header"><span>🔀 Cross-Framework · ADK + LangGraph</span><button onclick="closeCross()" title="Close">✕</button></div>
     <div class="graph-modal-sub">One system, <b>two frameworks</b>. Temporal's parent workflow spawns a <b>Google ADK</b> child (Fleet ∥ Customer assess) and a <b>LangGraph</b> child (Dispatch + ask_human), then joins them — no agent framework can orchestrate <i>across</i> frameworks, only Temporal can. The dispatch agent calls the human as an in-loop tool; a customer change re-runs both children.</div>
     <div class="graph-flow">
-      <svg viewBox="0 0 580 372" width="100%" style="max-width:560px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="Cross-framework flow: a Temporal parent workflow spawns a Google ADK child (Fleet parallel Customer assessment) and a LangGraph child (Dispatch agent with an in-loop ask_human human gate), joins their results, commits to the driver delivery loop, and ends in delivered">
+      <svg viewBox="0 0 580 372" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="Cross-framework flow: a Temporal parent workflow spawns a Google ADK child (Fleet parallel Customer assessment) and a LangGraph child (Dispatch agent with an in-loop ask_human human gate), joins their results, commits to the driver delivery loop, and ends in delivered">
         <defs>
           <marker id="cxah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
           <marker id="cxaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
@@ -1575,6 +1575,7 @@ function switchTab(tabName) {
     brand.href = '#';
     brand.innerHTML =
       '<img src="/static/img/google_adk.png" alt="Google ADK" title="Google ADK — Fleet + Customer" style="height:30px;" />'
+      + '<span class="brand-name" style="margin:0 4px;">Google ADK</span>'
       + '<span style="color:#9fb4c7;margin:0 6px;">+</span>'
       + '<img src="/static/img/langgraph-logo.svg" alt="LangGraph" title="LangGraph — Dispatch" style="height:26px;" />';
   } else {

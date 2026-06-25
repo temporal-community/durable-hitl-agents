@@ -1,4 +1,22 @@
-# Durable Human-in-the-Loop Agents 🍦 — Ice Cream Fleet Demo <img src="https://github.com/google/adk-docs/raw/main/docs/assets/agent-development-kit.png" alt="Google ADK" height="28">
+# Durable Human-in-the-Loop Patterns for Agents 🍦 — Ice Cream Fleet Demo
+
+<p align="center">
+  <strong>Framework-agnostic durable human-in-the-loop patterns for AI agents</strong>, built on <strong>Temporal</strong> — shown here with <strong>Google ADK</strong> and <strong>LangGraph</strong>, human-in-the-loop in both directions.
+</p>
+
+<p align="center">
+  <img src="frontend/img/google_adk.png" alt="Google ADK" height="26">&nbsp;<strong>Google ADK</strong>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="frontend/img/langgraph-logo.svg">
+    <img src="frontend/img/langgraph-logo-dark.svg" alt="LangGraph" height="24">
+  </picture>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="frontend/img/temporal_logo.svg">
+    <img src="frontend/img/temporal_logo_dark.svg" alt="Temporal" height="26">
+  </picture>
+</p>
 
 > **A durable human-in-the-loop (HITL) example for AI agents** — framework-agnostic, built on Temporal (Google ADK + LangGraph). Adapted from the original **Meltdown** ice cream delivery fleet demo.
 
@@ -6,10 +24,10 @@ Companion demo for the AI Engineer World's Fair talk **"The Human Is an Async AP
 
 **The spine.** **Frameworks own the loop** — observe → reason → act. ADK and LangGraph implement the agent loop and the agent abstractions; Temporal never runs the loop, and each framework stops at its own edge. **Temporal is the durable-execution runtime (the substrate) beneath the frameworks** — persistence, retries, replay, HITL waits (`wait_condition`/`signal`), versioning. It is the layer everything runs on, woven throughout rather than one component beside the others, and the **only thing that coordinates across two frameworks that each only orchestrate themselves** (the **cross-framework** boundary). *(For an infra audience: the same durable execution Temporal uses to build its own cloud control plane.)*
 
-> **A note on LangGraph as "runtime."** LangChain positions **LangGraph as a *runtime*** (durable execution / HITL / persistence — peer to Temporal, Inngest, DBOS). **This demo uses LangGraph as a *framework*** — for its graph/loop abstraction (the dispatch agent's reasoning loop) only; its checkpointer here is `InMemorySaver` (scratch), while **Temporal's event history is the real, kill-tested durability.** If LangGraph is already a durable runtime, why Temporal on top? **Scope:** LangGraph's durability lives within its own framework/threads — it does not reach across to ADK. Temporal's durable execution **spans both frameworks**, which is the cross-framework boundary this demo proves.
+> **A note on LangGraph.** In *this* demo we use LangGraph for its graph/loop abstraction (the dispatch agent's reasoning loop) and let **Temporal** provide durability and persistence — so the LangGraph checkpointer here is simply `InMemorySaver`.
 
 <p align="center">
-  <img src=".github/assets/meltdown-screenshot-3.png" alt="Meltdown demo dashboard" width="900">
+  <img src="frontend/img/aie-world-fair-ui-demo-view.png" alt="Ice cream fleet dashboard — delivery fleet, live San Francisco map, customer orders, and the ADK + LangGraph agent reasoning panels" width="900">
 </p>
 
 ## The two patterns, in code
@@ -158,6 +176,11 @@ The dashboard has three tabs — one per pattern. All start the same way.
 
 
 ## Architecture
+
+<p align="center">
+  <img src="frontend/img/aie-world-fair-ziggy-temporal-ui-split-view.png" alt="The Meltdown dashboard side by side with the Temporal UI showing the same run's event history" width="900">
+  <br><em>The dashboard is just a view. Temporal's event history (right) is the source of truth — kill the worker mid-delivery and the run resumes from exactly here.</em>
+</p>
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -353,6 +376,10 @@ The two framework files diverge on purpose. **In LangGraph, you own the loop**, 
 ### Core mechanism — how the cross-framework path spans ADK + LangGraph
 
 On the **🔀 Cross-Framework · ADK + LangGraph** tab, one order runs across **both** frameworks in a single system. No agent framework orchestrates across frameworks — ADK orchestrates ADK agents, LangGraph orchestrates LangGraph nodes — so **Temporal, the durable-execution runtime (the substrate), does the cross-framework orchestration** between them. The boundary is made visible by giving each framework its **own Temporal child workflow**, so each appears as its own history in the Temporal UI.
+
+<p align="center">
+  <img src="frontend/img/aie-world-fair-diagram.png" alt="Cross-Framework flow: a Temporal parent workflow spawns a Google ADK child (Fleet ∥ Customer assessment) and a LangGraph child (Dispatch agent with an in-loop ask_human gate), joins their results, then commits to the driver delivery loop" width="540">
+</p>
 
 **1. The parent spawns one child per framework** (`workflows.py` → `MeltdownDemoWorkflow`):
 

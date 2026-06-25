@@ -210,8 +210,9 @@ class LgDispatchOutput:
     decision: str = "DISPATCH"  # "DISPATCH" | "HOLD"
     driver_id: str = ""  # the driver the Dispatch agent chose (empty → caller falls back)
     reasoning: str = ""
-    fleet_assessment: str = ""
-    customer_assessment: str = ""
+    # NOTE: assessments are NOT echoed back here — the parent already holds them (it passed
+    # them in via LgDispatchInput / has the ADK child's AdkAssessmentOutput). Returning them
+    # would re-store the same text in the parent's history. Keep child results thin.
     asked_human: bool = False
 
 
@@ -349,6 +350,14 @@ class OrderUpdateInput:
 @dataclass
 class DriverRouteInput:
     driver_id: str
+    # Carried forward on continue-as-new (defaults = a fresh driver at the warehouse).
+    # DriverRouteWorkflow is a long-lived entity: it bounds its own history by periodically
+    # continuing-as-new, passing ONLY this live state to the next run. New fields are read via
+    # getattr() in the workflow so an in-flight run started before they existed still replays.
+    current_lat: float = 0.0
+    current_lng: float = 0.0
+    delivered_total: int = 0  # lifetime deliveries across all continue-as-new generations
+    history_threshold: int = 0  # 0 → use DRIVER_HISTORY_CONTINUE_AS_NEW; tests set it low
 
 
 @dataclass
@@ -401,6 +410,14 @@ class MeltdownDemoInput:
     max_orders: int = 50
     # "adk" | "langgraph" | "crossframework" — set from the active UI tab at start
     dispatch_mode: str = "adk"
+    # Carried across continue-as-new (the long-lived-ORCHESTRATOR pattern). DORMANT in the demo:
+    # the run is bounded by order generation and finishes well under the threshold. Wired so a
+    # parent that ran indefinitely would keep its own history bounded. All getattr-read in the
+    # workflow so a run started before these existed still replays.
+    history_threshold: int = 0  # 0 → PARENT_HISTORY_CONTINUE_AS_NEW
+    driver_orders: dict = field(default_factory=dict)  # driver_id -> [order_id]; capacity ledger
+    orders_generated: int = 0
+    rereason_counts: dict = field(default_factory=dict)  # order_id -> re-reason count
 
 
 @dataclass

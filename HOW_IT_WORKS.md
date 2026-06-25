@@ -109,6 +109,22 @@ entity; per-job workflow for a stateless request/response reasoner.** (In cross-
 the demo generates fewer, slower orders — `CROSSFRAMEWORK_MAX_ORDERS` / interval — so the ~2
 child workflows per order stay legible in the Temporal UI.)
 
+**Keeping a long-lived workflow's history bounded — continue-as-new.** A per-job workflow
+seals its (small) history when it completes, so it never grows. A *long-lived* one is the
+opposite: every signal, activity, and child it touches appends to its event history, which
+would eventually hit Temporal's hard cap (~50K events / 50MB). The fix is **continue-as-new**:
+at a quiescent point the workflow atomically completes the current run and starts a fresh one
+with the **same workflow ID**, carrying forward only its small live state — history resets to
+~0, signals keep flowing to the new run, and it's logically "one workflow that runs forever."
+`DriverRouteWorkflow` does this: when its history crosses `DRIVER_HISTORY_CONTINUE_AS_NEW`
+(10K) and it's idle with nothing pending, it continues-as-new carrying just identity, position,
+and lifetime delivery count. The orchestrator (`MeltdownDemoWorkflow`) is wired the same way
+(`PARENT_HISTORY_CONTINUE_AS_NEW`; children are started `ParentClosePolicy.ABANDON` so they
+survive the hand-off, and a continued run re-acquires them by ID) — though it's **dormant in
+the demo**, which is bounded by order generation and finishes well under the threshold. The
+discipline that makes this work: keep the carried state small, and only continue-as-new at a
+point where that state fully captures the workflow (no in-flight activity to lose).
+
 **Both HITL directions run on this tab.** Agent→human: the dispatch child owns its own
 `answer_dispatch` signal + `pending_question` query, so the human signals the *agent's own
 workflow* (the durable wait is the Temporal signal + `wait_condition` + `Command(resume)`;
@@ -496,18 +512,10 @@ mid-loop. Temporal replays from event history. Note that LangGraph's `InMemorySa
 (the checkpointer the graph compiles with) is **non-durable on its own** — it's
 Temporal's event log that makes the in-loop wait survive the crash.
 
-> **LangGraph as runtime vs. as framework — read this before "why Temporal on top
-> of LangGraph?"** LangChain positions **LangGraph itself as a *runtime*** (durable
-> execution / HITL / persistence — a peer of Temporal, Inngest, DBOS). **This demo
-> uses LangGraph as a *framework*** — only for its graph/loop abstraction (the
-> Dispatch agent's reason→act→eval loop). The checkpointer here is `InMemorySaver`,
-> which is **scratch state**; **Temporal's event history is the real, kill-tested
-> durability.** So the honest answer to "if LangGraph is already a durable runtime,
-> why Temporal?" is **scope**: LangGraph's durability lives *within its own
-> framework/threads* and does not reach across to ADK. Temporal's durable execution
-> **spans both frameworks** — which is exactly the cross-framework boundary this demo
-> proves (see "Multi-framework orchestration" below). (Honest competitor set for the
-> runtime role: Inngest, DBOS, LangGraph-as-runtime.)
+> **A note on LangGraph.** This demo uses LangGraph as a *framework* — for its
+> graph/loop abstraction (the Dispatch agent's reason→act→eval loop) — and lets
+> **Temporal** provide durability and persistence, so the LangGraph checkpointer here
+> is just `InMemorySaver`.
 
 ---
 
@@ -684,7 +692,7 @@ to Temporal.
 The compelling reason to split is **heterogeneous agents**: one agent built on ADK, another
 on LangGraph, in one system. No agent *framework* can orchestrate *across* frameworks — ADK
 orchestrates ADK agents, LangGraph orchestrates LangGraph nodes, and each one's durability
-(even LangGraph's, when it's run as a runtime) stops at its own edge. The moment you mix
+stops at its own edge. The moment you mix
 them, **Temporal — the durable-execution runtime (the substrate) — is the only thing that
 coordinates across them** (each agent is a workflow; Temporal does fan-out / join / HITL
 between them, regardless of what framework runs inside each).

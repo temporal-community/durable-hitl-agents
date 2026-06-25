@@ -61,15 +61,10 @@ durable execution Temporal uses to build its own cloud control plane"*); always 
 ambiguous; do **not** add an "execution" bucket/section; prefer **"framework"** over
 "harness" (do not build the docs on "harness" — it's a contested term; if it must appear,
 use it only in the wide sense, "everything around the model, including the loop"); use
-**"framework"** not "scaffolding". **LangGraph note:** LangChain markets LangGraph as a
-*runtime* (durable execution / HITL / persistence — peer to Temporal, Inngest, DBOS); in
-**this repo we use LangGraph as a *framework*** (loop owner — the dispatch agent's reasoning
-loop only), with `InMemorySaver` as scratch state, while **Temporal is the durable-execution
-runtime / substrate** and the real, kill-tested durability. The honest answer to "if
-LangGraph is already a durable runtime, why Temporal on top?" is **scope**: LangGraph's
-durability stays within its own framework/threads and never reaches across to ADK;
-Temporal's durable execution **spans both frameworks** — the cross-framework boundary this
-demo proves.
+**"framework"** not "scaffolding". **LangGraph note:** in **this repo we use LangGraph as a
+*framework*** — its graph/loop abstraction for the dispatch agent's reasoning loop — and let
+**Temporal** provide durability and persistence, so the LangGraph checkpointer is just
+`InMemorySaver`.
 
 The disconnect/recovery scenarios (agent disconnect, driver disconnect, tool
 degradation) are **not** part of the talk's two demos. The underlying signals,
@@ -118,6 +113,14 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   reconnected. Driver completes delivery, stays at venue, can't report back until reconnected.
   On reconnect, `sync_driver_position` activity reads actual position from FleetState — no
   teleporting. Completed deliveries are not repeated; batch continues from next pending order.
+  As a long-lived workflow it bounds its own history with **continue-as-new**: at an idle,
+  drained loop-top once history crosses `DRIVER_HISTORY_CONTINUE_AS_NEW` (10K) it hands off to a
+  fresh run (same id) carrying only identity, position, and lifetime delivery count. The
+  orchestrator `MeltdownDemoWorkflow` is wired the same way (`PARENT_HISTORY_CONTINUE_AS_NEW`;
+  children started `ParentClosePolicy.ABANDON`, re-acquired by id on a continued run via the
+  `_build_continue_as_new_input` / `_apply_continuation` / `_parent_should_continue_as_new`
+  helpers) but is **dormant** — the demo run is bounded by order generation. Driver c-a-n is
+  integration-tested; the parent's helpers are unit-tested (see `tests/test_workflows.py`).
   HITL hold pattern: this is **operator-in-the-loop**, not agent-in-the-loop —
   the change is initiated externally (operator submits a customer change via REST)
   and a human supervisor approves it. The ADK agents never see the change; the
