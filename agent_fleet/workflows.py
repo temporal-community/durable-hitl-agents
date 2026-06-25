@@ -111,8 +111,14 @@ CROSSHARNESS_MAX_ORDERS = 50
 CROSSHARNESS_ORDER_INTERVAL_SECONDS = 22
 CROSSHARNESS_WARMUP_BURST_ORDERS = 3  # mild quick-start; no 5-order flood
 
-DRIVER_CAPACITY = 3
-DRIVER_IDS = ["driver-a", "driver-b", "driver-c", "driver-d", "driver-e"]
+# 4 drivers × 2 orders = 8 slots — a deliberate squeeze so the fleet occasionally runs
+# tight, making the agents' capacity reasoning (and the "commit scarce capacity" escalation)
+# actually fire. NOTE: capacity is a per-driver ORDER COUNT (batch limit), not servings —
+# a large order takes one slot, same as a small one.
+DRIVER_CAPACITY = 2
+DRIVER_IDS = ["driver-a", "driver-b", "driver-c", "driver-d"]
+# Hidden during warmup so the first orders fill A–C before D comes online.
+WARMUP_HIDDEN = ["driver-d"]
 
 # Pattern B — orders at/above this value are routed to the dispatch agent, which
 # DECIDES whether to escalate to a human. This is a cheap, token-saving routing
@@ -1170,7 +1176,7 @@ class MeltdownDemoWorkflow:
         warming_up = self._orders_generated <= self._WARMUP_ORDERS
         for driver_id in DRIVER_IDS:
             # During warmup, hide drivers D-E so agents only assign to A-C
-            if warming_up and driver_id in ("driver-d", "driver-e"):
+            if warming_up and driver_id in WARMUP_HIDDEN:
                 continue
             pos = self._driver_last_position.get(driver_id, (WAREHOUSE.lat, WAREHOUSE.lng))
             order_count = len(self._driver_orders.get(driver_id, []))
@@ -1196,7 +1202,7 @@ class MeltdownDemoWorkflow:
             if d in self._route_handles
             and d not in self._disconnected_drivers
             and len(self._driver_orders.get(d, [])) < DRIVER_CAPACITY
-            and not (warming_up and d in ("driver-d", "driver-e"))
+            and not (warming_up and d in WARMUP_HIDDEN)
         ]
 
     def _least_loaded_driver(self) -> str:
@@ -1226,7 +1232,7 @@ class MeltdownDemoWorkflow:
         # tool_get_fleet_status only shows A-C to the LLM
         await workflow.execute_activity(
             set_warmup_hidden,
-            args=[["driver-d", "driver-e"], True],
+            args=[WARMUP_HIDDEN, True],
             task_queue=DELIVERY_QUEUE,
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=FAST_RETRY,
@@ -1485,7 +1491,7 @@ class MeltdownDemoWorkflow:
         if self._orders_generated == self._WARMUP_ORDERS + 1:
             await workflow.execute_activity(
                 set_warmup_hidden,
-                args=[["driver-d", "driver-e"], False],
+                args=[WARMUP_HIDDEN, False],
                 task_queue=DELIVERY_QUEUE,
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=FAST_RETRY,
@@ -1575,7 +1581,7 @@ class MeltdownDemoWorkflow:
             driver_id not in self._route_handles
             or driver_id in self._disconnected_drivers
             or len(self._driver_orders.get(driver_id, [])) >= DRIVER_CAPACITY
-            or (warming_up and driver_id in ("driver-d", "driver-e"))
+            or (warming_up and driver_id in WARMUP_HIDDEN)
         )
 
         if needs_reassign:
@@ -1584,7 +1590,7 @@ class MeltdownDemoWorkflow:
             for fallback_id in DRIVER_IDS:
                 if fallback_id == original:
                     continue
-                if warming_up and fallback_id in ("driver-d", "driver-e"):
+                if warming_up and fallback_id in WARMUP_HIDDEN:
                     continue
                 if fallback_id in self._disconnected_drivers:
                     continue
