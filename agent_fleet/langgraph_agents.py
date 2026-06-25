@@ -49,6 +49,7 @@ with workflow.unsafe.imports_passed_through():
         tool_get_fleet_status,
         tool_get_order_priorities,
         tool_get_route_info,
+        tool_search_venue_events,
     )
     from agent_fleet.queues import AGENTS_QUEUE
 
@@ -77,6 +78,7 @@ _TOOL_ACTIVITIES: dict[str, Any] = {
     "get_fleet_status": tool_get_fleet_status,
     "get_route_info": tool_get_route_info,
     "get_order_priorities": tool_get_order_priorities,
+    "search_venue_events": tool_search_venue_events,
 }
 
 ESCALATION_GUIDANCE = (
@@ -113,8 +115,10 @@ _FLEET_SYS = (
 _CUSTOMER_SYS = (
     "You are the Customer Relations AI for Meltdown Ice Cream Delivery. A new order has arrived "
     "— assess its priority and urgency.\n"
-    "Call get_order_priorities for the order details, then reply with ONLY a one-line priority "
-    "read (e.g. 'VIP, tight deadline (25min), large 200-serving order'). No preamble."
+    "Call get_order_priorities for the order details, and search_venue_events to check for "
+    "current events at the venue that raise urgency. Then reply with ONLY a one-line priority "
+    "read (e.g. 'VIP, tight deadline (25min), 200 servings, conference at venue tonight'). "
+    "No preamble."
 )
 
 
@@ -214,6 +218,8 @@ def _tool_summary(agent_label: str, name: str, args: dict[str, Any]) -> str:
     origin = args.get("origin_name") or ""
     if name == "get_route_info" and (origin or dest):
         return f"{agent_label} — assess ETA — {origin} → {dest}".rstrip(" →")
+    if name == "search_venue_events" and args.get("venue"):
+        return f"{agent_label} — search events — {args['venue']}"
     pretty = name.replace("_", " ")
     return f"{agent_label} — {pretty}"
 
@@ -358,7 +364,16 @@ def _customer_tools() -> list:
         """Order priority details: VIP vs standard, deadlines, servings."""
         raise NotImplementedError
 
-    return [get_order_priorities]
+    @tool
+    def search_venue_events(venue: str) -> str:
+        """Search current events at the delivery venue that could raise urgency.
+
+        Args:
+            venue: the venue / hotel name.
+        """
+        raise NotImplementedError
+
+    return [get_order_priorities, search_venue_events]
 
 
 SUBMIT_DISPATCH = "submit_dispatch"  # the Dispatch agent's final decision (driver + dispatch/hold)
