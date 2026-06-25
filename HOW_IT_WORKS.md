@@ -33,8 +33,8 @@ on ADK, Dispatch on LangGraph — to show that when agents span harnesses,
 `_dispatch_mode`, and `_assign_order` routes on it.
 
 - **ADK tab → ADK.** Every order runs `_run_adk_assignment()` inline in the parent
-  workflow; the ADK multi-agent pipeline reasons about it and assigns it to the
-  least-loaded driver. No gate.
+  workflow; the ADK multi-agent pipeline reasons about it and the Dispatch agent
+  picks the driver (`submit_assignment`, from the eligible set). No gate.
 - **LangGraph tab → inline LangGraph team.** Every order runs
   `_run_langgraph_assignment(order, driver_id, onum)` — the looping multi-agent
   LangGraph team runs *inline in the parent workflow*. There is **no per-order gate
@@ -176,8 +176,9 @@ order by the active tab's `_dispatch_mode`: **ADK tab → ADK inline**
 (`_run_adk_assignment()`), or **LangGraph tab → inline LangGraph team**
 (`_run_langgraph_assignment()`, which runs the looping team inline and drives any
 in-loop `ask_human` interrupt with the `answer_dispatch` signal — no gate child). It builds
-`DriverSnapshot`s from its own state, applies the capacity guardrail and
-least-loaded balancing, and handles customer changes — including the human→agent
+`DriverSnapshot`s from its own state, applies the capacity guardrail over the
+Dispatch agent's chosen driver (least-loaded fallback), and handles customer
+changes — including the human→agent
 re-reason path (`_process_customer_change` → `_rereason_order` on an approved
 address change). It never does delivery work directly — it delegates to child
 workflows.
@@ -302,7 +303,7 @@ def create_order_assignment_agent() -> SequentialAgent:
 | Agent | What it evaluates | Tools |
 |-------|-------------------|-------|
 | **Fleet Agent** | Delivery actor positions, free capacity slots, driving ETAs to destination | `tool_get_fleet_status`, `tool_get_route_info` (Google Maps Directions) |
-| **Customer Agent** | VIP vs standard tier, deadline tightness, venue events (conference catering, receptions, festivals), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) |
+| **Customer Agent** | VIP vs standard tier, deadline tightness, venue events (conference catering, receptions, festivals), servings/guest count | `tool_get_order_priorities`, `google_search` (Gemini grounding) — LangGraph uses `tool_search_venue_events` for the same web-grounded venue check |
 | **Dispatch Agent** | Synthesizes both assessments, picks the final delivery actor, submits a structured assignment | `tool_submit_assignment` |
 
 Fleet Agent and Customer Agent run in parallel; the Dispatch Agent runs
@@ -311,11 +312,14 @@ Agents** (`Agent` + `TemporalModel(...)`). `create_order_assignment_agent()`
 returns an **Orchestrator Agent** (`SequentialAgent`) — no model, no LLM call, no
 Temporal activity. It purely sequences the sub-agents.
 
-After ADK returns an assignment, the parent applies a **capacity guardrail** (if
-ADK picks a full or disconnected driver, reassign to the next available) and then
-**spreads load across the fleet**: among eligible drivers it prefers the
-least-loaded one, so all five stay active. The agents still reason and publish
-their assessment; this only rebalances the final destination.
+The **Dispatch agent picks the driver itself** — it calls `submit_assignment`
+(ADK) / `submit_dispatch` (LangGraph) with a driver from the eligible set
+(connected + under capacity). The parent then applies a **capacity guardrail**:
+it commits the agent's chosen driver if that driver is still eligible, otherwise
+falls back to the least-loaded eligible one (`_least_loaded_driver()`, also the
+default proposal seeded into the agent). The fleet runs **4 drivers (A–D) at
+capacity 2**, so capacity is genuinely scarce — the agent has to reason about who
+has a free slot, and the scarce-capacity case is what drives an escalation.
 
 ---
 
@@ -552,9 +556,9 @@ server runs in its own process.
 
 | Queue | Worker | What it runs |
 |---|---|---|
-| `meltdown-workflows` | Workflows + minimal local activities | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow`; `publish_agent_event` / `publish_agent_events_batch` (local activities); the Pattern B node activities (Fleet/Customer/Dispatch Gemini reason calls **and each tool call**, via `LangGraphPlugin`) — these run for the team graph **inline in `MeltdownDemoWorkflow`**. `LangGraphPlugin` registers exactly **one** graph: `GRAPH_NAME = "dispatch_team"` (the looping multi-agent team with the in-loop `ask_human` tool). |
+| `meltdown-workflows` | Workflows + minimal local activities | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow`, plus the cross-harness child workflows `AdkAssessmentWorkflow` + `LgDispatchWorkflow`; `publish_agent_event` / `publish_agent_events_batch` (local activities); the LangGraph node activities (Fleet/Customer/Dispatch Gemini reason calls **and each tool call**, via `LangGraphPlugin`). `LangGraphPlugin` registers **two** graphs: `GRAPH_NAME = "dispatch_team"` (the looping multi-agent team with the in-loop `ask_human` tool, run inline in `MeltdownDemoWorkflow` for the ADK/LangGraph tabs) and `DISPATCH_ONLY_GRAPH_NAME = "dispatch_only"` (the Dispatch-only graph run inside `LgDispatchWorkflow` for the cross-harness tab). |
 | `meltdown-delivery` | Delivery | `generate_order`, `navigate_to`, `pickup_orders`, `deliver_order`, `execute_customer_change`, `get_route_polyline`, `get_fleet_status`, `get_order_priorities`, `set_driver_idle`, `set_warmup_hidden`, `sync_driver_position` (max 20 concurrent) |
-| `meltdown-agents` | ADK/LLM activities | `register_assignment`, `tool_get_fleet_status`, `tool_get_order_priorities`, `tool_get_route_info`, plus the ADK `invoke_model` activity + `google_search` grounding (max 5 concurrent) |
+| `meltdown-agents` | ADK/LLM activities | `register_assignment`, `tool_get_fleet_status`, `tool_get_order_priorities`, `tool_get_route_info`, `tool_search_venue_events` (LangGraph Customer's venue-events search), plus the ADK `invoke_model` activity + `google_search` grounding (max 5 concurrent) |
 
 **Why a workflows-only-ish worker?** Workflows must be deterministic and
 replayable. Keeping them off the heavy activity queues makes it physically

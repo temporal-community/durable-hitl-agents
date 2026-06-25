@@ -77,12 +77,14 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   (no mock mode).
 - **Workflows own state** (`workflows.py`): `MeltdownDemoWorkflow` owns driver positions, order
   assignments, and disconnect status. Builds `DriverSnapshot`s and passes to activities as inputs.
-  Capacity guardrail: if ADK assigns to a full (3 orders) or disconnected driver, auto-reassigns
-  to next available. Assignment then **spreads load across the fleet**: among eligible drivers
-  (connected, under capacity) it prefers the least-loaded one so all 5 drivers stay active —
-  the agents still reason and publish their assessment; this only rebalances the final
-  destination. Orders assigned while Fleet Agent is offline get `degraded=True` flag.
-  `DriverRouteWorkflow` is a per-driver child workflow — batch-picks up to 3 orders at Ziggy's,
+  The **Dispatch agent picks the driver itself** (`submit_assignment` / `submit_dispatch`, from
+  the eligible — connected, under-capacity — set). Capacity guardrail: the parent commits the
+  agent's chosen driver if still eligible, else falls back to the least-loaded eligible one
+  (`_least_loaded_driver()`, also the default proposal seeded into the agent). The fleet is a
+  deliberately tight **4 drivers (A–D) at capacity 2** (`DRIVER_IDS`, `DRIVER_CAPACITY`), so
+  capacity is scarce and the agent must reason about free slots; `WARMUP_HIDDEN` keeps driver-d
+  back during the warm-up burst. Orders assigned while Fleet Agent is offline get `degraded=True`.
+  `DriverRouteWorkflow` is a per-driver child workflow — batch-picks up to capacity (2) orders at Ziggy's,
   delivers sequentially (venue A → venue B → ...), then returns. Tracks status, is_disconnected,
   is_recovering, path_history, and current_orders. Disconnect uses Temporal-native retry: activities
   check FleetState for disconnect, fail if disconnected, Temporal retries with backoff until
@@ -131,12 +133,24 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   the full `build_dispatch_team_graph()` / `GRAPH_NAME = "dispatch_team"` is unchanged.)
   Each `*_reason` node is a real Gemini call (through
   `init_chat_model`) executed as a Temporal **activity** recorded in the **parent's** history, and
-  **each tool call** (`get_fleet_status`, `get_route_info`, `get_order_priorities`) runs as its own
+  **each tool call** (`get_fleet_status`, `get_route_info`, `get_order_priorities`,
+  `search_venue_events`) runs as its own
   Temporal activity inline in the workflow (the `*_act` nodes, `execute_in=workflow`), mirroring ADK's
-  `activity_tool` granularity.
+  `activity_tool` granularity. **Tool parity:** Fleet uses `get_fleet_status` + `get_route_info`
+  and Customer uses `get_order_priorities` + `search_venue_events` in BOTH frameworks across all
+  three tabs — `search_venue_events` (Gemini `GoogleSearch` grounding behind a Temporal activity)
+  is the LangGraph analog of ADK's built-in `google_search`, so the agents reason over the same
+  inputs regardless of harness.
+  **The Dispatch agent decides the driver:** it binds a `submit_dispatch(driver_id, decision)`
+  tool (ADK: `tool_submit_assignment`) and picks a driver from the eligible set seeded into
+  state (`eligible_drivers`); `_run_langgraph_assignment` / `LgDispatchWorkflow` commit the
+  agent's `chosen_driver` (least-loaded fallback if it isn't eligible).
   **HITL is in the reasoning loop, not a boundary gate:** Fleet and Dispatch bind an `ask_human`
   tool and can call it mid-loop when they need outside sign-off (whether to ask is the agent's
   judgment, guided by `ESCALATION_GUIDANCE` / per-agent system prompts — there's no code threshold).
+  The approve/reject answer is **not a rubber stamp**: it flows back as the agent's next
+  observation, and the agent reasons over it (plus the Fleet/Customer assessments) before calling
+  `submit_dispatch` to pick the driver / hold.
   Its execution is NOT an activity; the `*_human` node (`execute_in=workflow`) runs a durable
   LangGraph `interrupt()` that suspends the graph. The parent (`_run_langgraph_assignment`) loops on
   `result.get("__interrupt__")`: it surfaces the question into `_pending_dispatch`, `wait_condition`s
@@ -220,8 +234,9 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   Dispatch Agent (sequential) — this is the multi-agent reasoning used for order assignment when
   the **adk tab** is selected (Pattern A's substrate). The langgraph tab routes every order to the
   Pattern B LangGraph team instead; the framework is chosen by the tab, not per-order. The ADK path
-  runs inline in the workflow via `_run_adk_assignment()`, committing to the least-loaded driver
-  with no dispatch gate involved. The same team is re-run on an approved customer **address change**:
+  runs inline in the workflow via `_run_adk_assignment()`, committing the driver the **Dispatch
+  agent picked** (`tool_submit_assignment`; least-loaded fallback) with no dispatch gate involved.
+  The same team is re-run on an approved customer **address change**:
   `_process_customer_change` calls `_rereason_order` → `_run_adk_assignment` again so the agents
   re-reason the order for the new location, then the held driver reroutes. The
   crossharness tab reuses a slimmed variant: `create_assessment_team_agent()` builds a
@@ -290,11 +305,11 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   **Fisherman's Wharf** (silver), **Chinatown** (gold). The reroute-only destination is
   **Oracle Park** (`COSMOPOLITAN` — historical var name). The per-venue `hotel` key is a
   legacy field name; values are SF venue names.
-- Drivers use letter IDs: `driver-a` through `driver-e`, displayed as `Driver-A` etc.
+- Drivers use letter IDs: `driver-a` through `driver-d` (4 drivers), displayed as `Driver-A` etc.
 - Ice cream shop is "Ziggy's Ice Cream" = the **Ferry Building** (`WAREHOUSE_LABEL` in `locations.py`)
 - Auto-generated orders top out at ~$1,950 and the agent escalates only genuinely high-value
   orders, so routine orders auto-dispatch; only the injected premium order makes the agent call `ask_human`
-- Max 50 orders per demo run, drivers batch up to 3 orders (`DRIVER_CAPACITY`)
+- Max 50 orders per demo run; 4 drivers at `DRIVER_CAPACITY = 2`, so each batches up to 2 orders
 
 ## Commands
 
