@@ -4,8 +4,10 @@
 
 Conference demo for the AI Engineer World's Fair talk **"The Human Is an Async
 API: Designing Durable Human-in-the-Loop Agents."** It shows **two** durable
-human-in-the-loop patterns on Temporal, visualized as an ice cream delivery
-fleet in **downtown San Francisco**:
+human-in-the-loop patterns across **three use cases** (one per tab) on Temporal,
+visualized as an ice cream delivery fleet in **downtown San Francisco**. Use cases 1
+and 2 show one pattern each on a single framework; use case 3 combines both (it is
+not a third pattern):
 
 - **Pattern A — Human-in-the-loop ("The Human Calls the Agent")** — built on
   **Google ADK** (multi-agent assignment). A customer submits a change mid-delivery
@@ -29,7 +31,7 @@ fleet in **downtown San Francisco**:
   — the answer flows back as the agent's next observation. **No per-order gate child.**
   The thesis: the human is just another tool the agent calls — but a durable, async
   one; on Temporal that tool call is a signal.
-- **Cross-Framework — Temporal WITH ADK and LangGraph (the 3rd tab)** — the same
+- **Cross-Framework — both patterns, both frameworks (use case 3, the 3rd tab)** — the same
   order assignment, but split across **two frameworks orchestrated as child
   workflows** under one Temporal parent: an **ADK** team does the assessment, then a
   **LangGraph** graph does the dispatch (with its in-loop `ask_human`). Selected by

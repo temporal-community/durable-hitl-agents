@@ -26,7 +26,7 @@ See [How It Works](HOW_IT_WORKS.md) for more detailed "under the hood" informati
 ## Pre-flight check
 - Map shows **downtown San Francisco** with three delivery venues — **Moscone Center**, **Fisherman's Wharf**, **Chinatown** — and Ziggy's Ice Cream at the **Ferry Building**
 - All 4 drivers (A–D) are parked at Ziggy's, status idle (capacity 2 each — a deliberately tight fleet so capacity pressure shows; driver-d stays hidden during the warm-up burst)
-- Three tabs at the top: **🧑 Human → Agent** (Human-initiated), **🤖 Agent → Human** (Agent-initiated), and **🔀 Cross-Framework · ADK + LangGraph**
+- **Two HITL patterns, three use cases (one per tab):** **🧑 Human → Agent** (use case 1 — Google ADK only, Pattern A), **🤖 Agent → Human** (use case 2 — LangGraph only, Pattern B), and **🔀 Cross-Framework · ADK + LangGraph** (use case 3 — both patterns, both frameworks). The third isn't a third pattern — it combines both.
 - "Start Deliveries" button is active on all tabs
 - If you see a stale state from a prior run, click **Reset** first
 

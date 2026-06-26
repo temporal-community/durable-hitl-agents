@@ -8,12 +8,14 @@ see [DEMO_GUIDE.md](DEMO_GUIDE.md) for the talk track.
 The demo is Ziggy's Ice Cream catering fleet running on **downtown San
 Francisco** (the Ferry Building is the shop; orders come from Moscone Center,
 Fisherman's Wharf, and Chinatown). It shows **two durable human-in-the-loop
-patterns** on Temporal, each built on a **different agent framework**, to make
-the point that the durable-HITL pattern is framework-agnostic. A **third
-("Cross-Framework") tab** then runs both frameworks in one system — Fleet + Customer
-on ADK, Dispatch on LangGraph — to show that when agents span frameworks,
-**Temporal**, the durable-execution runtime (the substrate), is the only thing that
-coordinates *across* them (no agent framework can).
+patterns** across **three use cases** (one per tab): **Pattern A** (the human calls
+the agent) on a **Google ADK–only** tab, **Pattern B** (the agent calls the human)
+on a **LangGraph–only** tab — same pattern on two different frameworks, to make the
+point that durable HITL is framework-agnostic — and a **Cross-Framework** tab that
+runs **both patterns across both frameworks** in one system (Fleet + Customer on ADK,
+Dispatch on LangGraph). The third tab isn't a third pattern; it combines both, to show
+that when agents span frameworks **Temporal**, the durable-execution runtime (the
+substrate), is the only thing that coordinates *across* them (no agent framework can).
 
 ---
 
