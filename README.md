@@ -527,3 +527,4 @@ This demo was a team effort. With thanks to:
 - **[Angie Byron](https://www.linkedin.com/in/webchick/)** — Drove the documentation and helped review.
 - **[Tim Conley](https://www.linkedin.com/in/tim-conley-0b249b14/)** — Google ADK integration and code review.
 - **[David Hyde](https://www.linkedin.com/in/dabh/)** — LangGraph integration and code review.
+- **[Maple Xu](https://www.linkedin.com/in/maple-xu/)** — Dynamic logging of ADK event history.
