@@ -98,11 +98,11 @@ async def answer_dispatch(self, oid, decision):            # human → flips the
 > **Two frameworks, one durable contract — the human is a tool the agent calls, and on Temporal that tool call is a signal.** (The `ask_human` "execution" is a LangGraph `interrupt()`; the durable wait + resume is a Temporal `wait_condition` + `answer_dispatch` signal.)
 
 <p align="center">
-  <a href="https://youtube.com/shorts/Wq7hiN2KYnk">
-    <img src="https://img.youtube.com/vi/Wq7hiN2KYnk/hqdefault.jpg" alt="Watch the Meltdown demo on YouTube" width="280">
+  <a href="https://youtu.be/kTPDzsXxKFg">
+    <img src="https://img.youtube.com/vi/kTPDzsXxKFg/maxresdefault.jpg" alt="Watch the Durable Human-in-the-Loop Agents demo on YouTube" width="600">
   </a>
   <br>
-  <em>▶ <a href="https://youtube.com/shorts/Wq7hiN2KYnk">Watch the demo on YouTube</a></em>
+  <em>▶ <a href="https://youtu.be/kTPDzsXxKFg">Watch the demo on YouTube</a></em>
 </p>
 
 Built with **Google ADK** (multi-agent reasoning for Pattern A), **LangGraph** via `temporalio.contrib.langgraph` (the looping multi-agent team with the in-loop `ask_human` tool for Pattern B), and **Temporal** for durable execution. Orders auto-generate on a timer. AI agents (Fleet, Customer, Dispatch) evaluate positions, capacity, ETAs, and priority — then the **Dispatch agent picks the driver** (it calls `submit_assignment`/`submit_dispatch` with a driver from the eligible set; least-loaded is the default proposal and the fallback if its pick isn't eligible). The fleet runs **4 drivers (A–D) at capacity 2** so capacity pressure — and the scarce-capacity escalation — actually fire. Drivers batch-pickup at Ziggy's (the Ferry Building) and deliver sequentially. Both human-in-the-loop pauses are durable Temporal signals — survive worker death, resume exactly where they left off.
