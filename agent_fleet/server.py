@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from temporalio.service import RPCError
 
 load_dotenv()
 
-from agent_fleet.config import TEMPORAL_ADDRESS
+from agent_fleet.config import FLEET_DB_PATH, TEMPORAL_ADDRESS
 from agent_fleet.locations import (
     COSMOPOLITAN,
     REROUTE_OPTIONS,
@@ -139,6 +140,27 @@ async def start_demo(body: StartRequest | None = None):
                 await _cancel_running_workflows()
                 continue
             raise
+
+
+# The worker touches this file every ~2s (see agent_fleet/worker.py). The server reads its age
+# to drive the header's Service Online/Offline badge, so you can SEE the worker stop/start (e.g.
+# `make kill-worker`) without the terminal. File-based + heartbeat is robust regardless of fleet
+# activity — unlike task-queue pollers, which look "idle" when a live worker is just long-polling.
+WORKER_HEARTBEAT_PATH = Path(FLEET_DB_PATH).with_name("worker_heartbeat")
+_WORKER_HEARTBEAT_STALE_SECONDS = 6  # worker beats every ~2s; 3 missed beats → offline
+
+
+@app.get("/api/worker-health")
+async def worker_health():
+    """True iff a worker has written its heartbeat within the staleness window."""
+    try:
+        mtime = WORKER_HEARTBEAT_PATH.stat().st_mtime
+        return {"worker_online": (time.time() - mtime) < _WORKER_HEARTBEAT_STALE_SECONDS}
+    except FileNotFoundError:
+        return {"worker_online": False}
+    except Exception:
+        logger.exception("worker-health check failed")
+        return {"worker_online": False}
 
 
 @app.post("/api/reset")

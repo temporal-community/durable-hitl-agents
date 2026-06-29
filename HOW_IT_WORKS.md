@@ -127,6 +127,22 @@ the demo**, which is bounded by order generation and finishes well under the thr
 discipline that makes this work: keep the carried state small, and only continue-as-new at a
 point where that state fully captures the workflow (no in-flight activity to lose).
 
+**The agent loops are real, but deliberately shallow.** Each agent is a genuine
+reason→act→observe ReAct loop, and every reason call and tool call is its own durable Temporal
+activity — but the loops are only a few hops deep (Dispatch is `reason → maybe ask_human →
+reason → decide`), because picking a driver is a *bounded* task. Loop **depth is orthogonal to
+the durable-HITL thesis**: a shallow loop is enough to fire `ask_human` mid-reasoning and prove
+the pause is durable, and a 10×-deeper loop would exercise the *exact same* contract — just with
+more steps to crash-and-replay through. Shallow loops are also *why* the per-order children stay
+bounded; deepen them enough and the children would start to need continue-as-new too.
+
+**"Long-lived" means history, not wall-clock.** A per-order child parked on `ask_human` can be
+*long in wall-clock* — it may wait minutes or hours for a human — yet it stays near-free and
+never needs continue-as-new, because a `wait_condition` adds almost nothing to history. That's
+the durability flex: a workflow can be long-lived *purely by waiting*, cheaply, surviving
+crashes. Only workflows that accumulate **history** (the drivers, delivery after delivery) are
+"long-lived" in the sense that needs continue-as-new.
+
 **Both HITL directions run on this tab.** Agent→human: the dispatch child owns its own
 `answer_dispatch` signal + `pending_question` query, so the human signals the *agent's own
 workflow* (the durable wait is the Temporal signal + `wait_condition` + `Command(resume)`;

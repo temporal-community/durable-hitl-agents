@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
+from pathlib import Path
 
 from temporalio.client import Client
 from temporalio.contrib.google_adk_agents import GoogleAdkPlugin
@@ -44,7 +46,7 @@ from agent_fleet.activities import (
     tool_get_route_info,
     tool_search_venue_events,
 )
-from agent_fleet.config import TEMPORAL_ADDRESS
+from agent_fleet.config import FLEET_DB_PATH, TEMPORAL_ADDRESS
 from agent_fleet.langgraph_agents import (
     DISPATCH_ONLY_GRAPH_NAME,
     GRAPH_NAME,
@@ -161,6 +163,22 @@ async def create_worker(client: Client) -> list[Worker]:
     ]
 
 
+# Liveness heartbeat for the UI's Service Online/Offline badge (read by /api/worker-health).
+# A pure liveness signal, independent of task-queue activity, so it stays accurate even when
+# the fleet is idle (unlike task-queue poller freshness).
+_WORKER_HEARTBEAT_PATH = Path(FLEET_DB_PATH).with_name("worker_heartbeat")
+
+
+async def _heartbeat_loop() -> None:
+    """Touch the heartbeat file every ~2s while the worker is alive."""
+    while True:
+        try:
+            _WORKER_HEARTBEAT_PATH.write_text(str(time.time()))
+        except Exception:
+            logger.debug("heartbeat write failed", exc_info=True)
+        await asyncio.sleep(2)
+
+
 async def run_worker() -> None:
     """Connect to Temporal and run all workers until interrupted."""
     from agent_fleet.config import GOOGLE_API_KEY, GOOGLE_MAPS_API_KEY
@@ -192,6 +210,9 @@ async def run_worker() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, shutdown_event.set)
 
+    # Heartbeat for the UI's worker online/offline badge (see /api/worker-health).
+    heartbeat_task = asyncio.create_task(_heartbeat_loop())
+
     # Run all workers; cancel on shutdown signal
     tasks = [asyncio.create_task(w.run()) for w in workers]
     shutdown_task = asyncio.create_task(shutdown_event.wait())
@@ -200,7 +221,11 @@ async def run_worker() -> None:
         logger.info("Shutdown signal received, stopping workers...")
         for t in tasks:
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        heartbeat_task.cancel()
+        await asyncio.gather(*tasks, heartbeat_task, return_exceptions=True)
+        # Remove the heartbeat so the UI flips to "offline" immediately on a clean stop
+        # (e.g. `make kill-worker`, which sends SIGTERM); a hard kill leaves it to age out.
+        _WORKER_HEARTBEAT_PATH.unlink(missing_ok=True)
         logger.info("Workers stopped.")
 
 

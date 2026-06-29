@@ -134,8 +134,8 @@ On the Agent-in-the-loop tab, **every order** runs a **looping multi-agent LangG
 1. Click **Drop high-value order**. This injects a premium **Moscone Center** catering order (well above the routine ~$1,950 cap) via `POST /api/inject-order`.
 2. The looping LangGraph multi-agent team (Fleet + Customer → Dispatch) — running **inline in the parent workflow** — assesses the value and fleet impact; **mid-reasoning** the Dispatch agent **calls the `ask_human` tool**. That suspends the graph on a durable `interrupt()`, and the parent parks on the `answer_dispatch` signal — no child workflow spawned.
 3. An **approval card appears over the map** — "Agent is requesting human approval" — with the agent's question, reasoning, recommendation, order value, and fleet impact. The brief is surfaced via `GET /api/pending-dispatch`, which reads the parent workflow's `pending_dispatch` dict (populated when the agent's `ask_human` interrupt fires).
-4. **The durability moment — kill the worker now.** While the card is up, stop the worker process (Ctrl-C in its terminal, or kill the `python -m agent_fleet.worker` process). The fleet freezes — but the *pending question is in Temporal, not in the worker's memory.*
-5. **Restart the worker.** The fleet resumes and the approval card is still there, waiting. Nothing was lost. (Optionally show the parked `meltdown-demo` parent workflow in the Temporal UI before and after — same `wait_condition` on `answer_dispatch`, resumed from history. No `gate-*` child to look for.)
+4. **The durability moment — kill the worker now.** While the card is up, from a **second terminal** run **`make kill-worker`** (leave `make run` going in the first — that keeps Temporal + the web server alive). The fleet freezes — but the *pending question is in Temporal, not in the worker's memory.* (Don't Ctrl-C `make run`; that tears down Temporal too and wipes the in-memory dev-server state.)
+5. **Restart the worker** with **`make worker`**. It replays from Temporal's history — the fleet resumes and the approval card is still there, waiting. Nothing was lost. (Optionally show the parked `meltdown-demo` parent workflow in the Temporal UI before and after — same `wait_condition` on `answer_dispatch`, resumed from history. No `gate-*` child to look for.) For an even stronger beat, **approve while the worker is down** — the signal is durably recorded by Temporal with no worker present, and applied on restart.
 6. Click **Approve dispatch** or **Reject** (`POST /api/approve-dispatch` signals `MeltdownDemoWorkflow.answer_dispatch`):
    - **Approve:** the answer flows back as the agent's next observation; the agent **reasons over that approval plus the Fleet/Customer assessments and picks the driver** (`submit_dispatch`) — it's not a rubber stamp — then the fleet delivers it.
    - **Reject:** the answer flows back as a reject; the agent holds the order — fleet capacity is preserved, the order shows as cancelled.
@@ -173,6 +173,19 @@ This tab runs both frameworks **at once, on the same delivery**. Fleet and Custo
 
 **Operational note:** After any code change, **terminate the `meltdown-demo` workflow (Reset) and restart the worker** — otherwise stale child histories fail to replay.
 
+### Cross-Framework code tour (for "show me the code")
+
+In the order the flow happens (symbol names are stable; line numbers are approximate hints):
+
+1. **Where the graph is defined** — `build_dispatch_only_graph()` in `agent_fleet/langgraph_agents.py` (~L629): `START → dispatch_reason → {dispatch_human → dispatch_reason | END}`. Name: `DISPATCH_ONLY_GRAPH_NAME = "dispatch_only"` (~L63); human node wired at ~L649.
+2. **The prompt that makes the agent escalate** — `ESCALATION_GUIDANCE` in `langgraph_agents.py` (~L84); the "call `ask_human` …" instruction is ~L90–94.
+3. **Where the agent asks the human** — the tool `_ask_human_tool()` / `ask_human(question)` (~L318, body is `raise NotImplementedError`), and the durable pause itself: `interrupt(...)` inside `_human_node` (~L296) — that payload is the question.
+4. **The query that loads the human's question box** — `LgDispatchWorkflow.pending_question` query in `agent_fleet/workflows.py` (~L1020); the interrupt payload is captured into `self._pending_question` at ~L1051. (`/api/pending-dispatch` reads this child query to render the card.)
+5. **The durable wait** — `await workflow.wait_condition(...)` in `LgDispatchWorkflow.run` (`workflows.py` ~L1052).
+6. **The signal that resumes (cross-framework)** — `LgDispatchWorkflow.answer_dispatch` (~L1009); the human signals the dispatch **child** directly (no order_id — the child *is* the order), which unblocks the wait and the graph resumes via `Command(resume=answer)` (~L1066).
+
+**How the pause/resume works.** `interrupt(payload)` checkpoints the graph and returns from `ainvoke()` with the payload in `result["__interrupt__"]` — the graph is suspended at that node. Calling the graph again with `Command(resume=answer)` restores it and the `interrupt()` call *returns* `answer`, so the node finishes and the edge `dispatch_human → dispatch_reason` makes the Dispatch agent **re-reason over the human's answer — on approve *and* reject**. A reject still re-reasons, but the workflow's `rejected` flag forces a final HOLD regardless of what the agent concludes. LangGraph gives the pause/resume; **Temporal makes the gap durable** — the checkpointer is `InMemorySaver` (scratch); the signal + `wait_condition` + re-invoke live in Temporal's event history, so a worker kill mid-pause loses nothing.
+
 ---
 
 ## Handling Questions
@@ -182,6 +195,9 @@ This tab runs both frameworks **at once, on the same delivery**. Fleet and Custo
 
 **"Why two frameworks?"**
 > "To show the pattern isn't tied to one. Pattern A is Google ADK, Pattern B is LangGraph. Different agent frameworks, same Temporal primitive: a human decision arrives as a durable async signal. In both, the human is a tool the agent's loop reasons over — the pattern is model- and framework-agnostic."
+
+**"Aren't these agent loops pretty shallow?"**
+> "Yes — deliberately. They're real reason→act→observe loops, and every reason call and tool call is its own durable activity — but only a few hops deep, because picking a driver is a bounded task. Loop depth is orthogonal to the point: a shallow loop still fires `ask_human` mid-reasoning and proves the pause is durable, and a 10×-deeper loop would run the *exact same* durability contract — just with more steps to crash and replay through. I kept them shallow so the demo stays legible; depth is a knob, not a missing piece. (Relatedly, that's why the per-order agent workflows stay bounded and don't need continue-as-new — the long-lived ones here are the drivers.)"
 
 **"Why does the LangGraph code look so much heavier than the ADK code?"**
 > "Because in LangGraph **you own the loop**. `langgraph_agents.py` hand-builds it from primitives — the reason↔act loop and routing, per-tool-call activities (`_run_tools`), message parsing (`_coerce_text` / `_last_text`), the `interrupt()` human node (`_human_node`), and model + tool binding (`_chat_model`). **ADK doesn't need any of that**: its `Runner` runs the loop. (Temporal never runs the loop — the framework does, in both cases.) `TemporalModel` + `activity_tool` make each model call and each tool call a durable Temporal activity, and structured output comes back through session state. So it's the same durable-execution runtime underneath — LangGraph just exposes more of the plumbing. **LangGraph = assemble the loop from primitives; ADK = batteries-included.**"
