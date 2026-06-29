@@ -29,7 +29,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 echo "Cleaning up state..."
-rm -f fleet_state.db fleet_state.db-wal fleet_state.db-shm
+rm -f fleet_state.db fleet_state.db-wal fleet_state.db-shm worker_heartbeat
 
 echo "Cleaning up any existing processes..."
 pkill -f "temporal server" 2>/dev/null || true

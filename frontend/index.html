@@ -1235,7 +1235,7 @@
 
   <!-- Agent Reasoning Panel -->
   <div class="panel-section agent-panel" id="section-agents">
-    <div class="section-label">ADK Agent Team</div>
+    <div class="section-label" id="agent-team-label">ADK Agent Team</div>
     <div class="section-body">
       <div id="agent-events" class="agent-boxes">
         <div class="agent-box fleet_agent" id="agent-box-fleet_agent">
@@ -1564,6 +1564,13 @@ function switchTab(tabName) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tabName}`));
   // The active tab selects which framework dispatches all orders.
   api('dispatch-mode', 'POST', { mode: tabMode(tabName) });
+  // Label the agent panel by the active use case's framework(s).
+  const teamLabel = document.getElementById('agent-team-label');
+  if (teamLabel) {
+    teamLabel.textContent = tabName === 'agent' ? 'LangGraph Agent Team'
+      : tabName === 'cross' ? 'ADK + LangGraph Agent Team'
+      : 'ADK Agent Team';
+  }
   // Swap the framework logo to match the active pattern's framework (Temporal stays).
   const brand = document.getElementById('framework-brand');
   if (!brand) return;
@@ -2265,6 +2272,26 @@ async function pollPendingDispatch() {
   } catch (e) { /* demo not running yet — leave card hidden */ }
 }
 setInterval(pollPendingDispatch, 1500);
+
+// --- Worker liveness badge (Service Online / Offline) ---
+// Polls /api/worker-health (worker heartbeat) so you can SEE the worker stop/start
+// (e.g. `make kill-worker` / `make worker`) without the terminal.
+function setWorkerStatus(online) {
+  workerOnline = online;
+  const el = document.getElementById('worker-status');
+  if (!el) return;
+  el.className = 'worker-indicator ' + (online ? 'online' : 'offline');
+  el.innerHTML = '<div class="worker-dot"></div><span>'
+    + (online ? 'Service Online' : 'Service Offline') + '</span>';
+}
+async function pollWorkerHealth() {
+  try {
+    const r = await api('worker-health', 'GET');
+    setWorkerStatus(!!(r && r.worker_online));
+  } catch (e) { setWorkerStatus(false); }
+}
+setInterval(pollWorkerHealth, 3000);
+pollWorkerHealth();
 
 async function decideDispatch(approved) {
   if (!_gateCurrentOrder) return;

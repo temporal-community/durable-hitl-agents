@@ -7,6 +7,7 @@ __pycache__/
 fleet_state.db
 fleet_state.db-wal
 fleet_state.db-shm
+worker_heartbeat
 
 *.egg-info/
 fleet_state.*
