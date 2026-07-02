@@ -1794,6 +1794,21 @@ class MeltdownDemoWorkflow:
         # Routine (human-initiated path): commit the ADK assignment immediately.
         await self._commit_assignment(order, driver_id, fleet_offline, onum)
 
+    async def _signal_driver(self, driver_id: str, signal, arg) -> None:
+        """Signal a driver by workflow id (not a cached child handle).
+
+        Two reasons this matters: (1) addressing by id routes to the driver's CURRENT run, so
+        it survives a driver continue-as-new (a cached ChildWorkflowHandle pins the original,
+        now-closed run → "not found"); (2) it's guarded, so a driver that's already gone —
+        completed at shutdown, terminated, or mid-continue-as-new — never crashes the parent.
+        Mirrors the guarded child→parent signals."""
+        try:
+            handle = workflow.get_external_workflow_handle(f"route-{driver_id}")
+            await handle.signal(signal, arg)
+        except Exception as e:
+            name = getattr(signal, "__name__", signal)
+            workflow.logger.warning(f"Could not signal {driver_id}.{name} (driver gone): {e}")
+
     async def _commit_assignment(
         self, order: OrderAssignmentResult, driver_id: str, fleet_offline: bool, onum: str
     ) -> None:
@@ -1832,7 +1847,7 @@ class MeltdownDemoWorkflow:
         if already_assigned:
             workflow.logger.info(f"{order.order_id} already on {driver_id} — skipping signal")
         elif driver_id in self._route_handles:
-            await self._route_handles[driver_id].signal(
+            await self._signal_driver(driver_id,
                 DriverRouteWorkflow.add_order,
                 DriverRouteOrder(
                     order_id=order.order_id,
@@ -2316,7 +2331,7 @@ class MeltdownDemoWorkflow:
         driver_id_before_wait = self._find_driver_for_order(change.order_id)
         driver_id = driver_id_before_wait
         if driver_id and driver_id in self._route_handles:
-            await self._route_handles[driver_id].signal(
+            await self._signal_driver(driver_id,
                 DriverRouteWorkflow.update_pending,
                 OrderUpdateInput(
                     order_id=change.order_id,
@@ -2389,7 +2404,7 @@ class MeltdownDemoWorkflow:
             # other order's hold state.
             if driver_id and driver_id in self._route_handles:
                 if driver_id != driver_id_before_wait:
-                    await self._route_handles[driver_id].signal(
+                    await self._signal_driver(driver_id,
                         DriverRouteWorkflow.update_pending,
                         OrderUpdateInput(
                             order_id=change.order_id,
@@ -2400,7 +2415,7 @@ class MeltdownDemoWorkflow:
                 # update_order so the order is immediately removed/updated
                 # without a wasted navigation trip
                 if change.change_type == "cancel":
-                    await self._route_handles[driver_id].signal(
+                    await self._signal_driver(driver_id,
                         DriverRouteWorkflow.cancel_order,
                         OrderUpdateInput(
                             order_id=change.order_id,
@@ -2408,7 +2423,7 @@ class MeltdownDemoWorkflow:
                         ),
                     )
                 elif change.change_type == "address_change":
-                    await self._route_handles[driver_id].signal(
+                    await self._signal_driver(driver_id,
                         DriverRouteWorkflow.update_order,
                         OrderUpdateInput(
                             order_id=change.order_id,
@@ -2419,7 +2434,7 @@ class MeltdownDemoWorkflow:
                         ),
                     )
                 # Resolve the HITL hold for active orders
-                await self._route_handles[driver_id].signal(
+                await self._signal_driver(driver_id,
                     DriverRouteWorkflow.resolve_update,
                     OrderUpdateInput(
                         order_id=change.order_id,
@@ -2449,7 +2464,7 @@ class MeltdownDemoWorkflow:
         else:
             # Rejected — signal child to release (deliver normally)
             if driver_id and driver_id in self._route_handles:
-                await self._route_handles[driver_id].signal(
+                await self._signal_driver(driver_id,
                     DriverRouteWorkflow.resolve_update,
                     OrderUpdateInput(
                         order_id=change.order_id,
