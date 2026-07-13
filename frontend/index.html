@@ -255,6 +255,7 @@
     border: 1px solid rgba(0,255,255,0.55); border-radius: 12px; padding: 16px 18px;
     box-shadow: 0 0 44px rgba(0,255,255,0.28); color: #e5f6ff; font-size: 14px; }
   .dgc-header { font-weight: 700; color: #0ff; letter-spacing: .02em; margin-bottom: 10px; }
+  .dgc-escalated { background: #7c2d12; color: #fde68a; border: 1px solid #f59e0b; border-radius: 6px; padding: 5px 9px; margin-bottom: 10px; font-weight: 700; font-size: 12px; letter-spacing: .02em; }
   .dgc-order { font-size: 15px; margin-bottom: 6px; }
   .dgc-impact { color: #fbbf24; margin-bottom: 8px; }
   .dgc-rec { margin-bottom: 4px; }
@@ -2264,8 +2265,13 @@ async function pollPendingDispatch() {
     // approval signal goes straight to that workflow (null for the inline langgraph tab).
     _gateCurrentChildId = b.child_id || null;
     const onum = (b.order_id || oid).replace(/^order-/, '#');
+    const escalated = b.escalated || b.approver_tier === 'backup';
+    const escBadge = escalated
+      ? `<div class="dgc-escalated">⏫ Escalated to backup approver (primary window timed out)</div>`
+      : '';
     document.getElementById('dgc-body').innerHTML =
-      `<div class="dgc-order"><b>Order ${escapeHtml(onum)}</b> · $${(b.order_value || 0).toLocaleString()} · ${escapeHtml(b.venue || '')}</div>`
+      escBadge
+      + `<div class="dgc-order"><b>Order ${escapeHtml(onum)}</b> · $${(b.order_value || 0).toLocaleString()} · ${escapeHtml(b.venue || '')}</div>`
       + `<div class="dgc-rec">🤖 <b>${escapeHtml(b.agent || 'Agent')}</b> is asking a human:</div>`
       + `<div class="dgc-reason">"${escapeHtml(b.question || '')}"</div>`;
     card.style.display = 'block';
