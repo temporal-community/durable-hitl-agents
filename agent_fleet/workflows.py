@@ -125,7 +125,7 @@ WARMUP_HIDDEN = ["driver-d"]
 # pre-filter (non-platinum orders top out ~$1,950), NOT the escalation decision —
 # that stays the agent's prompt-driven call.
 GATE_REVIEW_VALUE = 2000
-GATE_ESCALATION_SECONDS = 3600  # primary approver window before escalating to backup
+GATE_ESCALATION_SECONDS = 30  # primary approver window before escalating to a backup approver (short for the demo; minutes/hours in prod)
 
 # Long-lived entity workflows keep their history bounded by periodically continuing-as-new.
 # A driver runs deliveries indefinitely, so its event history would otherwise grow until it
@@ -1005,6 +1005,7 @@ class LgDispatchWorkflow:
         self._answer: str | None = None
         self._pending_question: dict | None = None
         self._stop: bool = False
+        self._approver_tier: str = "primary"
 
     @workflow.signal
     async def answer_dispatch(self, decision: str) -> None:
@@ -1049,18 +1050,41 @@ class LgDispatchWorkflow:
         # Drive any in-loop ask_human interrupts the dispatch agent raises.
         while result.get("__interrupt__"):
             self._pending_question = result["__interrupt__"][0].value
-            await workflow.wait_condition(lambda: self._answer is not None or self._stop)
+            # Primary approver window. If it lapses with no answer, escalate to a backup
+            # approver (surface the tier so the UI/Temporal shows it) and keep waiting on
+            # the same durable primitive. The timer survives a worker crash like the wait.
+            try:
+                await workflow.wait_condition(
+                    lambda: self._answer is not None or self._stop,
+                    timeout=timedelta(seconds=GATE_ESCALATION_SECONDS),
+                )
+            except asyncio.TimeoutError:
+                self._approver_tier = "backup"
+                workflow.logger.info(
+                    f"Approval timed out for {inp.order_id}, escalating to backup approver"
+                )
+                workflow.set_current_details(
+                    f"Primary approver timed out, escalated to backup: {inp.venue} (${inp.order_value:,})"
+                )
+                if isinstance(self._pending_question, dict):
+                    self._pending_question = {
+                        **self._pending_question,
+                        "approver_tier": "backup",
+                        "escalated": True,
+                    }
+                await workflow.wait_condition(lambda: self._answer is not None or self._stop)
             if self._stop:
                 self._pending_question = None
-                workflow.logger.info(f"Dispatch child stopping while parked — HOLD {inp.order_id}")
+                workflow.logger.info(f"Dispatch child stopping while parked, HOLD {inp.order_id}")
                 return LgDispatchOutput(
                     decision="HOLD",
-                    reasoning="Held — demo shut down before approval",
+                    reasoning="Held: demo shut down before approval",
                     asked_human=True,
                 )
             answer = self._answer
             self._answer = None
             self._pending_question = None
+            self._approver_tier = "primary"
             if answer == "reject":
                 rejected = True
             result = await compiled.ainvoke(Command(resume=answer), config=config)
@@ -1965,14 +1989,28 @@ class MeltdownDemoWorkflow:
         `answer_dispatch` signal). Returns None if the demo shuts down while parked, so the
         team task can exit cleanly instead of blocking the parent's teardown.
         """
-        while not self._routes_done:
+        # Primary approver window. On timeout, escalate to a backup approver (mark the
+        # pending entry so the UI shows it) and wait unbounded for the backup's answer.
+        try:
+            await workflow.wait_condition(
+                lambda: order_id in self._dispatch_answers or self._routes_done,
+                timeout=timedelta(seconds=GATE_ESCALATION_SECONDS),
+            )
+        except asyncio.TimeoutError:
+            workflow.logger.info(
+                f"Approval timed out for {order_id}, escalating to backup approver"
+            )
+            entry = self._pending_dispatch.get(order_id)
+            if isinstance(entry, dict):
+                entry["approver_tier"] = "backup"
+                entry["escalated"] = True
             await workflow.wait_condition(
                 lambda: order_id in self._dispatch_answers or self._routes_done,
             )
-            if self._routes_done:
-                return None
-            if order_id in self._dispatch_answers:
-                return self._dispatch_answers.pop(order_id)
+        if self._routes_done:
+            return None
+        if order_id in self._dispatch_answers:
+            return self._dispatch_answers.pop(order_id)
         return None
 
     async def _publish_langgraph_reasoning(
