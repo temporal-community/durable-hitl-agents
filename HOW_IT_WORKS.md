@@ -78,6 +78,15 @@ This split is deliberate: each framework dispatches all orders while its tab is
 active, on the same durable-execution runtime (Temporal), with the same durable-signal
 HITL primitive underneath both.
 
+**Human-in-the-loop is a tool, not a special case.** In Pattern B (and cross-framework),
+the human isn't wired into the control flow by hand. `ask_human` is bound into the agent's
+toolset alongside `get_fleet_status`, `get_route_info`, and `submit_dispatch` (see
+`_dispatch_tools()` / `_fleet_tools()` in `langgraph_agents.py`). The agent calls it on its
+own judgment, like any tool. The only thing special is execution: a normal tool runs as an
+activity and returns a value, while `ask_human` suspends the graph on a durable `interrupt()`
+and waits on the `answer_dispatch` signal. So "ask a human" is a capability you hand the
+agent, and Temporal makes that call safe to leave hanging for as long as it takes.
+
 ### The third tab — cross-framework (ADK + LangGraph in one system)
 
 The first two tabs each run *one* framework inline in the parent. The **Cross-Framework
