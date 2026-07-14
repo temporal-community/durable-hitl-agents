@@ -1170,7 +1170,7 @@
     <div class="tab-panel active" id="panel-human">
       <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
       <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
-      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Customer changes an order mid-delivery — the driver holds, you approve, then the ADK agents <b>re-reason</b> the new location and the driver reroutes.</div>
+      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">This starts <b>outside the agent</b>: a customer change enters the running workflow as a signal, not as an ADK tool call. The driver waits durably while you decide; approve an address change and the ADK team <b>re-reasons</b> with the new location before the driver reroutes.</div>
       <select id="change-order" data-role="change-order" class="agent-select">
         <option value="">— no active orders —</option>
       </select>
@@ -1195,7 +1195,7 @@
     <div class="tab-panel" id="panel-agent">
       <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
       <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
-      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Dispatch here runs on the <b>LangGraph</b> looping agent team. Drop a premium Moscone catering order and, mid-reasoning, the dispatch agent calls the human <b>as a tool</b> (<code>ask_human</code>) — the graph pauses on a durable interrupt and the approval card appears over the map; your answer flows back into the agent's loop.</div>
+      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">Here, human judgment is exposed as a model-visible tool. On a premium order, the <b>LangGraph</b> Dispatch agent chooses to call <code>ask_human</code> mid-reasoning. LangGraph raises <code>interrupt()</code>; the parent workflow waits durably in Temporal for your answer signal, then resumes with that answer as the agent's next observation.</div>
       <div class="btn-row">
         <button class="btn btn-change" onclick="injectHighValueOrder()">Drop high-value order</button>
         <button class="btn btn-reset" onclick="resetDemo()">Reset</button>
@@ -1205,12 +1205,12 @@
     <div class="tab-panel" id="panel-cross">
       <button class="btn btn-start" onclick="startDemo()">Start Deliveries</button>
       <div style="height:0;border-top:1px solid #465a78;margin:2px 0;"></div>
-      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">One system, <b>two frameworks</b>: Fleet + Customer assess on <b>Google ADK</b>, the Dispatch agent runs on <b>LangGraph</b> — each its own Temporal <b>child workflow</b>, joined by Temporal (no agent framework can orchestrate across frameworks). Both HITL directions work: drop a high-value order → the LangGraph dispatch agent calls <code>ask_human</code>; or change an order → the ADK team re-reasons and the driver reroutes.</div>
-      <div style="font-size:11px;color:#7dd3fc;margin-bottom:6px;">🤖 Agent → Human</div>
+      <div style="font-size:12px;color:#9fb4c7;margin-bottom:6px;">One system, <b>two frameworks</b>: Fleet + Customer assess on <b>Google ADK</b>, then Dispatch reasons on <b>LangGraph</b> — each in its own Temporal <b>child workflow</b>, joined by Temporal. Agent-initiated HITL is a model-visible <code>ask_human</code> tool: interrupt → durable wait → answer signal → next observation. Human-initiated HITL is external workflow input, not an agent tool call: an approved address change re-runs both children before the held driver reroutes.</div>
+      <div style="font-size:11px;color:#7dd3fc;margin-bottom:6px;">🤖 Agent → Human · model-visible tool</div>
       <div class="btn-row">
         <button class="btn btn-change" onclick="injectHighValueOrder()">Drop high-value order</button>
       </div>
-      <div style="font-size:11px;color:#8ea2ff;margin:8px 0 4px;">🧑 Human → Agent</div>
+      <div style="font-size:11px;color:#8ea2ff;margin:8px 0 4px;">🧑 Human → Agent · external workflow input</div>
       <select data-role="change-order" class="agent-select" aria-label="Order to change">
         <option value="">— no active orders —</option>
       </select>
@@ -1299,9 +1299,9 @@
 
 <div id="map"></div>
 
-<!-- Pattern B — agent-initiated dispatch approval (the human as an async API) -->
+<!-- Pattern B — the agent called the model-visible ask_human tool mid-loop -->
 <div id="dispatch-gate-card" class="dispatch-gate-card" style="display:none;">
-  <div class="dgc-header">⚠️ Agent is requesting human approval</div>
+  <div class="dgc-header">⚠️ Agent called <code>ask_human</code></div>
   <div class="dgc-body" id="dgc-body"></div>
   <div class="dgc-actions">
     <button class="btn btn-approve" onclick="decideDispatch(true)">Approve dispatch</button>
@@ -1315,9 +1315,9 @@
   <div class="graph-modal-backdrop" onclick="closeAdk()"></div>
   <div class="graph-modal-card" style="max-width:1480px;">
     <div class="graph-modal-header"><span>🧩 Google ADK · Dispatch Team</span><button onclick="closeAdk()" title="Close">✕</button></div>
-    <div class="graph-modal-sub">Human → agent. Each agent is a reason → act → observe LOOP (the ADK Runner); every LLM call and tool call runs as a Temporal activity. One customer change feeds <b>both</b> loops: the driver holds, you approve, the agents re-reason the new location, and the driver reroutes.</div>
+    <div class="graph-modal-sub">Human → agent is externally initiated workflow input, not an agent tool call. A customer-change signal starts a durable wait while the driver holds. If you approve an address change, the ADK team re-reasons with the new location and the held driver reroutes. The agents still own their reason → act → observe loops; their model and tool calls run as Temporal activities.</div>
     <div class="graph-flow">
-      <svg viewBox="0 0 560 358" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK dispatch team: a new order fans to the Fleet and Customer agents (each a reason-act loop), they converge on the Dispatch agent which assigns a driver to the delivery loop ending in delivered; a customer-change HITL box off to the left feeds both loops — the agents re-reason and the driver reroutes">
+      <svg viewBox="0 0 560 358" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="ADK dispatch team: an externally initiated customer-change signal enters the workflow rather than an agent tool, the driver waits for approval, and an approved address change makes the agents re-reason before the held driver reroutes">
         <defs>
           <marker id="adkah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
           <marker id="adkaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
@@ -1374,16 +1374,16 @@
         <!-- ONE HITL box → both loops: customer change, you approve (hangs off the spine, left) -->
         <rect x="8" y="156" width="160" height="66" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
         <text x="88" y="177" text-anchor="middle" fill="#fde68a" font-size="11.5" font-weight="600">👤 Customer change</text>
-        <text x="88" y="193" text-anchor="middle" fill="#d9c389" font-size="9.5">new SF location → you approve</text>
-        <text x="88" y="206" text-anchor="middle" fill="#d9c389" font-size="9">customer_change + wait_condition</text>
+        <text x="88" y="193" text-anchor="middle" fill="#d9c389" font-size="9.5">workflow input · not an agent tool</text>
+        <text x="88" y="206" text-anchor="middle" fill="#d9c389" font-size="9">signal → wait_condition</text>
         <text x="88" y="217" text-anchor="middle" fill="#7c93ab" font-size="8.5">driver holds while you decide</text>
         <text x="200" y="172" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="700">①</text>
         <text x="188" y="242" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="700">②</text>
       </svg>
     </div>
     <div class="graph-legend">
-      <span class="lg-activity">box = Temporal activity · ↻ = a loop (agent Runner / driver route)</span>
-      <span class="lg-hitl">one human change → both loops: ① agents re-reason · ② driver holds → reroutes</span>
+      <span class="lg-activity">agent model/tool calls = Temporal activities · ↻ = a loop (agent Runner / driver route)</span>
+      <span class="lg-hitl">external change = workflow input · signal → wait → resume · approval: ① re-reason · ② reroute</span>
     </div>
   </div>
 </div>
@@ -1393,7 +1393,7 @@
   <div class="graph-modal-backdrop" onclick="closeGraph()"></div>
   <div class="graph-modal-card" style="max-width:1480px;">
     <div class="graph-modal-header"><span>🔗 LangGraph · Dispatch Team</span><button onclick="closeGraph()" title="Close">✕</button></div>
-    <div class="graph-modal-sub">The looping agent team. Each reason call and each tool call runs as its own durable Temporal activity; the human is a tool the agent calls mid-loop.</div>
+    <div class="graph-modal-sub">Human judgment is a model-visible tool the agent can choose mid-loop. Each Gemini reason call and ordinary data-tool call runs as its own Temporal activity. <code>ask_human</code> is different: it raises a LangGraph <code>interrupt()</code>; the parent workflow waits durably in Temporal for the answer signal, then resumes with the answer as the agent's next observation.</div>
     <div class="graph-flow">
       <svg viewBox="0 0 540 352" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="LangGraph dispatch team: Fleet and Customer reason-act loops converge on a Dispatch loop that calls the human as a tool via interrupt()">
         <defs>
@@ -1426,12 +1426,12 @@
         <rect x="30" y="64" width="180" height="58" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
         <text x="120" y="85" text-anchor="middle" fill="#d6f6f8" font-size="12.5" font-weight="600">🚚 Fleet agent</text>
         <text x="120" y="101" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ act · fleet_status / route</text>
-        <text x="120" y="114" text-anchor="middle" fill="#7c93ab" font-size="9">each tool call = an activity</text>
+        <text x="120" y="114" text-anchor="middle" fill="#7c93ab" font-size="9">reason + data tools = activities</text>
 
         <rect x="330" y="64" width="180" height="58" rx="10" fill="rgba(0,255,255,0.08)" stroke="rgba(0,255,255,0.45)"/>
         <text x="420" y="85" text-anchor="middle" fill="#d6f6f8" font-size="12.5" font-weight="600">🧑 Customer agent</text>
         <text x="420" y="101" text-anchor="middle" fill="#9fb4c7" font-size="9.5">reason ⇄ act · priorities</text>
-        <text x="420" y="114" text-anchor="middle" fill="#7c93ab" font-size="9">each tool call = an activity</text>
+        <text x="420" y="114" text-anchor="middle" fill="#7c93ab" font-size="9">reason + data tools = activities</text>
 
         <text x="270" y="152" text-anchor="middle" fill="#4b5d77" font-size="9.5">fan out, then converge ↓</text>
 
@@ -1442,17 +1442,17 @@
 
         <rect x="370" y="194" width="150" height="58" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
         <text x="445" y="221" text-anchor="middle" fill="#fde68a" font-size="12.5" font-weight="600">👤 Human</text>
-        <text x="445" y="238" text-anchor="middle" fill="#d9c389" font-size="9.5">approve / reject</text>
-        <text x="445" y="184" text-anchor="middle" fill="#fbbf24" font-size="9.5">ask_human → interrupt() ⏸</text>
-        <text x="445" y="268" text-anchor="middle" fill="#fbbf24" font-size="9.5">answer → Command(resume)</text>
+        <text x="445" y="238" text-anchor="middle" fill="#d9c389" font-size="9.5">approve / reject answer</text>
+        <text x="445" y="184" text-anchor="middle" fill="#fbbf24" font-size="9.5">ask_human tool → interrupt() ⏸</text>
+        <text x="445" y="268" text-anchor="middle" fill="#fbbf24" font-size="9.5">answer signal → next observation</text>
 
         <rect x="225" y="311" width="90" height="26" rx="13" fill="#1e293b" stroke="#465a78"/>
         <text x="270" y="328" text-anchor="middle" fill="#cbd5e1" font-size="12" font-weight="600">END</text>
       </svg>
     </div>
     <div class="graph-legend">
-      <span class="lg-activity">box = Temporal activity · ↻ = the agent's reason→act loop</span>
-      <span class="lg-hitl">human = a tool the agent calls mid-loop (interrupt → signal → resume)</span>
+      <span class="lg-activity">reason + ordinary tool calls = Temporal activities · <code>ask_human</code> = workflow interrupt</span>
+      <span class="lg-hitl">human judgment = model-visible tool · interrupt → durable wait → answer signal → next observation</span>
     </div>
   </div>
 </div>
@@ -1461,9 +1461,9 @@
   <div class="graph-modal-backdrop" onclick="closeCross()"></div>
   <div class="graph-modal-card" style="max-width:1480px;">
     <div class="graph-modal-header"><span>🔀 Cross-Framework · ADK + LangGraph</span><button onclick="closeCross()" title="Close">✕</button></div>
-    <div class="graph-modal-sub">One system, <b>two frameworks</b>. Temporal's parent workflow spawns a <b>Google ADK</b> child (Fleet ∥ Customer assess) and a <b>LangGraph</b> child (Dispatch + ask_human), then joins them — no agent framework can orchestrate <i>across</i> frameworks, only Temporal can. The dispatch agent calls the human as an in-loop tool; a customer change re-runs both children.</div>
+    <div class="graph-modal-sub">One system, <b>two frameworks</b>. Temporal's parent workflow spawns a <b>Google ADK</b> assessment child and a <b>LangGraph</b> dispatch child, then joins them—the only cross-framework coordinator. In the agent-initiated path, Dispatch calls the model-visible <code>ask_human</code> tool; LangGraph interrupts, the child waits durably in Temporal, and the answer signal becomes the agent's next observation. In the human-initiated path, an external customer-change signal is workflow input—not an ADK tool call—and approval re-runs both children before the held driver reroutes.</div>
     <div class="graph-flow">
-      <svg viewBox="0 0 580 372" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="Cross-framework flow: a Temporal parent workflow spawns a Google ADK child (Fleet parallel Customer assessment) and a LangGraph child (Dispatch agent with an in-loop ask_human human gate), joins their results, commits to the driver delivery loop, and ends in delivered">
+      <svg viewBox="0 0 580 372" width="100%" style="max-width:1440px;display:block;margin:0 auto;font-family:inherit;" role="img" aria-label="Cross-framework flow: a Temporal parent workflow coordinates Google ADK assessment and LangGraph dispatch children; the Dispatch agent can call an in-loop ask_human tool whose interrupt waits durably for an answer signal before the answer returns as its next observation">
         <defs>
           <marker id="cxah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fd8e0"/></marker>
           <marker id="cxaha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/></marker>
@@ -1480,7 +1480,7 @@
         <g fill="none" stroke="#3fd8e0" stroke-width="1.3" marker-end="url(#cxah)" opacity="0.85">
           <path d="M390,298 C416,292 416,268 390,264"/>
         </g>
-        <!-- agent → human ask_human gate (amber, call + resume) -->
+        <!-- agent → human ask_human interrupt (amber, call + resume) -->
         <g fill="none" stroke="#fbbf24" stroke-width="1.4" stroke-dasharray="5 3">
           <path d="M410,176 L428,176" marker-end="url(#cxaha)"/>
           <path d="M428,196 L412,196" marker-end="url(#cxaha)"/>
@@ -1523,11 +1523,11 @@
         <text x="290" y="189" text-anchor="middle" fill="#d6f6f8" font-size="10.5" font-weight="600">🧭 Dispatch agent · decide / ask_human</text>
         <text x="290" y="204" text-anchor="middle" fill="#7c93ab" font-size="8.5">owns answer_dispatch signal + pending_question query</text>
 
-        <!-- ask_human gate (off-spine, right) -->
+        <!-- ask_human interrupt (off-spine, right) -->
         <rect x="430" y="158" width="132" height="54" rx="10" fill="rgba(251,191,36,0.12)" stroke="rgba(251,191,36,0.55)"/>
-        <text x="496" y="177" text-anchor="middle" fill="#fde68a" font-size="10" font-weight="600">👤 human approves</text>
-        <text x="496" y="191" text-anchor="middle" fill="#d9c389" font-size="8.5">ask_human (in-loop)</text>
-        <text x="496" y="203" text-anchor="middle" fill="#7c93ab" font-size="8">interrupt → signal → resume</text>
+        <text x="496" y="177" text-anchor="middle" fill="#fde68a" font-size="10" font-weight="600">👤 human answers</text>
+        <text x="496" y="191" text-anchor="middle" fill="#d9c389" font-size="8.5">ask_human → interrupt</text>
+        <text x="496" y="203" text-anchor="middle" fill="#7c93ab" font-size="8">wait → signal → observe</text>
 
         <text x="298" y="236" text-anchor="start" fill="#7c93ab" font-size="9">DISPATCH → commit</text>
 
@@ -1543,7 +1543,7 @@
     </div>
     <div class="graph-legend">
       <span class="lg-activity">each child = its own Temporal workflow (its own history) · ↻ = a loop</span>
-      <span class="lg-hitl">Temporal joins the two frameworks · human = the agent's in-loop ask_human</span>
+      <span class="lg-hitl">agent HITL: tool → interrupt → durable wait → answer signal → observation · external HITL: signal → wait → re-reason</span>
     </div>
   </div>
 </div>
@@ -2272,8 +2272,9 @@ async function pollPendingDispatch() {
     document.getElementById('dgc-body').innerHTML =
       escBadge
       + `<div class="dgc-order"><b>Order ${escapeHtml(onum)}</b> · $${(b.order_value || 0).toLocaleString()} · ${escapeHtml(b.venue || '')}</div>`
-      + `<div class="dgc-rec">🤖 <b>${escapeHtml(b.agent || 'Agent')}</b> is asking a human:</div>`
-      + `<div class="dgc-reason">"${escapeHtml(b.question || '')}"</div>`;
+      + `<div class="dgc-rec">🤖 <b>${escapeHtml(b.agent || 'Agent')}</b> called <code>ask_human</code>:</div>`
+      + `<div class="dgc-reason">"${escapeHtml(b.question || '')}"</div>`
+      + `<div class="dgc-impact">LangGraph is interrupted. Temporal is durably waiting for this answer signal; your choice returns as the agent's next observation.</div>`;
     card.style.display = 'block';
   } catch (e) { /* demo not running yet — leave card hidden */ }
 }

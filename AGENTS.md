@@ -22,15 +22,18 @@ not a third pattern):
   UI **tab** (`set_dispatch_mode` → `"langgraph"`), applying to all orders. The
   multi-agent team (Fleet ∥ Customer → Dispatch) runs INLINE in the parent
   workflow as a **looping ReAct team** — Fleet and Customer are real
-  reason→act→eval loops, each Gemini reason call AND each tool call its own Temporal
-  activity in the parent's history. The HITL is **in the loop**: mid-reasoning, the
-  Dispatch or Fleet agent calls an `ask_human` tool, whose execution is a durable
-  LangGraph `interrupt()` that suspends the graph. The parent
+  reason→act→eval loops, each Gemini reason call AND each ordinary tool call its own
+  Temporal activity in the parent's history. The HITL is **in the loop**:
+  mid-reasoning, the Dispatch or Fleet agent calls an `ask_human` tool. LangGraph's
+  `interrupt()` suspends the graph, and Temporal makes that suspended gap
+  durable. The parent
   (`_run_langgraph_assignment`) surfaces the question, parks on the `answer_dispatch`
   Temporal SIGNAL (`wait_condition`), and resumes the agent via `Command(resume=answer)`
   — the answer flows back as the agent's next observation. **No per-order gate child.**
-  The thesis: the human is just another tool the agent calls — but a durable, async
-  one; on Temporal that tool call is a signal.
+  The thesis for Pattern B: human judgment is exposed as an async tool the agent can
+  call. The tool call raises the interrupt; the human's answer arrives as a Temporal
+  signal. Pattern A is the contrast: external human input enters through signals rather
+  than a model-visible tool. Both patterns share the same durable wait/signal primitives.
 - **Cross-Framework — both patterns, both frameworks (use case 3, the 3rd tab)** — the same
   order assignment, but split across **two frameworks orchestrated as child
   workflows** under one Temporal parent: an **ADK** team does the assessment, then a
@@ -125,9 +128,11 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   integration-tested; the parent's helpers are unit-tested (see `tests/test_workflows.py`).
   HITL hold pattern: this is **operator-in-the-loop**, not agent-in-the-loop —
   the change is initiated externally (operator submits a customer change via REST)
-  and a human supervisor approves it. The ADK agents never see the change; the
-  gate lives in the workflow, not in any agent tool (contrast: an `ask_user`-style
-  `@function_tool` where the LLM itself pauses for clarification). When the change
+  and a human supervisor approves it. The ADK agents do not initiate or participate
+  in the pending gate; it lives in the workflow, not in any agent tool. On an approved
+  address change, they receive the revised order as fresh reasoning input (contrast:
+  an `ask_user`-style `@function_tool` where the LLM itself pauses for clarification).
+  When the change
   is submitted, parent signals child with `update_pending` — driver navigates to
   the venue but holds before delivering (`awaiting_update` status, `wait_condition`).
   On approval, parent signals `resolve_update` with the decision: cancel → skip
@@ -183,8 +188,9 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   The approve/reject answer is **not a rubber stamp**: it flows back as the agent's next
   observation, and the agent reasons over it (plus the Fleet/Customer assessments) before calling
   `submit_dispatch` to pick the driver / hold.
-  Its execution is NOT an activity; the `*_human` node (`execute_in=workflow`) runs a durable
-  LangGraph `interrupt()` that suspends the graph. The parent (`_run_langgraph_assignment`) loops on
+  Its execution is NOT an activity; the `*_human` node (`execute_in=workflow`) runs a
+  LangGraph `interrupt()` that suspends the graph, while Temporal makes the wait durable.
+  The parent (`_run_langgraph_assignment`) loops on
   `result.get("__interrupt__")`: it surfaces the question into `_pending_dispatch`, `wait_condition`s
   on the `answer_dispatch` signal (via `_await_dispatch_answer`), then resumes the agent with
   `Command(resume=answer)` — the answer flows back as the agent's next observation. No per-order
