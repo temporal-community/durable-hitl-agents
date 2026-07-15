@@ -10,8 +10,8 @@ Francisco** (the Ferry Building is the shop; orders come from Moscone Center,
 Fisherman's Wharf, and Chinatown). It shows **two durable human-in-the-loop
 patterns** across **three use cases** (one per tab): **Pattern A** (the human calls
 the agent) on a **Google ADK–only** tab, **Pattern B** (the agent calls the human)
-on a **LangGraph–only** tab — same pattern on two different frameworks, to make the
-point that durable HITL is framework-agnostic — and a **Cross-Framework** tab that
+on a **LangGraph–only** tab — two patterns on different frameworks, sharing the same
+Temporal wait/signal primitives — and a **Cross-Framework** tab that
 runs **both patterns across both frameworks** in one system (Fleet + Customer on ADK,
 Dispatch on LangGraph). The third tab isn't a third pattern; it combines both, to show
 that when agents span frameworks **Temporal**, the durable-execution runtime (the
@@ -66,8 +66,8 @@ control planes run *on*.)
   `_run_langgraph_assignment(order, driver_id, onum)` — the looping multi-agent
   LangGraph team runs *inline in the parent workflow*. There is **no per-order gate
   child**: when an agent decides it needs a human, it calls the `ask_human` tool
-  mid-loop, whose execution is a durable LangGraph `interrupt()`; the parent surfaces
-  the question and resolves it with the `answer_dispatch` signal.
+  mid-loop. LangGraph's `interrupt()` suspends the graph; the parent surfaces the
+  question and waits durably in Temporal for the `answer_dispatch` signal.
 - **Cross-Framework tab → child workflows.** Every order runs
   `_run_crossframework_assignment(...)`, which spawns **two Temporal child workflows** —
   `AdkAssessmentWorkflow` (`assess-<order_id>`, the ADK Fleet ∥ Customer team) and
@@ -77,6 +77,16 @@ control planes run *on*.)
 This split is deliberate: each framework dispatches all orders while its tab is
 active, on the same durable-execution runtime (Temporal), with the same durable-signal
 HITL primitive underneath both.
+
+**Pattern B exposes human judgment as a tool, not an out-of-band gate.** In Pattern B
+(including the cross-framework use case), `ask_human` is bound into the agent's toolset
+alongside `get_fleet_status`, `get_route_info`, and `submit_dispatch` (see
+`_dispatch_tools()` / `_fleet_tools()` in `langgraph_agents.py`). The agent chooses when to
+call it. Its execution is intentionally different from an ordinary tool: data tools run as
+activities and return promptly, while `ask_human` routes to a LangGraph `interrupt()`;
+Temporal preserves the resulting wait until the answer arrives through `answer_dispatch`.
+Pattern A is external workflow input, not a model-visible tool call, but it uses the same
+Temporal wait/signal primitives.
 
 ### The third tab — cross-framework (ADK + LangGraph in one system)
 
@@ -128,8 +138,9 @@ discipline that makes this work: keep the carried state small, and only continue
 point where that state fully captures the workflow (no in-flight activity to lose).
 
 **The agent loops are real, but deliberately shallow.** Each agent is a genuine
-reason→act→observe ReAct loop, and every reason call and tool call is its own durable Temporal
-activity — but the loops are only a few hops deep (Dispatch is `reason → maybe ask_human →
+reason→act→observe ReAct loop, and every reason call and ordinary tool call is its own
+Temporal activity; `ask_human` routes to a workflow interrupt instead. The loops are only
+a few hops deep (Dispatch is `reason → maybe ask_human →
 reason → decide`), because picking a driver is a *bounded* task. Loop **depth is orthogonal to
 the durable-HITL thesis**: a shallow loop is enough to fire `ask_human` mid-reasoning and prove
 the pause is durable, and a 10×-deeper loop would exercise the *exact same* contract — just with
@@ -145,10 +156,11 @@ crashes. Only workflows that accumulate **history** (the drivers, delivery after
 
 **Both HITL directions run on this tab.** Agent→human: the dispatch child owns its own
 `answer_dispatch` signal + `pending_question` query, so the human signals the *agent's own
-workflow* (the durable wait is the Temporal signal + `wait_condition` + `Command(resume)`;
-`interrupt()` only suspends the graph). Human→agent: a customer change re-runs the whole
-cross-framework flow via `_rereason_crossframework` (ADK reassesses, LangGraph re-decides) and
-the held driver reroutes.
+workflow*. Temporal preserves the wait with `wait_condition` + signal; LangGraph's
+`Command(resume)` returns the answer to the loop (`interrupt()` only suspends the graph).
+Human→agent: an approved address change re-runs the whole cross-framework flow via
+`_rereason_crossframework` (ADK reassesses, LangGraph re-decides) and the held driver
+reroutes.
 
 The disconnect/recovery scenarios (agent disconnect, driver disconnect, tool
 degradation) are **dormant code**, not demo features — the UI no longer surfaces
@@ -164,9 +176,9 @@ This demo has two distinct actor types:
 - **AI Agents** — these **reason**. They call LLMs, use tools, and make
   decisions. Pattern A's agents (Fleet, Customer, Dispatch) run inline in the
   workflow via ADK. Pattern B's agents (Fleet, Customer, Dispatch) are looping
-  LangGraph ReAct nodes — each reason call and each tool call runs as its own
-  Temporal activity.
-- **Delivery actors** (Driver-A through Driver-E) — these **execute**. They
+  LangGraph ReAct nodes — each reason call and each ordinary data-tool call runs as its
+  own Temporal activity; `ask_human` instead routes to a workflow interrupt.
+- **Delivery actors** (Driver-A through Driver-D) — these **execute**. They
   receive orders via signals, batch-pickup at Ziggy's (the Ferry Building), then
   deliver sequentially to multiple venues before returning. Each runs in its own
   child workflow (`DriverRouteWorkflow`). They don't reason.
@@ -382,25 +394,25 @@ has a free slot, and the scarce-capacity case is what drives an escalation.
 
 ---
 
-## Pattern B — Agent-in-the-loop (LangGraph, the human is a tool)
+## Pattern B — Agent-in-the-loop (LangGraph, human judgment is a tool)
 
 **The agent calls the human.** While the LangGraph tab is active, every order runs
 a **looping multi-agent LangGraph team** that mirrors the ADK side — *inline in the
 parent workflow*, not in a child. The HITL is **inside the reasoning loop**: an agent
-that hits a decision it shouldn't make alone calls the `ask_human` tool mid-reasoning,
-whose execution is a durable LangGraph `interrupt()`. There is **no per-order gate
-child** — the parent drives the interrupt with a Temporal signal.
+that hits a decision it shouldn't make alone calls the `ask_human` tool mid-reasoning.
+LangGraph's `interrupt()` suspends the graph, and Temporal durably preserves the wait for
+the human's answer signal. There is **no per-order gate child**.
 
 ### Routing
 
 In `MeltdownDemoWorkflow._assign_order`, the LangGraph branch runs the team as a
-concurrent asyncio task (still appended to `self._gate_tasks`, the existing task list)
+concurrent asyncio task (appended to `self._langgraph_tasks`)
 so the order loop and fleet keep moving while the agents — and possibly a human —
 deliberate:
 
 ```python
 if self._dispatch_mode == "langgraph":
-    self._gate_tasks.append(
+    self._langgraph_tasks.append(
         asyncio.create_task(
             self._run_langgraph_assignment(order, self._least_loaded_driver(), onum)
         )
@@ -409,8 +421,8 @@ if self._dispatch_mode == "langgraph":
 ```
 
 `_run_langgraph_assignment` compiles `graph(GRAPH_NAME)` (`GRAPH_NAME = "dispatch_team"`)
-and `ainvoke`s it in-workflow — the Fleet ∥ Customer → Dispatch reason calls **and each
-tool call** execute as Temporal activities recorded in the **parent's** history. Whether
+and `ainvoke`s it in-workflow — the Fleet ∥ Customer → Dispatch reason calls and ordinary
+data-tool calls execute as Temporal activities recorded in the **parent's** history. Whether
 to ask a human is the **agent's** judgment (guided by `ESCALATION_GUIDANCE` and the
 per-agent system prompts in `langgraph_agents.py`), not a code threshold. Auto-generated
 orders top out around $1,950, so the agents dispatch them directly; only the deliberately
@@ -430,10 +442,10 @@ START → customer_reason ──┴→ dispatch_reason → (END | ask_human → 
 ```
 
 Each `*_reason` node is a **real Gemini call** (through `init_chat_model`,
-provider-swappable via `MODEL_PROVIDER`) executed as a **Temporal activity**. Each tool
-call the model asks for runs in the `*_act` node as **its own Temporal activity** (via
+provider-swappable via `MODEL_PROVIDER`) executed as a **Temporal activity**. Each ordinary
+data-tool call runs in the `*_act` node as **its own Temporal activity** (via
 `workflow.execute_activity`, on the agents queue with its own retry policy) — mirroring
-ADK's `activity_tool` granularity. The tools are the same ones the ADK team uses:
+ADK's `activity_tool` granularity. The data tools are the same ones the ADK team uses:
 `get_fleet_status`, `get_route_info`, `get_order_priorities`. Fleet and Dispatch also bind
 the `ask_human` tool; Customer does not.
 
@@ -454,7 +466,7 @@ we'd switch to a timeout-based join then.)
 > `summary_fn` / `_build_summary`), swap the static string for a callable that builds
 > context-aware labels (e.g. "Fleet Agent — ETA for driver-c"). Inert until that lands.
 
-### The human is a tool — `ask_human` and the durable interrupt
+### Human judgment is a tool — `ask_human`, interrupt, and durable wait
 
 When an agent decides it needs a human, it calls the `ask_human(question)` tool. The
 tool body never runs (`raise NotImplementedError`); the graph's `route` function sees the
@@ -467,11 +479,11 @@ async def _human_node(messages, agent_label, state):
     return [ToolMessage(content=str(answer), ...)]   # answer flows back as the observation
 ```
 
-`interrupt()` suspends the graph durably; the answer becomes the `ToolMessage` the agent
-observes on its **next reason turn**. So the human's answer is an in-loop observation, not
-a boundary decision the system applies.
+`interrupt()` suspends the graph; Temporal makes the gap durable. The answer becomes the
+`ToolMessage` the agent observes on its **next reason turn**. So the human's answer is an
+in-loop observation, not a boundary decision the system applies.
 
-### The parent drives the interrupt with a durable signal
+### The parent preserves the wait; the answer signal resumes the graph
 
 `_run_langgraph_assignment` loops on the graph's `__interrupt__` marker. On each interrupt
 it surfaces the question into `self._pending_dispatch[order_id]`, marks the order
@@ -594,7 +606,7 @@ workflow state and the event log blows up.
 | New order generated | Child → parent signal (`new_order`) | Milestone, low frequency. The assignment loop waits on it. |
 | Order assignment | Parent → child signal (`add_order`) | Parent decides, child executes. The signal is the durable handoff. |
 | Customer change (Pattern A) | External → parent → child signal chain | Preserves replay + audit. Every approval/rejection is in the event log. |
-| Agent asks a human (Pattern B) | In-loop LangGraph `interrupt()` + human → parent signal (`answer_dispatch`) | The agent calls `ask_human` mid-loop; the interrupt suspends the graph, the question flows into the parent's `pending_dispatch` for the UI, and the human's decision returns as a durable async signal. |
+| Agent asks a human (Pattern B) | In-loop LangGraph `interrupt()` + Temporal wait + human → parent signal (`answer_dispatch`) | The agent calls `ask_human` mid-loop; the interrupt suspends the graph, Temporal preserves the wait, the question flows into the parent's `pending_dispatch` for the UI, and the human's answer signal returns as the next agent observation. |
 | Driver snapshot for reasoning | Read from parent's in-memory workflow state | Pure workflow-local read — the parent already tracks the bookkeeping it decides on. |
 
 **Temporal event log vs shared state — two different questions:**
@@ -626,7 +638,7 @@ server runs in its own process.
 
 | Queue | Worker | What it runs |
 |---|---|---|
-| `meltdown-workflows` | Workflows + minimal local activities | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow`, plus the cross-framework child workflows `AdkAssessmentWorkflow` + `LgDispatchWorkflow`; `publish_agent_event` / `publish_agent_events_batch` (local activities); the LangGraph node activities (Fleet/Customer/Dispatch Gemini reason calls **and each tool call**, via `LangGraphPlugin`). `LangGraphPlugin` registers **two** graphs: `GRAPH_NAME = "dispatch_team"` (the looping multi-agent team with the in-loop `ask_human` tool, run inline in `MeltdownDemoWorkflow` for the ADK/LangGraph tabs) and `DISPATCH_ONLY_GRAPH_NAME = "dispatch_only"` (the Dispatch-only graph run inside `LgDispatchWorkflow` for the cross-framework tab). |
+| `meltdown-workflows` | Workflows + minimal local activities | `MeltdownDemoWorkflow`, `DriverRouteWorkflow`, `OrderGenerationWorkflow`, plus the cross-framework child workflows `AdkAssessmentWorkflow` + `LgDispatchWorkflow`; `publish_agent_event` / `publish_agent_events_batch` (local activities); the LangGraph node activities (Fleet/Customer/Dispatch Gemini reason calls and ordinary data-tool calls, via `LangGraphPlugin`). `LangGraphPlugin` registers **two** graphs: `GRAPH_NAME = "dispatch_team"` (the looping multi-agent team with the in-loop `ask_human` tool, run inline in `MeltdownDemoWorkflow` for the LangGraph tab) and `DISPATCH_ONLY_GRAPH_NAME = "dispatch_only"` (the Dispatch-only graph run inside `LgDispatchWorkflow` for the cross-framework tab). |
 | `meltdown-delivery` | Delivery | `generate_order`, `navigate_to`, `pickup_orders`, `deliver_order`, `execute_customer_change`, `get_route_polyline`, `get_fleet_status`, `get_order_priorities`, `set_driver_idle`, `set_warmup_hidden`, `sync_driver_position` (max 20 concurrent) |
 | `meltdown-agents` | ADK/LLM activities | `register_assignment`, `tool_get_fleet_status`, `tool_get_order_priorities`, `tool_get_route_info`, `tool_search_venue_events` (LangGraph Customer's venue-events search), plus the ADK `invoke_model` activity + `google_search` grounding (max 5 concurrent) |
 
@@ -643,10 +655,11 @@ delivery at 20.
 - `GoogleAdkPlugin` is on **both** the workflow worker (sandbox passthroughs for
   `google.adk` / `google.genai`, deterministic runtime for replay) and the agents
   worker (hosts the `invoke_model` activity that calls Gemini for Pattern A).
-- `LangGraphPlugin(graphs={...})` is on the **workflow** worker, registering exactly one
-  graph — `GRAPH_NAME: build_dispatch_team_graph()` (the looping multi-agent team). It
-  runs the Pattern B team inline in `MeltdownDemoWorkflow`, and the team's node activities
-  (each agent's reason call and each tool call) execute there.
+- `LangGraphPlugin(graphs={...})` is on the **workflow** worker, registering two graphs:
+  `GRAPH_NAME: build_dispatch_team_graph()` for the inline Pattern B team and
+  `DISPATCH_ONLY_GRAPH_NAME: build_dispatch_only_graph()` for the cross-framework
+  LangGraph child. Their reason-call and ordinary data-tool activities execute there;
+  `ask_human` routes to workflow code instead.
 
 `TemporalModel` uses `ActivityConfig(task_queue=AGENTS_QUEUE)` to route Pattern
 A's LLM calls from the workflow to the agents queue.
@@ -674,10 +687,11 @@ server).
 
 ## When does an agent become its own Temporal workflow?
 
-Today the whole agent team runs **inside one workflow** (`MeltdownDemoWorkflow`): ADK via
-the `Runner` inline, LangGraph via the graph inline, with each LLM/tool call as an
-activity. That's the right default — but a natural question is whether each *agent* should
-be its own child workflow. Use this test, per agent:
+On the single-framework tabs, the whole selected team runs **inline in the parent
+workflow** (`MeltdownDemoWorkflow`): ADK via the `Runner`, LangGraph via the graph, with
+each LLM call and ordinary tool call as an activity. The Cross-Framework tab deliberately
+splits the ADK assessment and LangGraph dispatch phases into child workflows. Use this test
+when deciding whether an agent or framework phase deserves its own child workflow:
 
 | Make it a **child workflow** when it… | Keep it an **activity / graph node** when it… |
 |---|---|
@@ -687,12 +701,14 @@ be its own child workflow. Use this test, per agent:
 | is **reused** by other workflows | is only ever used here |
 | must be **independently observable** in the Temporal UI | doesn't warrant its own history |
 
-Applied here: the **Dispatch** agent is the strongest candidate — it parks on a human
-signal (`ask_human`), which is exactly "a workflow as a durable async endpoint." **Fleet**
-and **Customer** are short, tool-calling, no-HITL — making them separate workflows is
-mostly overhead. So the rule of thumb: **HITL pauses and long-lived/independent units →
-workflow; quick stateless reasoning/tool steps → activity or graph node.** Don't split for
-tidiness; split when one of the rows above is actually true.
+Applied here: **Dispatch** is the clearest candidate — `ask_human` can leave it parked while
+its workflow waits for a human signal, which is exactly "a workflow as a durable async
+endpoint." That is what the cross-framework `LgDispatchWorkflow` demonstrates. On the
+LangGraph-only tab Fleet can also call `ask_human`, but both Fleet and Dispatch remain graph
+nodes because the whole team intentionally runs inline in the parent. So the rule of thumb
+is: **HITL pauses and long-lived/independent units may justify a workflow; quick, tightly
+coupled reasoning/tool steps usually stay activities or graph nodes.** Split for lifecycle
+and ownership boundaries, not tidiness alone.
 
 ### Splitting moves orchestration from the framework to Temporal
 

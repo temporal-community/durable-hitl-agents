@@ -396,6 +396,10 @@ def _submit_dispatch_tool():
 
 
 def _dispatch_tools() -> list:
+    # The dispatch agent's toolset. ask_human is the human-in-the-loop, exposed as just
+    # another tool: the agent calls it like submit_dispatch, on its own judgment. What
+    # differs is execution: its call suspends the graph on a durable interrupt (a Temporal
+    # signal + wait_condition), not an activity. That is the whole "human as a tool" pattern.
     return [_ask_human_tool(), _submit_dispatch_tool()]
 
 
