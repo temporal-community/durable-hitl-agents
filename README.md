@@ -1,4 +1,4 @@
-# Durable Human-in-the-Loop Agents 🍦
+# Ziggy's Durable HITL Agents — Multi-Agent Demo with Google ADK, LangGraph + Temporal 🍦
 
 [![Google ADK](https://img.shields.io/badge/Google%20ADK-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://google.github.io/adk-docs/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1C3C3C?style=for-the-badge&logo=langgraph&logoColor=white)](https://docs.temporal.io/develop/python/integrations/langgraph)

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "meltdown-demo"
 version = "0.1.0"
-description = "Meltdown: ice cream delivery fleet demo with ADK multi-agent reasoning + Temporal durable execution"
+description = "Ziggy's Durable HITL Agents: multi-agent demo with Google ADK, LangGraph + Temporal"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
