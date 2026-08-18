@@ -160,7 +160,8 @@ async def tool_search_venue_events(venue: str) -> str:
             model=DEFAULT_MODEL,
             contents=(
                 f"In one short sentence: any notable events today/tonight at or near {venue} in "
-                f"San Francisco that would increase catering urgency? If none, say 'no notable events'."
+                "San Francisco that would increase catering urgency? "
+                "If none, say 'no notable events'."
             ),
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())]

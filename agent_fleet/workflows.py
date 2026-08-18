@@ -125,7 +125,9 @@ WARMUP_HIDDEN = ["driver-d"]
 # pre-filter (non-platinum orders top out ~$1,950), NOT the escalation decision —
 # that stays the agent's prompt-driven call.
 GATE_REVIEW_VALUE = 2000
-GATE_ESCALATION_SECONDS = 30  # primary approver window before escalating to a backup approver (short for the demo; minutes/hours in prod)
+# Primary approver window before escalation. Intentionally short for the demo;
+# production systems would normally wait minutes or hours.
+GATE_ESCALATION_SECONDS = 30
 
 # Long-lived entity workflows keep their history bounded by periodically continuing-as-new.
 # A driver runs deliveries indefinitely, so its event history would otherwise grow until it
@@ -1058,13 +1060,14 @@ class LgDispatchWorkflow:
                     lambda: self._answer is not None or self._stop,
                     timeout=timedelta(seconds=GATE_ESCALATION_SECONDS),
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._approver_tier = "backup"
                 workflow.logger.info(
                     f"Approval timed out for {inp.order_id}, escalating to backup approver"
                 )
                 workflow.set_current_details(
-                    f"Primary approver timed out, escalated to backup: {inp.venue} (${inp.order_value:,})"
+                    "Primary approver timed out, escalated to backup: "
+                    f"{inp.venue} (${inp.order_value:,})"
                 )
                 if isinstance(self._pending_question, dict):
                     self._pending_question = {
@@ -1230,7 +1233,6 @@ class MeltdownDemoWorkflow:
         """UI tab selects which framework dispatches orders: 'adk' or 'langgraph'."""
         self._dispatch_mode = mode
         workflow.logger.info(f"Dispatch mode → {mode}")
-
 
     # --- Queries ---
 
@@ -1871,7 +1873,8 @@ class MeltdownDemoWorkflow:
         if already_assigned:
             workflow.logger.info(f"{order.order_id} already on {driver_id} — skipping signal")
         elif driver_id in self._route_handles:
-            await self._signal_driver(driver_id,
+            await self._signal_driver(
+                driver_id,
                 DriverRouteWorkflow.add_order,
                 DriverRouteOrder(
                     order_id=order.order_id,
@@ -1996,7 +1999,7 @@ class MeltdownDemoWorkflow:
                 lambda: order_id in self._dispatch_answers or self._routes_done,
                 timeout=timedelta(seconds=GATE_ESCALATION_SECONDS),
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             workflow.logger.info(
                 f"Approval timed out for {order_id}, escalating to backup approver"
             )
@@ -2369,7 +2372,8 @@ class MeltdownDemoWorkflow:
         driver_id_before_wait = self._find_driver_for_order(change.order_id)
         driver_id = driver_id_before_wait
         if driver_id and driver_id in self._route_handles:
-            await self._signal_driver(driver_id,
+            await self._signal_driver(
+                driver_id,
                 DriverRouteWorkflow.update_pending,
                 OrderUpdateInput(
                     order_id=change.order_id,
@@ -2442,7 +2446,8 @@ class MeltdownDemoWorkflow:
             # other order's hold state.
             if driver_id and driver_id in self._route_handles:
                 if driver_id != driver_id_before_wait:
-                    await self._signal_driver(driver_id,
+                    await self._signal_driver(
+                        driver_id,
                         DriverRouteWorkflow.update_pending,
                         OrderUpdateInput(
                             order_id=change.order_id,
@@ -2453,7 +2458,8 @@ class MeltdownDemoWorkflow:
                 # update_order so the order is immediately removed/updated
                 # without a wasted navigation trip
                 if change.change_type == "cancel":
-                    await self._signal_driver(driver_id,
+                    await self._signal_driver(
+                        driver_id,
                         DriverRouteWorkflow.cancel_order,
                         OrderUpdateInput(
                             order_id=change.order_id,
@@ -2461,7 +2467,8 @@ class MeltdownDemoWorkflow:
                         ),
                     )
                 elif change.change_type == "address_change":
-                    await self._signal_driver(driver_id,
+                    await self._signal_driver(
+                        driver_id,
                         DriverRouteWorkflow.update_order,
                         OrderUpdateInput(
                             order_id=change.order_id,
@@ -2472,7 +2479,8 @@ class MeltdownDemoWorkflow:
                         ),
                     )
                 # Resolve the HITL hold for active orders
-                await self._signal_driver(driver_id,
+                await self._signal_driver(
+                    driver_id,
                     DriverRouteWorkflow.resolve_update,
                     OrderUpdateInput(
                         order_id=change.order_id,
@@ -2502,7 +2510,8 @@ class MeltdownDemoWorkflow:
         else:
             # Rejected — signal child to release (deliver normally)
             if driver_id and driver_id in self._route_handles:
-                await self._signal_driver(driver_id,
+                await self._signal_driver(
+                    driver_id,
                     DriverRouteWorkflow.resolve_update,
                     OrderUpdateInput(
                         order_id=change.order_id,
