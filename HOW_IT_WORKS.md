@@ -43,7 +43,7 @@ execution Temporal uses to build its own cloud control plane.* (Note: we do **no
 call Temporal "the agent control plane" — durable execution is the substrate that
 control planes run *on*.)
 
-## The two use cases, the two frameworks
+## Two patterns, three use cases
 
 | | Pattern A — Human-in-the-loop | Pattern B — Agent-in-the-loop |
 |---|---|---|

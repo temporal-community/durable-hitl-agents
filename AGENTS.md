@@ -334,7 +334,8 @@ The server loads `.env` via `load_dotenv()`. Two keys are required for live mode
   `LgDispatchOutput(decision, reasoning, fleet_assessment, customer_assessment,
   asked_human)`.
 - Activities and workflows in separate files
-- Worker is live-only and requires `GOOGLE_API_KEY` (no mock mode)
+- Worker is live-only and requires both `GOOGLE_API_KEY` and
+  `GOOGLE_MAPS_API_KEY` (no mock mode)
 - Two API keys required: `GOOGLE_API_KEY` (Gemini, Generative Language API) and
   `GOOGLE_MAPS_API_KEY` (Directions API) — cannot be combined
 - `DEFAULT_MODEL` defaults to `gemini-2.5-flash` (swappable via env)
@@ -368,4 +369,4 @@ make run               # start the demo
 Cross-framework verification: gitignored manual spikes under `spikes/langgraph_hitl/` —
 `crossharness_smoke.py` (ADK child → LangGraph child, low-value → `DISPATCH`, no gate)
 and `crossharness_hitl_smoke.py` (high-value → child parks on `ask_human` →
-reject = `HOLD` / approve = `DISPATCH`). `uv run pytest` is green (19 pass).
+reject = `HOLD` / approve = `DISPATCH`). `uv run pytest` is green.

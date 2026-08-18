@@ -19,6 +19,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -50,7 +51,7 @@ from agent_fleet.models import (
 )
 from agent_fleet.queues import WORKFLOWS_QUEUE
 from agent_fleet.simulation import fleet
-from agent_fleet.workflows import LgDispatchWorkflow, MeltdownDemoWorkflow
+from agent_fleet.workflows import DRIVER_IDS, LgDispatchWorkflow, MeltdownDemoWorkflow
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -70,8 +71,7 @@ async def _cancel_running_workflows() -> None:
         return
     # Terminate main workflow, order generation, and all Driver routes
     workflow_ids = ["meltdown-demo", "order-generation"]
-    for letter in ["a", "b", "c", "d", "e"]:
-        workflow_ids.append(f"route-driver-{letter}")
+    workflow_ids.extend(f"route-{driver_id}" for driver_id in DRIVER_IDS)
     for wf_id in workflow_ids:
         try:
             handle = _temporal_client.get_workflow_handle(wf_id)
@@ -104,12 +104,12 @@ app = FastAPI(title="Meltdown Ice Cream Delivery", lifespan=lifespan)
 # --- Demo control endpoints ---
 
 
-_MODES = ("adk", "langgraph", "crossframework")
+DispatchMode = Literal["adk", "langgraph", "crossframework"]
 
 
 class StartRequest(BaseModel):
     # active UI tab: "adk" (Human→Agent), "langgraph" (Agent→Human), "crossframework" (3rd tab)
-    mode: str = "adk"
+    mode: DispatchMode = "adk"
 
 
 @app.post("/api/start")
@@ -118,7 +118,7 @@ async def start_demo(body: StartRequest | None = None):
     if _temporal_client is None:
         return {"error": "Temporal client not connected"}
 
-    mode = body.mode if body and body.mode in _MODES else "adk"
+    mode = body.mode if body else "adk"
     # Try to start — if a stale workflow exists, terminate and retry
     for attempt in range(3):
         try:
@@ -529,7 +529,7 @@ async def inject_high_value_order():
 
 class DispatchModeRequest(BaseModel):
     # "adk" (Human → Agent), "langgraph" (Agent → Human), "crossframework" (ADK + LangGraph)
-    mode: str = "adk"
+    mode: DispatchMode = "adk"
 
 
 @app.post("/api/dispatch-mode")

@@ -183,16 +183,24 @@ async def run_worker() -> None:
     """Connect to Temporal and run all workers until interrupted."""
     from agent_fleet.config import GOOGLE_API_KEY, GOOGLE_MAPS_API_KEY
 
-    if not GOOGLE_API_KEY:
-        logger.warning("GOOGLE_API_KEY not set — live mode requires it (mock mode removed).")
-    _create = create_worker
-    mode = "LIVE"
+    missing_keys = [
+        name
+        for name, value in (
+            ("GOOGLE_API_KEY", GOOGLE_API_KEY),
+            ("GOOGLE_MAPS_API_KEY", GOOGLE_MAPS_API_KEY),
+        )
+        if not value or value.startswith("your-")
+    ]
+    if missing_keys:
+        names = ", ".join(missing_keys)
+        raise RuntimeError(
+            f"Missing required environment variables: {names}. "
+            "Copy .env.example to .env and set both keys."
+        )
 
     maps_key = "SET" if GOOGLE_MAPS_API_KEY else "NOT SET"
     gemini_key = "SET" if GOOGLE_API_KEY else "NOT SET"
-    logger.info(
-        f"Worker mode: {mode} (GOOGLE_MAPS_API_KEY={maps_key}, GOOGLE_API_KEY={gemini_key})"
-    )
+    logger.info(f"Worker mode: LIVE (GOOGLE_MAPS_API_KEY={maps_key}, GOOGLE_API_KEY={gemini_key})")
 
     logger.info(f"Connecting to Temporal at {TEMPORAL_ADDRESS}...")
     client = await Client.connect(
@@ -201,7 +209,7 @@ async def run_worker() -> None:
             payload_converter_class=PydanticPayloadConverter,
         ),
     )
-    workers = await _create(client)
+    workers = await create_worker(client)
     logger.info(f"Workers started on queues: {WORKFLOWS_QUEUE}, {DELIVERY_QUEUE}, {AGENTS_QUEUE}")
 
     # Graceful shutdown on SIGINT/SIGTERM
@@ -216,13 +224,18 @@ async def run_worker() -> None:
     # Run all workers; cancel on shutdown signal
     tasks = [asyncio.create_task(w.run()) for w in workers]
     shutdown_task = asyncio.create_task(shutdown_event.wait())
-    done, _ = await asyncio.wait([*tasks, shutdown_task], return_when=asyncio.FIRST_COMPLETED)
-    if shutdown_event.is_set():
-        logger.info("Shutdown signal received, stopping workers...")
-        for t in tasks:
-            t.cancel()
-        heartbeat_task.cancel()
-        await asyncio.gather(*tasks, heartbeat_task, return_exceptions=True)
+    try:
+        done, _ = await asyncio.wait([*tasks, shutdown_task], return_when=asyncio.FIRST_COMPLETED)
+        if shutdown_event.is_set():
+            logger.info("Shutdown signal received, stopping workers...")
+        else:
+            exited_task = next(task for task in done if task is not shutdown_task)
+            await exited_task
+            raise RuntimeError("A Temporal worker exited unexpectedly")
+    finally:
+        for task in [*tasks, shutdown_task, heartbeat_task]:
+            task.cancel()
+        await asyncio.gather(*tasks, shutdown_task, heartbeat_task, return_exceptions=True)
         # Remove the heartbeat so the UI flips to "offline" immediately on a clean stop
         # (e.g. `make kill-worker`, which sends SIGTERM); a hard kill leaves it to age out.
         _WORKER_HEARTBEAT_PATH.unlink(missing_ok=True)
