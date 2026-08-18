@@ -1,6 +1,8 @@
+# Durable Human-in-the-Loop Agents 🍦
+
 <div align="center">
 
-<img src="frontend/img/google_adk.png" alt="Google ADK" height="26">
+<img src="frontend/img/google_adk.png" alt="Google ADK" height="26">&nbsp;<strong>Google ADK</strong>
 &nbsp;&nbsp;·&nbsp;&nbsp;
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="frontend/img/langgraph-logo.svg">
@@ -13,8 +15,6 @@
 </picture>
 
 </div>
-
-# Durable Human-in-the-Loop Agents 🍦
 
 **A visual Python demo of two durable human-in-the-loop patterns: a human changes
 an agent's work, and an agent asks a human for judgment.**
