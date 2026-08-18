@@ -30,7 +30,11 @@ and the Temporal article
 [*Durable, flexible multi-agent systems*](https://temporal.io/blog/durable-flexible-multi-agent-systems).
 
 <p align="center">
-  <img src="frontend/img/aie-world-fair-ui-demo-view.png" alt="Ziggy's Ice Cream dashboard with a live San Francisco delivery fleet and ADK and LangGraph reasoning panels" width="900">
+  <a href="frontend/img/aie-world-fair-ui-demo-view.png">
+    <img src="frontend/img/aie-world-fair-ui-demo-view.png" alt="Ziggy's Ice Cream dashboard with a live San Francisco delivery fleet and ADK and LangGraph reasoning panels" width="900">
+  </a>
+  <br>
+  <em>The live fleet, customer orders, and agent reasoning in one view. Select the image for the full-resolution capture.</em>
 </p>
 
 ## See the idea in 30 seconds
@@ -40,6 +44,18 @@ and the Temporal article
 | **Human → Agent** | A customer changes an active order | The driver waits at the venue | A supervisor's approval signal; ADK re-reasons an approved address change |
 | **Agent → Human** | A LangGraph agent calls `ask_human` mid-loop | The agent graph and its Temporal Workflow wait | A human answer signal returned as the agent's next observation |
 | **Cross-framework** | One order moves from ADK assessment to LangGraph dispatch | Either human interaction can wait durably | Temporal joins both framework children and applies the result |
+
+### Dashboard and durable history
+
+<p align="center">
+  <a href="frontend/img/aie-world-fair-ziggy-temporal-ui-split-view.png">
+    <img src="frontend/img/aie-world-fair-ziggy-temporal-ui-split-view.png" alt="Ziggy's dashboard beside the Temporal UI, showing the running cross-framework parent Workflow and its event history" width="900">
+  </a>
+  <br>
+  <em>The application view beside its Temporal event history. Select the image for the full-resolution capture.</em>
+</p>
+
+### Watch the recorded demo
 
 <p align="center">
   <a href="https://youtu.be/kTPDzsXxKFg">
