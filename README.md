@@ -1,20 +1,10 @@
-<div align="center">
-
-<img src="frontend/img/google_adk.png" alt="Google ADK" height="26">
-&nbsp;&nbsp;·&nbsp;&nbsp;
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="frontend/img/langgraph-logo.svg">
-  <img src="frontend/img/langgraph-logo-dark.svg" alt="LangGraph" height="24">
-</picture>
-&nbsp;&nbsp;·&nbsp;&nbsp;
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="frontend/img/temporal_logo.svg">
-  <img src="frontend/img/temporal_logo_dark.svg" alt="Temporal" height="26">
-</picture>
-
-</div>
-
 # Durable Human-in-the-Loop Agents 🍦
+
+[![Google ADK](https://img.shields.io/badge/Google%20ADK-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://google.github.io/adk-docs/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-1C3C3C?style=for-the-badge&logo=langgraph&logoColor=white)](https://docs.temporal.io/develop/python/integrations/langgraph)
+[![Temporal](https://img.shields.io/badge/Temporal-141414?style=for-the-badge&logo=temporal&logoColor=white)](https://temporal.io/)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-2EA44F?style=for-the-badge)](LICENSE)
 
 **A visual Python demo of two durable human-in-the-loop patterns: a human changes
 an agent's work, and an agent asks a human for judgment.**
